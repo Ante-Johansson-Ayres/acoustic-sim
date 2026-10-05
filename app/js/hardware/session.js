@@ -25,6 +25,7 @@ export class HardwareSession extends EventTarget {
     this.ws = null;
     this.init = null;
     this.frame = null;
+    this.knownConfiguration = null;
     this.link = 'disconnected';       // disconnected | connecting | online | fault
     this.linkDetail = 'Not connected';
     this.cellTimes = [];
@@ -58,7 +59,7 @@ export class HardwareSession extends EventTarget {
   }
 
   get ready() {
-    return this.open && this.link === 'online' && Boolean(this.init?.configuration);
+    return this.open && this.link === 'online' && Boolean(this.configuration);
   }
 
   get transport() {
@@ -219,6 +220,7 @@ export class HardwareSession extends EventTarget {
   clearPresentation() {
     this.init = null;
     this.frame = null;
+    this.knownConfiguration = null;
     this.frozen = false;
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
@@ -366,15 +368,9 @@ export class HardwareSession extends EventTarget {
 
   onMessage(message) {
     if (message.type === 'init') {
-      const previous = this.init?.configuration;
       this.init = message;
       const cfg = message.configuration;
-      const changed = cfg && (!previous || previous.rows !== cfg.rows ||
-        previous.columns !== cfg.columns || previous.microphones !== cfg.microphones);
-      if (changed) {
-        this.resetFreshness(cfg);
-        this.addEvent('CONFIG', `${cfg.rows} × ${cfg.columns} grid, ${cfg.sectors} sectors, ${cfg.microphones} microphones`);
-      }
+      this.noteConfiguration(cfg);
       this.setLink('online', cfg ? 'Connected' : 'Connected, waiting for firmware information');
       this.emit('init');
       this.emit('frame');
@@ -383,8 +379,11 @@ export class HardwareSession extends EventTarget {
     if (message.type === 'frame') {
       const previous = this.frame;
       const advanced = message.sequence !== previous?.sequence;
+      // Serial firmware answers I after the init message, so the grid often arrives in a frame.
+      const configChanged = this.noteConfiguration(message.configuration);
       if (advanced) this.updateFreshness(message, previous);
       this.frame = message;
+      if (configChanged) this.emit('init');
       if (!message.connected) this.setLink('fault', `Link fault on ${message.transport}`);
       else if (this.link !== 'online') this.setLink('online', 'Connected');
       if (advanced) {
@@ -421,6 +420,16 @@ export class HardwareSession extends EventTarget {
   }
 
   // ── Freshness ──────────────────────────────────────────────────────────
+
+  noteConfiguration(cfg) {
+    const known = this.knownConfiguration;
+    if (!cfg || (known && known.rows === cfg.rows && known.columns === cfg.columns &&
+        known.microphones === cfg.microphones)) return false;
+    this.knownConfiguration = cfg;
+    this.resetFreshness(cfg);
+    this.addEvent('CONFIG', `${cfg.rows} × ${cfg.columns} grid, ${cfg.sectors} sectors, ${cfg.microphones} microphones`);
+    return true;
+  }
 
   resetFreshness(cfg = null) {
     this.cellTimes = cfg
