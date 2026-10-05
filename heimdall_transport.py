@@ -260,7 +260,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
                  elevation_min_deg: float = -60.0, elevation_max_deg: float = 60.0,
                  sector_time_s: float = 0.0028, flight_profile: str = "crossing",
                  flight_speed: float = 1.0, clock=time.monotonic,
-                 level_provider=None) -> None:
+                 level_provider=None, taper_sigma: float = 0.0) -> None:
         HeimdallTransport.__init__(self, clock=clock)
         threading.Thread.__init__(self, daemon=True)
         if not 1 <= rows <= 20 or not 1 <= columns <= 20:
@@ -281,6 +281,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.flight_profile = flight_profile
         self.flight_speed = flight_speed
         self.level_provider = level_provider
+        self.taper_sigma_milli = int(round(taper_sigma * 1000.0))
         self.commands: queue.Queue[str] = queue.Queue()
         self.mode = "IDLE"
         self.transport_name = "acoustic-emulator" if level_provider is not None else "emulator"
@@ -366,6 +367,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.apply_line(f"READY,2D,{self.rows},{self.columns},{sectors},44")
         self.apply_line("AZIMUTH," + str(self.columns) + "," + ",".join(_format_angle(v) for v in self.azimuth_deg))
         self.apply_line("ELEVATION," + str(self.rows) + "," + ",".join(_format_angle(v) for v in self.elevation_deg))
+        self.apply_line(f"TAPER,{self.taper_sigma_milli},44,44,0")
 
     def _scan_pass(self, mode: str) -> None:
         started = time.monotonic()

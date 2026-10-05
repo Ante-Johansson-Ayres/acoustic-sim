@@ -27,8 +27,10 @@ from typing import Any
 
 SCHEMA = "heimdall-dsp-registry-v1"
 MAX_WORDS_PER_COMMAND = 5
-DEFAULT_EXPORT = (Path(__file__).resolve().parent.parent / "MAX78002" / "SigmaStudioExport"
-                  / "MICCANVAS_SS+_BEAMFORM_Golden_Image_ADAU1467_0.json")
+EXPORT_DIR = Path(__file__).resolve().parent.parent / "MAX78002" / "SigmaStudioExport"
+EXPORT_SUFFIX = "_ADAU1467_0.json"
+# The detector the firmware reads during a scan (BEAM_LEVEL_READBACK_ADDR).
+SCAN_DETECTOR = "SingleBandwNumericalDisplay_Beam1"
 
 # First microphone (DSP index) behind channel 0 of each mute block, from the
 # Golden Image schematic. Confirm with the DSP owner when the project changes.
@@ -55,33 +57,46 @@ TYPES = {"FixPoint8d24": "8.24", "Integer32": "int32"}
 
 
 def export_path() -> Path:
+    """HEIMDALL_DSP_EXPORT, else the single SigmaStudio export in MAX78002."""
     override = os.environ.get("HEIMDALL_DSP_EXPORT")
-    return Path(override) if override else DEFAULT_EXPORT
+    if override:
+        return Path(override)
+    exports = sorted(EXPORT_DIR.glob(f"*{EXPORT_SUFFIX}"))
+    if len(exports) != 1:
+        names = ", ".join(path.name for path in exports) or "none"
+        raise FileNotFoundError(f"expected exactly one *{EXPORT_SUFFIX} in {EXPORT_DIR}, found: {names}")
+    return exports[0]
 
 
-def _classify(algo: str, param: str) -> tuple[str, int | None]:
-    match = re.fullmatch(r"(Gain|FIR_Stage1|FIR_Stage2|Delay)_DSP(\d+)", algo)
+def _classify(algo: str, param: str) -> tuple[str, int | None, int | None]:
+    """(group, microphone, beam). Beam 1 delays are Delay_DSPxx; beams 2-4 add _1.._3."""
+    match = re.fullmatch(r"(Gain|FIR_Stage1|FIR_Stage2)_DSP(\d+)", algo)
     if match:
-        kind = {"Gain": "gains", "FIR_Stage1": "fir1", "FIR_Stage2": "fir2", "Delay": "delays"}[match.group(1)]
-        return kind, int(match.group(2))
+        kind = {"Gain": "gains", "FIR_Stage1": "fir1", "FIR_Stage2": "fir2"}[match.group(1)]
+        return kind, int(match.group(2)), None
+    match = re.fullmatch(r"Delay_DSP(\d+)(?:_(\d))?", algo)
+    if match:
+        return "delays", int(match.group(1)), 1 + int(match.group(2) or 0)
     if algo in MUTE_BLOCK_FIRST_MIC:
         channel = re.search(r"(\d+)$", param)
-        return "mutes", MUTE_BLOCK_FIRST_MIC[algo] + int(channel.group(1)) if channel else None
-    if algo.startswith("SingleBandwNumericalDisplay"):
-        return "detector", None
-    if algo == "Beamformer_Output_Gain" or algo.startswith("SingleVolumeControl"):
-        return "output", None
+        return "mutes", MUTE_BLOCK_FIRST_MIC[algo] + int(channel.group(1)) if channel else None, None
+    if algo == SCAN_DETECTOR:
+        return "detector", None, 1
+    if algo.startswith("Beamformer_Output_Gain") or algo.startswith("SingleVolumeControl"):
+        return "output", None, None
     if algo == "Safeload":
-        return "system", None
-    return "other", None
+        return "system", None, None
+    return "other", None, None
 
 
-def _policy(group: str, param: str) -> tuple[bool, str]:
+def _policy(group: str, param: str, beam: int | None) -> tuple[bool, str]:
     if group in ("gains", "fir1", "fir2", "mutes", "detector", "output"):
         return True, ""
     if group == "delays":
         if param == "MaxDelay":
             return False, "fixed by the program"
+        if beam != 1:
+            return False, f"beam {beam} is not steered by the firmware yet"
         return False, "written by the scan engine on every steer"
     if group == "system":
         return False, "used by the firmware for every write"
@@ -109,8 +124,8 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
     for module in modules:
         algo = str(module.get("AlgoName", ""))
         for param in module.get("ModuleParameter", []) or []:
-            group, mic = _classify(algo, str(param.get("Name", "")))
-            writable, reason = _policy(group, str(param.get("Name", "")))
+            group, mic, beam = _classify(algo, str(param.get("Name", "")))
+            writable, reason = _policy(group, str(param.get("Name", "")), beam)
             words = max(1, int(param.get("Size", 4)) // 4)
             defaults = _words(str(param.get("Data", "")))
             parameters.append({
@@ -119,6 +134,7 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
                 "name": param.get("Name"),
                 "group": group,
                 "mic": mic,
+                "beam": beam,
                 "address": int(param["Address"]),
                 "words": words,
                 "type": TYPES.get(param.get("DataType"), str(param.get("DataType"))),
@@ -140,6 +156,19 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
         if address not in covered:
             states.append({"name": name, "address": address})
     states.sort(key=lambda item: item["address"])
+
+    # AddressMap is keyed by the block's internal name, not its label; the
+    # scan detector's TCONST address links the two (as in the beam table generator).
+    address_map = schematic.get("AddressMap") or {}
+    tconst = next((p["address"] for p in parameters
+                   if p["block"] == SCAN_DETECTOR and p["name"] == "TCONST"), None)
+    level_readback_address = None
+    for name, info in address_map.items():
+        if tconst is not None and name.endswith("TCONST") and str(info.get("Address")) == str(tconst):
+            rms = address_map.get(name[:-len("TCONST")] + "rms")
+            if rms is not None:
+                level_readback_address = int(rms["Address"])
+            break
 
     groups = []
     for key, label in GROUPS.items():
@@ -165,6 +194,7 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
         "states": states,
         "groups": groups,
         "writable_words": sum(item["words"] for item in parameters if item["writable"]),
+        "level_readback_address": level_readback_address,
     }
 
 

@@ -52,6 +52,11 @@ export function createView(container, {session}) {
     else if (status && !status.supported) { text = status.reason; tone = 'fault'; }
     else if (status && !status.idle) { text = 'Scan running · writes wait until it stops'; tone = 'connecting'; }
     else if (status) { text = `Device idle · register map ${dsp.registry?.export?.sha256?.slice(0, 8) || ''}… from ${dsp.registry?.export?.file || 'the export'}`; tone = 'online'; }
+    const taper = session.latest?.taper;
+    if (session.open && taper && !dsp.error) {
+      if (taper.applied) text += ` · boot taper σ ${taper.sigma.toFixed(2)}, ${taper.verified} gains verified`;
+      else { text += ` · boot taper not in place: ${taper.verified}/${taper.written} gains verified, code ${taper.code}`; tone = 'connecting'; }
+    }
     devState.dataset.state = tone;
     setText(devText, text);
     const locked = !status?.supported;

@@ -104,12 +104,13 @@ class BeamContract:
     delay_fixpt: np.ndarray
     delay_samples: np.ndarray
     fir_stages: tuple[np.ndarray, ...]
+    gains: np.ndarray
 
 
 @dataclass(frozen=True)
 class AcousticGridSpec:
-    rows: int = 6
-    columns: int = 6
+    rows: int = 7
+    columns: int = 7
     azimuth_min_deg: float = -40.0
     azimuth_max_deg: float = 40.0
     elevation_min_deg: float = -40.0
@@ -223,6 +224,14 @@ def load_beam_contract(path=DEFAULT_CONTRACT_PATH,
     if len(fir_stages) != 2:
         raise ValueError("beam contract must contain two common FIR stages")
 
+    # Per-microphone gains the firmware writes at boot (compiled gain x taper).
+    # Contracts from before the taper have none and mean unity.
+    gain_words = data.get("gain_fixpt_8_24") or []
+    gains = (np.asarray([_signed_8_24(int(value)) for value in gain_words], dtype=np.float64)
+             if gain_words else np.ones(microphones))
+    if gains.shape != (microphones,) or not np.all(np.isfinite(gains)) or np.any(gains < 0.0):
+        raise ValueError("beam contract microphone gains are invalid")
+
     return BeamContract(
         path=path,
         source_sha256=str(data["source_c_header_sha256"]).lower(),
@@ -240,6 +249,7 @@ def load_beam_contract(path=DEFAULT_CONTRACT_PATH,
         delay_fixpt=delay_fixpt,
         delay_samples=delay_samples,
         fir_stages=tuple(fir_stages),
+        gains=gains,
     )
 
 
@@ -480,7 +490,9 @@ def _beam_transfer_powers(contract: BeamContract, microphone_transfer: np.ndarra
         -2j * np.pi * frequencies[None, None, :]
         * contract.delay_samples[:, :, None] / contract.sampling_rate_hz
     )
-    effective = np.mean(microphone_transfer[None, :, :] * phase, axis=1)
+    effective = np.mean(
+        microphone_transfer[None, :, :] * phase * contract.gains[None, :, None], axis=1
+    )
     fir = _combined_fir(contract) if detector_fir is None else detector_fir
     fir_response = np.fft.rfft(fir, signal_fft_size)
     return np.square(np.abs(effective * fir_response[None, :]))
@@ -518,7 +530,8 @@ def _plane_wave_transfer_powers(contract: BeamContract, directions: np.ndarray,
         * contract.delay_samples[:, :, None] / contract.sampling_rate_hz
     )
     response = np.mean(
-        acoustic_phase[:, None, :, :] * steering_phase[None, :, :, :], axis=2
+        acoustic_phase[:, None, :, :] * steering_phase[None, :, :, :]
+        * contract.gains[None, None, :, None], axis=2
     )
     fir = _combined_fir(contract) if detector_fir is None else detector_fir
     fir_response = np.fft.rfft(fir, signal_fft_size)
@@ -608,14 +621,14 @@ def _render_source_to_microphones(signal: np.ndarray,
 
 
 def _beamform_microphone_audio(signals: np.ndarray, delay_samples: np.ndarray,
-                               sampling_rate_hz: int) -> np.ndarray:
+                               sampling_rate_hz: int, gains: np.ndarray) -> np.ndarray:
     fft_size = next_fast_len(signals.shape[1])
     frequencies = np.fft.rfftfreq(fft_size, 1.0 / sampling_rate_hz)
     spectra = np.fft.rfft(signals, fft_size, axis=1)
     phase = np.exp(
         -2j * np.pi * frequencies[None, :] * delay_samples[:, None] / sampling_rate_hz
     )
-    return np.fft.irfft(np.mean(spectra * phase, axis=0), fft_size)[:signals.shape[1]]
+    return np.fft.irfft(np.mean(spectra * phase * gains[:, None], axis=0), fft_size)[:signals.shape[1]]
 
 
 def _direction_delay_samples(contract: BeamContract, azimuth_deg: float,
@@ -725,11 +738,13 @@ def render_acoustic_audition(cache: AcousticCache, start_s: float = 0.0,
                 microphone_audio,
                 _direction_delay_samples(deployment, truth_azimuth, truth_elevation),
                 contract.sampling_rate_hz,
+                contract.gains,
             ),
             "selected": _beamform_microphone_audio(
                 microphone_audio,
                 contract.delay_samples[selected_sector],
                 contract.sampling_rate_hz,
+                contract.gains,
             ),
         },
     }

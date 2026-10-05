@@ -127,7 +127,7 @@ def test_emulator_connect_command_stream_and_disconnect():
 
 def test_acoustic_prepare_connect_and_stream(monkeypatch, tmp_path):
     levels_path = tmp_path / "levels_raw.npy"
-    np.save(levels_path, np.full((4, 36), 1000, dtype=np.uint32))
+    np.save(levels_path, np.full((4, 49), 1000, dtype=np.uint32))
     manifest = {
         "schema": ACOUSTIC_MODEL_VERSION,
         "cache_id": "acoustic-test",

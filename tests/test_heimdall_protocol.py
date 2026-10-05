@@ -102,6 +102,27 @@ def test_target_and_timing_records():
     assert state.snapshot()["target"] is None
 
 
+def test_taper_record_reports_whether_every_gain_was_verified():
+    state = HeimdallState()
+    state.apply_line("READY,2D,7,7,49,44")
+    state.apply_line("TAPER,1500,44,44,0")
+    assert state.snapshot()["taper"] == {"sigma": 1.5, "written": 44, "verified": 44, "code": 0, "applied": True}
+    state.apply_line("TAPER,1500,44,40,0")
+    assert not state.snapshot()["taper"]["applied"]
+    state.apply_line("TAPER,0,5,0,-5")
+    assert state.snapshot()["taper"] == {"sigma": 0.0, "written": 5, "verified": 0, "code": -5, "applied": False}
+    for line in ("TAPER,1,44,44", "TAPER,-1,44,44,0", "TAPER,0,44,x,0"):
+        with pytest.raises(ProtocolError):
+            parse_line(line)
+
+
+def test_emulator_reports_the_configured_taper():
+    emulator = EmulatorHeimdallTransport(rows=2, columns=2, taper_sigma=0.75)
+    emulator._emit_configuration()
+    assert emulator.snapshot()["taper"]["sigma"] == 0.75
+    assert emulator.snapshot()["taper"]["applied"]
+
+
 def test_one_shot_scan_returns_to_idle_on_completion():
     state = HeimdallState()
     state.apply_line("READY,2D,2,2,4,44")

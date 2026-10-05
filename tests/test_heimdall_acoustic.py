@@ -42,9 +42,11 @@ def test_deployment_contract_dimensions_delays_and_fir():
     contract = load_beam_contract()
     assert contract.sampling_rate_hz == 48000
     assert contract.max_delay_samples == 68
-    assert (contract.rows, contract.columns, contract.sectors, contract.microphones) == (6, 6, 36, 44)
-    assert contract.delay_fixpt.shape == (36, 44)
-    assert contract.delay_samples.shape == (36, 44)
+    assert (contract.rows, contract.columns, contract.sectors, contract.microphones) == (7, 7, 49, 44)
+    assert contract.delay_fixpt.shape == (49, 44)
+    assert contract.delay_samples.shape == (49, 44)
+    assert contract.gains.shape == (44,)
+    assert np.all(contract.gains > 0.0)
     assert np.all(contract.delay_samples >= 0.0)
     assert np.max(contract.delay_samples) <= 68.0
     assert len(contract.fir_stages) == 2

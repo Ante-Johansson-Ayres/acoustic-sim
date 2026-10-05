@@ -196,6 +196,12 @@ export function createView(container, {session}) {
       `last sample ${Number.isFinite(age) ? formatAge(age) + ' ago' : 'none yet'}`,
       `${frame?.protocol_errors ?? 0} protocol warnings`,
     ];
+    const taper = frame?.taper;
+    if (taper) {
+      parts.push(taper.applied
+        ? `taper σ ${taper.sigma.toFixed(2)}`
+        : `taper not in place (${taper.verified}/${taper.written} gains verified, code ${taper.code})`);
+    }
     if (session.frozen) parts.push('display frozen');
     setText(footLeft, parts.join(' · '));
     const source = {

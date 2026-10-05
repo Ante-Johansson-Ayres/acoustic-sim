@@ -51,7 +51,7 @@ function gridFields(prefix, defaults) {
   };
 }
 
-const DEPLOYED_GRID = {rows: 6, columns: 6, azimuth_min_deg: -40, azimuth_max_deg: 40, elevation_min_deg: -40, elevation_max_deg: 40};
+const DEPLOYED_GRID = {rows: 7, columns: 7, azimuth_min_deg: -40, azimuth_max_deg: 40, elevation_min_deg: -40, elevation_max_deg: 40};
 
 /** The prepared acoustic scene, shared by the connect form and the audition controls. */
 export class AcousticScene extends EventTarget {
@@ -166,7 +166,7 @@ export class ConnectionPanel {
     this.flight = h('select', {id: 'emu-flight', class: 'select'}, options(FLIGHT_PROFILES, 'crossing'));
     this.speed = h('select', {id: 'emu-speed', class: 'select'}, options(SPEEDS, '1'));
     this.emulatorForm = h('form', {class: 'connect-form', hidden: true, onSubmit: (event) => { event.preventDefault(); this.connectEmulator(); }},
-      h('p', {class: 'lede'}, 'A protocol-faithful stand-in for the firmware. It answers the same commands with a simulated drone flight. The deployed table is 6 × 6 over ±40°.'),
+      h('p', {class: 'lede'}, 'A protocol-faithful stand-in for the firmware. It answers the same commands with a simulated drone flight. The deployed table is 7 × 7 over ±40°.'),
       this.emuGrid.el,
       h('div', {class: 'form-row'},
         h('div', {class: 'field'}, h('label', {for: 'emu-flight'}, 'Flight profile'), this.flight),
@@ -186,7 +186,7 @@ export class ConnectionPanel {
     this.acProgress = h('progress', {max: 100, value: 0});
     this.acStatus = h('p', {class: 'field__hint', role: 'status'});
     this.acousticForm = h('form', {class: 'connect-form', hidden: true, onSubmit: (event) => { event.preventDefault(); this.connectAcoustic(); }},
-      h('p', {class: 'lede'}, 'Simulates the real array in a room with PyRoomAcoustics, then replays the levels through the emulator. The 6 × 6, ±40° grid reuses the exact firmware delays.'),
+      h('p', {class: 'lede'}, 'Simulates the real array in a room with PyRoomAcoustics, then replays the levels through the emulator. The 7 × 7, ±40° grid reuses the exact firmware delays.'),
       h('div', {class: 'form-row'}, h('div', {class: 'field'}, h('label', {for: 'ac-scenario'}, 'Scenario'), this.scenario)),
       this.acGrid.el,
       h('div', {class: 'toolbar'}, this.prepareButton, this.cancelButton),

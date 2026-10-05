@@ -121,8 +121,44 @@ def test_service_memory_resets_when_the_transport_changes(small_registry):
     assert service.status(_Transport())["modified_words"] == 0
 
 
+def test_multibeam_delays_detectors_and_outputs(tmp_path):
+    registry = dsp_registry.load_registry(_export(tmp_path, {
+        "Delay_DSP05": [("DelayPercentage", 10, 1, "FixPoint8d24", [0])],
+        "Delay_DSP05_2": [("DelayPercentage", 11, 1, "FixPoint8d24", [0])],
+        "SingleBandwNumericalDisplay_Beam1": [("TCONST", 20, 1, "FixPoint8d24", [0])],
+        "SingleBandwNumericalDisplay_Beam2": [("TCONST", 21, 1, "FixPoint8d24", [0])],
+        "Beamformer_Output_Gain_3": [("Gain", 30, 1, "FixPoint8d24", [_word(1.0)])],
+    }, {"SingleBandwNumericalDisplay_3TCONST": {"Address": 20}, "SingleBandwNumericalDisplay_3rms": {"Address": 23},
+        "SingleBandwNumericalDisplay_4TCONST": {"Address": 21}, "SingleBandwNumericalDisplay_4rms": {"Address": 27}}))
+    assert registry["level_readback_address"] == 23
+    by_block = {p["block"]: p for p in registry["parameters"]}
+    assert (by_block["Delay_DSP05"]["group"], by_block["Delay_DSP05"]["mic"], by_block["Delay_DSP05"]["beam"]) == ("delays", 5, 1)
+    assert (by_block["Delay_DSP05_2"]["group"], by_block["Delay_DSP05_2"]["mic"], by_block["Delay_DSP05_2"]["beam"]) == ("delays", 5, 3)
+    assert "beam 3" in by_block["Delay_DSP05_2"]["reason"]
+    # Only the detector the firmware scans with is editable as "the" level detector.
+    assert by_block["SingleBandwNumericalDisplay_Beam1"]["group"] == "detector"
+    assert by_block["SingleBandwNumericalDisplay_Beam2"]["group"] == "other"
+    assert by_block["Beamformer_Output_Gain_3"]["group"] == "output"
+
+
+def test_export_discovery_requires_exactly_one_export(tmp_path, monkeypatch):
+    monkeypatch.delenv("HEIMDALL_DSP_EXPORT", raising=False)
+    monkeypatch.setattr(dsp_registry, "EXPORT_DIR", tmp_path)
+    with pytest.raises(FileNotFoundError, match="none"):
+        dsp_registry.export_path()
+    (tmp_path / "A_ADAU1467_0.json").write_text("{}")
+    assert dsp_registry.export_path().name == "A_ADAU1467_0.json"
+    (tmp_path / "B_ADAU1467_0.json").write_text("{}")
+    with pytest.raises(FileNotFoundError, match="exactly one"):
+        dsp_registry.export_path()
+    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", str(tmp_path / "B_ADAU1467_0.json"))
+    assert dsp_registry.export_path().name == "B_ADAU1467_0.json"
+
+
 def test_dsp_api_against_the_emulator():
-    if not dsp_registry.export_path().is_file():
+    try:
+        dsp_registry.export_path()
+    except FileNotFoundError:
         pytest.skip("SigmaStudio export not present next to acoustic-sim")
     with TestClient(sim_server.app) as client:
         registry = client.get("/dsp/registry").json()

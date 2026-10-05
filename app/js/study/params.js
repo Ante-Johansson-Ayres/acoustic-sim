@@ -475,8 +475,13 @@ export function parametersScreen({canWrite}) {
       if (!entry || !entry.param.writable || word === null) return;
       dsp.stage([{address: a, word}], `Raw write at ${a}`);
     }
+    function quickAddresses() {
+      const delay = dsp.registry?.parameters.find((p) => p.group === 'delays' && p.mic === 0 && p.beam === 1 && p.name === 'DelayPercentage');
+      return [dsp.param('gains', 0)?.address, dsp.param('detector', undefined, 'TCONST')?.address,
+        dsp.registry?.level_readback_address, delay?.address].filter(Number.isFinite).map(String);
+    }
     function render() {
-      quick.replaceChildren(h('span', {class: 'note'}, 'Try'), ...['1179', '1120', '1123', '719'].map((a) =>
+      quick.replaceChildren(h('span', {class: 'note'}, 'Try'), ...quickAddresses().map((a) =>
         h('button', {type: 'button', class: 'chip-button', onClick: () => { state.rawAddr = a; address.value = a; render(); }}, a)));
       const a = parseAddress();
       const entry = Number.isFinite(a) ? dsp.index.get(a) : null;

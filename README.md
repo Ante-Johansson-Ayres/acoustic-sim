@@ -65,7 +65,7 @@ WebSocket path as serial hardware:
 Open the Hardware tab and use `Sweep once`, `Continuous`, `Track`, `Stop`,
 `Sector` + `Steer`, or `Monitor`. Without `--emulator`, pick `Emulator` in the
 connection panel and click `Start emulator`; its grid defaults to the deployed
-6x6 table over ±40°. The emulator supplies a moving target and is suitable for
+7x7 table over ±40°. The emulator supplies a moving target and is suitable for
 GUI, protocol, reconnect, and command testing.
 
 Adaptive `Track` follows the firmware policy: one complete search, two local
@@ -135,7 +135,7 @@ of milliseconds. Preparation reports stage, overall progress, and RIR ETA and
 can be canceled between RIR calculations.
 
 Rows, columns, and azimuth/elevation FOV are adjustable from 1x1 through 20x20
-for both simulator models. The default 6x6, ±40° acoustic grid uses the exact
+for both simulator models. The default 7x7, ±40° acoustic grid uses the exact
 deployed delay table; the footer then reads "acoustic room with the firmware
 delays". Other acoustic grids generate quantized simulation-only delays ("acoustic
 room with simulated delays"); they
@@ -159,7 +159,7 @@ After the scene is ready, click `Start acoustic emulator`, then use the normal
 
 The Hardware view keeps grid ownership explicit. The fast kinematic emulator
 can use an arbitrary 1-20 row/column grid and FOV. Acoustic mode fixes the grid
-chosen when the scene was prepared, and the default 6x6 grid comes from the
+chosen when the scene was prepared, and the default 7x7 grid comes from the
 generated deployment contract. Serial mode is also read-only because the
 connected firmware reports the grid compiled into its beam table; changing it
 requires regenerating the table and reflashing the device.
@@ -233,7 +233,13 @@ The host sends `I` on connection so a late GUI receives:
 READY,2D,<rows>,<columns>,<sectors>,<microphones>
 AZIMUTH,<count>,...
 ELEVATION,<count>,...
+TAPER,<sigma_milli>,<written>,<verified>,<code>
 ```
+
+`TAPER` is the firmware's report of the per-microphone gains it writes at boot
+and on every `I` (compiled gain times taper, read back). The Hardware footer and
+the Study status bar show it; anything other than all 44 verified with code 0 is
+flagged as "taper not in place".
 
 The UI supports generated grids up to 20x20 and forwards `S/F/C/G/X/I/M/R/D` firmware
 commands over the existing `/realtime_hw` WebSocket.
@@ -244,7 +250,7 @@ downloads. Firmware captures 48 kHz mono PCM16 through the onboard MAX9867,
 buffers up to 30 seconds in APS6404, and transfers finalized audio with exact
 byte framing and CRC32. The backend packages verified PCM as a downloadable WAV.
 
-The acoustic emulator is intentionally tied to the deployed 6x6 machine-readable
+The acoustic emulator is intentionally tied to the deployed 7x7 machine-readable
 contract under `data/heimdall_acoustic_contract.json`. It refuses to start if
 the contract's recorded C-header hash differs from the actual firmware
 `beam_table_2d.h` (the header is LF-normalised before hashing, so Windows CRLF

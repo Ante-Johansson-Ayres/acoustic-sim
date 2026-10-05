@@ -66,13 +66,13 @@ The current GUI allow-list is in `dsp_registry.py` (`_policy`).
 ## Write planning (host side)
 
 The host merges the requested words, sorts by address, and cuts them into runs
-of consecutive addresses of at most five words. Examples from the Golden Image:
+of consecutive addresses of at most five words. Examples from the MultiBeam export:
 
 | Change | Words | Commands |
 | --- | --- | --- |
-| Gain taper on all 44 microphones (gains happen to be contiguous, 1134–1177) | 44 | 9 |
+| Gain taper on all 44 microphones (gains happen to be contiguous, 1412–1455) | 44 | 9 |
 | One FIR stage on all 44 microphones (11 contiguous taps per filter, filters scattered) | 484 | 132 |
-| All 44 fractional delays (addresses step by −24) | 44 | 44 |
+| All 44 beam 1 fractional delays (scattered) | 44 | 44 |
 | Detector time constant | 1 | 1 |
 
 If a later compile interleaves blocks differently, the same code simply produces

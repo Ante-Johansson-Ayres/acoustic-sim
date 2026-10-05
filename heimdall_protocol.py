@@ -80,6 +80,15 @@ def parse_line(line: str) -> dict[str, Any]:
             "angles_deg": [_number(value, "angle") for value in parts[2:]],
         }
 
+    if record_type == "TAPER" and len(parts) == 5:
+        return {
+            "type": "taper",
+            "sigma": _integer(parts[1], "taper sigma", 0, 100000) / 1000.0,
+            "written": _integer(parts[2], "written gains", 0, 255),
+            "verified": _integer(parts[3], "verified gains", 0, 255),
+            "code": _signed_integer(parts[4], "error code"),
+        }
+
     if record_type == "P" and len(parts) == 6:
         return {
             "type": "measurement",
@@ -240,6 +249,7 @@ class HeimdallState:
         self.recording_state = "idle"
         self.last_recording: dict[str, Any] | None = None
         self.audio_transfer: dict[str, Any] | None = None
+        self.taper: dict[str, Any] | None = None
 
     def apply_line(self, line: str) -> dict[str, Any]:
         record = parse_line(line)
@@ -292,6 +302,12 @@ class HeimdallState:
             self._learn_angles(record)
         elif record_type == "timing":
             self.last_timing = record
+        elif record_type == "taper":
+            microphones = self.configuration.microphones if self.configuration else record["written"]
+            self.taper = {
+                **{key: record[key] for key in ("sigma", "written", "verified", "code")},
+                "applied": record["code"] == 0 and record["written"] == record["verified"] == microphones,
+            }
         elif record_type.startswith("target_"):
             self._validate_grid_position(record)
             self._learn_angles(record)
@@ -361,6 +377,7 @@ class HeimdallState:
             "recording_state": self.recording_state,
             "last_recording": deepcopy(self.last_recording),
             "audio_transfer": deepcopy(self.audio_transfer),
+            "taper": deepcopy(self.taper),
         }
 
     def _require_configuration(self) -> None:

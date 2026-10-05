@@ -1002,6 +1002,7 @@ def hw_connect(request: HardwareConnectRequest):
                 elevation_max_deg=request.elevation_max_deg,
                 flight_profile=request.flight_profile,
                 flight_speed=request.flight_speed,
+                taper_sigma=_deployed_taper_sigma(),
             )
         elif request.transport == "acoustic":
             cache = _acoustic_preparation.ready_cache(request.acoustic_cache_id)
@@ -1018,6 +1019,7 @@ def hw_connect(request: HardwareConnectRequest):
                 elevation_min_deg=float(grid["elevation_min_deg"]),
                 elevation_max_deg=float(grid["elevation_max_deg"]),
                 level_provider=AcousticCacheLevelProvider(cache),
+                taper_sigma=_deployed_taper_sigma(),
             )
         elif request.transport == "serial":
             if not request.port:
@@ -1115,6 +1117,7 @@ def hw_status():
         "configuration": snapshot["configuration"],
         "scan_count": snapshot["scan_count"],
         "protocol_errors": snapshot["protocol_errors"],
+        "taper": snapshot.get("taper"),
     }
 
 
@@ -1154,11 +1157,17 @@ def _array_layout():
                 "units": "mm",
                 "coordinate_system": data.get("coordinate_system"),
                 "positions": positions,
+                "taper_sigma": float(data.get("taper_sigma", 0.0)),
             }
         except (OSError, ValueError, KeyError, TypeError):
             layout = None
         _ARRAY_LAYOUT_CACHE["layout"] = layout
     return _ARRAY_LAYOUT_CACHE["layout"]
+
+
+def _deployed_taper_sigma():
+    """Taper sigma of the deployed table, so the emulators report what the firmware would."""
+    return (_array_layout() or {}).get("taper_sigma", 0.0)
 
 
 # ── Study: DSP parameters (register map from the SigmaStudio export) ─────────
@@ -1415,6 +1424,7 @@ def _hardware_payload(payload_type, snapshot):
         "audio_download_ready": snapshot["audio_download_ready"],
         "audio_download_error": snapshot["audio_download_error"],
         "protocol_errors": snapshot["protocol_errors"],
+        "taper": snapshot.get("taper"),
         "est_az_deg": estimated_azimuth,
         "est_el_deg": estimated_elevation,
         "true_az_deg": _hw_true_az_deg,
