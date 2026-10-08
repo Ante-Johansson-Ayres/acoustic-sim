@@ -104,7 +104,7 @@ tracking stress model, not a room-acoustics or drone-signature simulation.
 
 The connection panel's `Acoustic room` tab offers the cached acoustic emulator. It replaces the fast Gaussian level provider with cached detector
 levels generated from `drone.wav`, `crowd.wav`, a 48 kHz room model, the exact
-44-microphone DSP-order geometry, the deployed `beam_table_2d.h` delays, and the
+44-microphone DSP-order geometry, the deployed beam table delays, and the
 intended 1-4 kHz detector band-pass. It still uses the same firmware-equivalent
 commands and adaptive state machine.
 
@@ -233,13 +233,19 @@ The host sends `I` on connection so a late GUI receives:
 READY,2D,<rows>,<columns>,<sectors>,<microphones>
 AZIMUTH,<count>,...
 ELEVATION,<count>,...
+DSP,<program>,<per_mic|lut>,<steer_words>,<read>,<matched>,<code>
 TAPER,<sigma_milli>,<written>,<verified>,<code>
+TABLES,<words>,<written>,<verified>,<code>
 ```
 
-`TAPER` is the firmware's report of the per-microphone gains it writes at boot
-and on every `I` (compiled gain times taper, read back). The Hardware footer and
-the Study status bar show it; anything other than all 44 verified with code 0 is
-flagged as "taper not in place".
+`DSP` is the firmware's check that the ADAU1467 runs the program it was built
+for. On a mismatch it writes nothing and refuses to steer: the Hardware footer
+reports the mismatch, and the Study screen locks its writes because the register
+map does not apply. `TAPER` is the per-microphone gains it writes at boot and on
+every `I` (compiled gain times taper, read back); anything other than all 44
+verified with code 0 is flagged as "taper not in place". `TABLES` is the
+lookup-table load of a lookup-table program (`0,0,0,0` otherwise). The emulators
+print the same records for the selected program.
 
 The UI supports generated grids up to 20x20 and forwards `S/F/C/G/X/I/M/R/D` firmware
 commands over the existing `/realtime_hw` WebSocket.
@@ -250,24 +256,31 @@ downloads. Firmware captures 48 kHz mono PCM16 through the onboard MAX9867,
 buffers up to 30 seconds in APS6404, and transfers finalized audio with exact
 byte framing and CRC32. The backend packages verified PCM as a downloadable WAV.
 
-The acoustic emulator is intentionally tied to the deployed 7x7 machine-readable
-contract under `data/heimdall_acoustic_contract.json`. It refuses to start if
-the contract's recorded C-header hash differs from the actual firmware
-`beam_table_2d.h` (the header is LF-normalised before hashing, so Windows CRLF
-checkouts match). Regenerate and copy both C and JSON artifacts after changing
-the deployment table.
+### Selected DSP program
 
-To test a layout on real hardware, generate `beam_table_2d.h` in the sibling
-`beamforming_mathematics` visualizer, replace the MAX78002 firmware copy, perform
-a clean build, flash it, and reconnect. The firmware `I` response makes the GUI
-adopt the new rows, columns, and center angles automatically.
+The backend follows the DSP program the firmware is built for:
+`HEIMDALL_DSP_EXPORT` from the environment, else its default in
+`../MAX78002/project.mk` (a folder name inside `MAX78002`, or a path). From that
+folder it reads the beam table contract `beam_table_2d.json` (array layout,
+delays, taper, the program the emulators report), the SigmaStudio export (Study
+register map), and `beam_table_2d.h` (hash check). Restart the backend after
+changing the selection.
+
+The acoustic emulator refuses to start if the contract's recorded C-header hash
+differs from the `beam_table_2d.h` next to it (the header is LF-normalised
+before hashing, so Windows CRLF checkouts match). Regenerate both together with
+the sibling `beamforming_mathematics` generator after changing the table.
+
+To test a layout on real hardware, generate the table into the export folder,
+build and flash the firmware, and reconnect. The firmware `I` response makes the
+GUI adopt the new rows, columns, and center angles automatically.
 
 ## Study
 
 `#study` is for characterising the array without reflashing. It has two parts.
 
-**Parameters.** The backend parses the SigmaStudio export
-(`../MAX78002/SigmaStudioExport/*.json`, or the file in `HEIMDALL_DSP_EXPORT`)
+**Parameters.** The backend parses the SigmaStudio export of the selected
+program (see above)
 into a register map (`dsp_registry.py`, schema `heimdall-dsp-registry-v1`) and
 serves it at `/dsp/registry`. The screen lists every block, and its editors
 stage words for a gain taper and per-microphone mutes, FIR presets, the level
