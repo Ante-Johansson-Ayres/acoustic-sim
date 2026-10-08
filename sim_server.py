@@ -23,13 +23,14 @@ from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDiscon
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from heimdall_transport import EmulatorHeimdallTransport, SerialHeimdallTransport
+from heimdall_transport import DeployedProgram, EmulatorHeimdallTransport, SerialHeimdallTransport
 from dsp_registry import DspParameterService, plan_writes
 from heimdall_acoustic import (
     AcousticCacheLevelProvider,
     AcousticGridSpec,
     PreparationCancelled,
     acoustic_scenario,
+    default_contract_path,
     load_beam_contract,
     prepare_acoustic_cache,
     render_acoustic_audition,
@@ -1002,7 +1003,7 @@ def hw_connect(request: HardwareConnectRequest):
                 elevation_max_deg=request.elevation_max_deg,
                 flight_profile=request.flight_profile,
                 flight_speed=request.flight_speed,
-                taper_sigma=_deployed_taper_sigma(),
+                program=_deployed_program(),
             )
         elif request.transport == "acoustic":
             cache = _acoustic_preparation.ready_cache(request.acoustic_cache_id)
@@ -1019,7 +1020,7 @@ def hw_connect(request: HardwareConnectRequest):
                 elevation_min_deg=float(grid["elevation_min_deg"]),
                 elevation_max_deg=float(grid["elevation_max_deg"]),
                 level_provider=AcousticCacheLevelProvider(cache),
-                taper_sigma=_deployed_taper_sigma(),
+                program=_deployed_program(),
             )
         elif request.transport == "serial":
             if not request.port:
@@ -1118,6 +1119,8 @@ def hw_status():
         "scan_count": snapshot["scan_count"],
         "protocol_errors": snapshot["protocol_errors"],
         "taper": snapshot.get("taper"),
+        "dsp": snapshot.get("dsp"),
+        "tables": snapshot.get("tables"),
     }
 
 
@@ -1138,36 +1141,44 @@ def hw_ports():
     return {"ports": ports}
 
 
-_ARRAY_LAYOUT_CACHE = {}
+_DEPLOYMENT_CACHE = {}
+
+
+def _deployment():
+    """The beam table contract of the selected DSP export, read once; None if unusable."""
+    if "contract" not in _DEPLOYMENT_CACHE:
+        try:
+            contract = json.loads(default_contract_path().read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            contract = None
+        _DEPLOYMENT_CACHE["contract"] = contract
+    return _DEPLOYMENT_CACHE["contract"]
 
 
 def _array_layout():
-    """Microphone positions of the deployed array, from the acoustic contract.
+    """Microphone positions of the deployed array, from the contract.
 
     The firmware does not report its geometry, so the host supplies it for
-    drawing. Returns None when the contract file is missing or malformed.
+    drawing. Returns None when the contract is missing or malformed.
     """
-    if "layout" not in _ARRAY_LAYOUT_CACHE:
-        layout = None
-        try:
-            path = pathlib.Path(__file__).with_name("data") / "heimdall_acoustic_contract.json"
-            data = json.loads(path.read_text(encoding="ascii"))
-            positions = [[float(value) for value in point] for point in data["microphone_positions_mm"]]
-            layout = {
-                "units": "mm",
-                "coordinate_system": data.get("coordinate_system"),
-                "positions": positions,
-                "taper_sigma": float(data.get("taper_sigma", 0.0)),
-            }
-        except (OSError, ValueError, KeyError, TypeError):
-            layout = None
-        _ARRAY_LAYOUT_CACHE["layout"] = layout
-    return _ARRAY_LAYOUT_CACHE["layout"]
+    try:
+        data = _deployment()
+        return {
+            "units": "mm",
+            "coordinate_system": data.get("coordinate_system"),
+            "positions": [[float(value) for value in point] for point in data["microphone_positions_mm"]],
+            "taper_sigma": float(data.get("taper_sigma", 0.0)),
+        }
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
 
 
-def _deployed_taper_sigma():
-    """Taper sigma of the deployed table, so the emulators report what the firmware would."""
-    return (_array_layout() or {}).get("taper_sigma", 0.0)
+def _deployed_program():
+    """The program the emulators report, so they print what the firmware would."""
+    try:
+        return DeployedProgram.from_contract(_deployment())
+    except (KeyError, TypeError, ValueError):
+        return DeployedProgram()
 
 
 # ── Study: DSP parameters (register map from the SigmaStudio export) ─────────
@@ -1425,6 +1436,8 @@ def _hardware_payload(payload_type, snapshot):
         "audio_download_error": snapshot["audio_download_error"],
         "protocol_errors": snapshot["protocol_errors"],
         "taper": snapshot.get("taper"),
+        "dsp": snapshot.get("dsp"),
+        "tables": snapshot.get("tables"),
         "est_az_deg": estimated_azimuth,
         "est_el_deg": estimated_elevation,
         "true_az_deg": _hw_true_az_deg,

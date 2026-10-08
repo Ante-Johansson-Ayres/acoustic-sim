@@ -27,10 +27,9 @@ from typing import Any
 
 SCHEMA = "heimdall-dsp-registry-v1"
 MAX_WORDS_PER_COMMAND = 5
-EXPORT_DIR = Path(__file__).resolve().parent.parent / "MAX78002" / "SigmaStudioExport"
+FIRMWARE_DIR = Path(__file__).resolve().parent.parent / "MAX78002"
+DEFAULT_EXPORT_FOLDER = "SigmaStudioExport"
 EXPORT_SUFFIX = "_ADAU1467_0.json"
-# The detector the firmware reads during a scan (BEAM_LEVEL_READBACK_ADDR).
-SCAN_DETECTOR = "SingleBandwNumericalDisplay_Beam1"
 
 # First microphone (DSP index) behind channel 0 of each mute block, from the
 # Golden Image schematic. Confirm with the DSP owner when the project changes.
@@ -49,6 +48,7 @@ GROUPS = {
     "detector": "Level detector",
     "output": "Output level",
     "delays": "Fractional delays",
+    "steering": "Lookup-table steering",
     "system": "Safeload registers",
     "other": "Other parameters",
 }
@@ -56,19 +56,42 @@ GROUPS = {
 TYPES = {"FixPoint8d24": "8.24", "Integer32": "int32"}
 
 
+def selected_export_dir() -> Path:
+    """The export folder the firmware is built for, chosen exactly as make chooses it.
+
+    HEIMDALL_DSP_EXPORT from the environment wins, else its default in
+    MAX78002/project.mk. A relative value is a folder inside MAX78002.
+    """
+    value = os.environ.get("HEIMDALL_DSP_EXPORT", "").strip()
+    if not value:
+        try:
+            project = (FIRMWARE_DIR / "project.mk").read_text(encoding="utf-8")
+        except OSError:
+            project = ""
+        match = re.search(r"^\s*HEIMDALL_DSP_EXPORT\s*\??=\s*(\S+)", project, re.MULTILINE)
+        value = match.group(1) if match else DEFAULT_EXPORT_FOLDER
+    return FIRMWARE_DIR / value
+
+
 def export_path() -> Path:
-    """HEIMDALL_DSP_EXPORT, else the single SigmaStudio export in MAX78002."""
-    override = os.environ.get("HEIMDALL_DSP_EXPORT")
-    if override:
-        return Path(override)
-    exports = sorted(EXPORT_DIR.glob(f"*{EXPORT_SUFFIX}"))
+    """The single SigmaStudio export JSON in the selected export folder."""
+    folder = selected_export_dir()
+    exports = sorted(folder.glob(f"*{EXPORT_SUFFIX}"))
     if len(exports) != 1:
         names = ", ".join(path.name for path in exports) or "none"
-        raise FileNotFoundError(f"expected exactly one *{EXPORT_SUFFIX} in {EXPORT_DIR}, found: {names}")
+        raise FileNotFoundError(f"expected exactly one *{EXPORT_SUFFIX} in {folder}, found: {names}")
     return exports[0]
 
 
-def _classify(algo: str, param: str) -> tuple[str, int | None, int | None]:
+def _scan_detector(labels: list[str]) -> str | None:
+    """The detector the firmware reads during a scan, chosen as the table generator does."""
+    beam1 = [label for label in labels if label.endswith("_Beam1")]
+    if len(beam1) == 1:
+        return beam1[0]
+    return labels[0] if len(labels) == 1 else None
+
+
+def _classify(algo: str, param: str, scan_detector: str | None) -> tuple[str, int | None, int | None]:
     """(group, microphone, beam). Beam 1 delays are Delay_DSPxx; beams 2-4 add _1.._3."""
     match = re.fullmatch(r"(Gain|FIR_Stage1|FIR_Stage2)_DSP(\d+)", algo)
     if match:
@@ -77,10 +100,15 @@ def _classify(algo: str, param: str) -> tuple[str, int | None, int | None]:
     match = re.fullmatch(r"Delay_DSP(\d+)(?:_(\d))?", algo)
     if match:
         return "delays", int(match.group(1)), 1 + int(match.group(2) or 0)
+    match = re.fullmatch(r"LUT_DSP(\d+)", algo)
+    if match:
+        return "steering", int(match.group(1)), 1
+    if algo == "Sector_Index":
+        return "steering", None, 1
     if algo in MUTE_BLOCK_FIRST_MIC:
         channel = re.search(r"(\d+)$", param)
         return "mutes", MUTE_BLOCK_FIRST_MIC[algo] + int(channel.group(1)) if channel else None, None
-    if algo == SCAN_DETECTOR:
+    if algo == scan_detector:
         return "detector", None, 1
     if algo.startswith("Beamformer_Output_Gain") or algo.startswith("SingleVolumeControl"):
         return "output", None, None
@@ -97,6 +125,10 @@ def _policy(group: str, param: str, beam: int | None) -> tuple[bool, str]:
             return False, "fixed by the program"
         if beam != 1:
             return False, f"beam {beam} is not steered by the firmware yet"
+        return False, "written by the scan engine on every steer"
+    if group == "steering":
+        if param == "TableValues":
+            return False, "loaded by the firmware at boot and on I"
         return False, "written by the scan engine on every steer"
     if group == "system":
         return False, "used by the firmware for every write"
@@ -120,11 +152,27 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
     except (KeyError, IndexError, TypeError) as error:
         raise ValueError("not a SigmaStudio ADAU146x export") from error
 
+    # AddressMap is keyed by the block's internal name, not its label; a
+    # detector's TCONST address links the two (as in the beam table generator).
+    address_map = schematic.get("AddressMap") or {}
+    rms_by_tconst = {
+        str(info.get("Address")): address_map[name[:-len("TCONST")] + "rms"]
+        for name, info in address_map.items()
+        if name.endswith("TCONST") and name[:-len("TCONST")] + "rms" in address_map
+    }
+    detectors = {}
+    for module in modules:
+        for param in module.get("ModuleParameter", []) or []:
+            rms = rms_by_tconst.get(str(param.get("Address")))
+            if param.get("Name") == "TCONST" and rms is not None:
+                detectors[str(module.get("AlgoName", ""))] = int(rms["Address"])
+    scan_detector = _scan_detector(sorted(detectors))
+
     parameters = []
     for module in modules:
         algo = str(module.get("AlgoName", ""))
         for param in module.get("ModuleParameter", []) or []:
-            group, mic, beam = _classify(algo, str(param.get("Name", "")))
+            group, mic, beam = _classify(algo, str(param.get("Name", "")), scan_detector)
             writable, reason = _policy(group, str(param.get("Name", "")), beam)
             words = max(1, int(param.get("Size", 4)) // 4)
             defaults = _words(str(param.get("Data", "")))
@@ -157,19 +205,6 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
             states.append({"name": name, "address": address})
     states.sort(key=lambda item: item["address"])
 
-    # AddressMap is keyed by the block's internal name, not its label; the
-    # scan detector's TCONST address links the two (as in the beam table generator).
-    address_map = schematic.get("AddressMap") or {}
-    tconst = next((p["address"] for p in parameters
-                   if p["block"] == SCAN_DETECTOR and p["name"] == "TCONST"), None)
-    level_readback_address = None
-    for name, info in address_map.items():
-        if tconst is not None and name.endswith("TCONST") and str(info.get("Address")) == str(tconst):
-            rms = address_map.get(name[:-len("TCONST")] + "rms")
-            if rms is not None:
-                level_readback_address = int(rms["Address"])
-            break
-
     groups = []
     for key, label in GROUPS.items():
         members = [item for item in parameters if item["group"] == key]
@@ -194,7 +229,7 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
         "states": states,
         "groups": groups,
         "writable_words": sum(item["words"] for item in parameters if item["writable"]),
-        "level_readback_address": level_readback_address,
+        "level_readback_address": detectors.get(scan_detector),
     }
 
 

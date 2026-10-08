@@ -80,6 +80,30 @@ def parse_line(line: str) -> dict[str, Any]:
             "angles_deg": [_number(value, "angle") for value in parts[2:]],
         }
 
+    if record_type == "DSP" and len(parts) == 7:
+        if not parts[1]:
+            raise ProtocolError("DSP program name is empty")
+        if parts[2] not in {"per_mic", "lut"}:
+            raise ProtocolError("unknown steering style")
+        return {
+            "type": "dsp",
+            "program": parts[1],
+            "style": parts[2],
+            "steer_words": _integer(parts[3], "steer words", 1, 255),
+            "read": _integer(parts[4], "signature words read", 0, 65535),
+            "matched": _integer(parts[5], "signature words matched", 0, 65535),
+            "code": _signed_integer(parts[6], "error code"),
+        }
+
+    if record_type == "TABLES" and len(parts) == 5:
+        return {
+            "type": "tables",
+            "words": _integer(parts[1], "table words", 0, 65535),
+            "written": _integer(parts[2], "written table words", 0, 65535),
+            "verified": _integer(parts[3], "verified table words", 0, 65535),
+            "code": _signed_integer(parts[4], "error code"),
+        }
+
     if record_type == "TAPER" and len(parts) == 5:
         return {
             "type": "taper",
@@ -250,6 +274,8 @@ class HeimdallState:
         self.last_recording: dict[str, Any] | None = None
         self.audio_transfer: dict[str, Any] | None = None
         self.taper: dict[str, Any] | None = None
+        self.dsp: dict[str, Any] | None = None
+        self.tables: dict[str, Any] | None = None
 
     def apply_line(self, line: str) -> dict[str, Any]:
         record = parse_line(line)
@@ -302,6 +328,19 @@ class HeimdallState:
             self._learn_angles(record)
         elif record_type == "timing":
             self.last_timing = record
+        elif record_type == "dsp":
+            # Every program check starts afresh: on a mismatch the firmware writes nothing.
+            self.dsp = {
+                **{key: record[key] for key in ("program", "style", "steer_words", "read", "matched", "code")},
+                "matches": record["code"] == 0 and 0 < record["read"] == record["matched"],
+            }
+            self.taper = None
+            self.tables = None
+        elif record_type == "tables":
+            self.tables = {
+                **{key: record[key] for key in ("words", "written", "verified", "code")},
+                "loaded": record["code"] == 0 and record["written"] == record["verified"] == record["words"],
+            }
         elif record_type == "taper":
             microphones = self.configuration.microphones if self.configuration else record["written"]
             self.taper = {
@@ -378,6 +417,8 @@ class HeimdallState:
             "last_recording": deepcopy(self.last_recording),
             "audio_transfer": deepcopy(self.audio_transfer),
             "taper": deepcopy(self.taper),
+            "dsp": deepcopy(self.dsp),
+            "tables": deepcopy(self.tables),
         }
 
     def _require_configuration(self) -> None:

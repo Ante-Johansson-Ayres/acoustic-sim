@@ -8,6 +8,7 @@ import pytest
 
 from heimdall_protocol import HeimdallState, ProtocolError, parse_line
 from heimdall_transport import (
+    DeployedProgram,
     EmulatorHeimdallTransport,
     HeimdallTransport,
     SerialHeimdallTransport,
@@ -116,11 +117,40 @@ def test_taper_record_reports_whether_every_gain_was_verified():
             parse_line(line)
 
 
-def test_emulator_reports_the_configured_taper():
-    emulator = EmulatorHeimdallTransport(rows=2, columns=2, taper_sigma=0.75)
+def test_dsp_check_and_table_load_records():
+    state = HeimdallState()
+    state.apply_line("READY,2D,7,7,49,44")
+    state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Golden_Image_LUT,lut,1,44,44,0")
+    state.apply_line("TAPER,0,44,44,0")
+    state.apply_line("TABLES,2156,2156,2156,0")
+    snapshot = state.snapshot()
+    assert snapshot["dsp"] == {"program": "MICCANVAS_SS+_BEAMFORM_Golden_Image_LUT", "style": "lut",
+                                "steer_words": 1, "read": 44, "matched": 44, "code": 0, "matches": True}
+    assert snapshot["tables"] == {"words": 2156, "written": 2156, "verified": 2156, "code": 0, "loaded": True}
+    # On a mismatch the firmware writes nothing, so the previous taper and tables no longer hold.
+    state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Golden_Image_LUT,lut,1,44,3,0")
+    snapshot = state.snapshot()
+    assert not snapshot["dsp"]["matches"]
+    assert snapshot["taper"] is None and snapshot["tables"] is None
+    state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Multi_Beam,per_mic,44,0,0,-5")
+    assert not state.snapshot()["dsp"]["matches"]
+    state.apply_line("TABLES,2156,2156,2100,0")
+    assert not state.snapshot()["tables"]["loaded"]
+    for line in ("DSP,,lut,1,44,44,0", "DSP,x,beam,1,44,44,0", "DSP,x,lut,0,44,44,0", "TABLES,1,1,1"):
+        with pytest.raises(ProtocolError):
+            parse_line(line)
+
+
+def test_emulator_reports_the_deployed_program():
+    program = DeployedProgram(name="Golden_LUT", style="lut", steer_words=1, table_words=2156,
+                              taper_sigma=0.75)
+    emulator = EmulatorHeimdallTransport(rows=2, columns=2, program=program)
     emulator._emit_configuration()
-    assert emulator.snapshot()["taper"]["sigma"] == 0.75
-    assert emulator.snapshot()["taper"]["applied"]
+    snapshot = emulator.snapshot()
+    assert snapshot["taper"]["sigma"] == 0.75 and snapshot["taper"]["applied"]
+    assert snapshot["dsp"]["program"] == "Golden_LUT" and snapshot["dsp"]["matches"]
+    assert snapshot["tables"] == {"words": 2156, "written": 2156, "verified": 2156, "code": 0, "loaded": True}
+    assert emulator.protocol_errors == 0
 
 
 def test_one_shot_scan_returns_to_idle_on_completion():

@@ -277,6 +277,8 @@ def test_serial_port_listing_is_read_only_and_well_formed():
 
 
 def test_init_payload_carries_the_deployed_array_layout():
+    assert sim_server._deployed_program().name == json.loads(
+        sim_server.default_contract_path().read_text(encoding="ascii"))["dsp_export"]["name"]
     with TestClient(sim_server.app) as client:
         assert client.post("/hw_connect", json={"transport": "emulator", "rows": 6, "columns": 6,
                                                 "azimuth_min_deg": -40, "azimuth_max_deg": 40,

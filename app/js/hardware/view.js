@@ -196,6 +196,16 @@ export function createView(container, {session}) {
       `last sample ${Number.isFinite(age) ? formatAge(age) + ' ago' : 'none yet'}`,
       `${frame?.protocol_errors ?? 0} protocol warnings`,
     ];
+    const program = frame?.dsp;
+    if (program) {
+      parts.push(program.matches
+        ? `${program.program}, ${program.style === 'lut' ? 'lookup-table steering' : 'per-microphone steering'}`
+        : `DSP program mismatch: the EEPROM is not ${program.program} (${program.matched}/${program.read} signature words, code ${program.code}); steering is locked`);
+    }
+    const tables = frame?.tables;
+    if (tables && tables.words > 0 && !tables.loaded) {
+      parts.push(`lookup tables not loaded (${tables.verified}/${tables.words} words verified, code ${tables.code})`);
+    }
     const taper = frame?.taper;
     if (taper) {
       parts.push(taper.applied

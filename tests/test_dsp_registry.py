@@ -141,9 +141,27 @@ def test_multibeam_delays_detectors_and_outputs(tmp_path):
     assert by_block["Beamformer_Output_Gain_3"]["group"] == "output"
 
 
+def test_lookup_table_steering_is_read_only_and_the_sole_detector_is_scanned(tmp_path):
+    registry = dsp_registry.load_registry(_export(tmp_path, {
+        "LUT_DSP07": [("TableValues", 40, 49, "FixPoint8d24", [0] * 49)],
+        "Delay_DSP07": [("MaxDelay", 89, 1, "Integer32", [68])],
+        "Sector_Index": [("DCValue", 90, 1, "Integer32", [0])],
+        "SingleBandwNumericalDisplay_3": [("TCONST", 20, 1, "FixPoint8d24", [0])],
+    }, {"SingleBandwNumericalDisplay_3TCONST": {"Address": 20}, "SingleBandwNumericalDisplay_3rms": {"Address": 23}}))
+    by_block = {p["block"]: p for p in registry["parameters"]}
+    table = by_block["LUT_DSP07"]
+    assert (table["group"], table["mic"], table["beam"], table["words"]) == ("steering", 7, 1, 49)
+    assert not table["writable"] and "boot" in table["reason"]
+    index = by_block["Sector_Index"]
+    assert index["group"] == "steering" and not index["writable"] and "every steer" in index["reason"]
+    assert by_block["SingleBandwNumericalDisplay_3"]["group"] == "detector"
+    assert registry["level_readback_address"] == 23
+    steering = next(g for g in registry["groups"] if g["key"] == "steering")
+    assert steering["words"] == 50 and steering["writable_words"] == 0
+
+
 def test_export_discovery_requires_exactly_one_export(tmp_path, monkeypatch):
-    monkeypatch.delenv("HEIMDALL_DSP_EXPORT", raising=False)
-    monkeypatch.setattr(dsp_registry, "EXPORT_DIR", tmp_path)
+    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", str(tmp_path))
     with pytest.raises(FileNotFoundError, match="none"):
         dsp_registry.export_path()
     (tmp_path / "A_ADAU1467_0.json").write_text("{}")
@@ -151,8 +169,19 @@ def test_export_discovery_requires_exactly_one_export(tmp_path, monkeypatch):
     (tmp_path / "B_ADAU1467_0.json").write_text("{}")
     with pytest.raises(FileNotFoundError, match="exactly one"):
         dsp_registry.export_path()
-    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", str(tmp_path / "B_ADAU1467_0.json"))
-    assert dsp_registry.export_path().name == "B_ADAU1467_0.json"
+
+
+def test_export_selection_matches_make(tmp_path, monkeypatch):
+    monkeypatch.setattr(dsp_registry, "FIRMWARE_DIR", tmp_path)
+    monkeypatch.delenv("HEIMDALL_DSP_EXPORT", raising=False)
+    assert dsp_registry.selected_export_dir() == tmp_path / "SigmaStudioExport"
+    (tmp_path / "project.mk").write_text("# HEIMDALL_DSP_EXPORT ?= Comment\nHEIMDALL_DSP_EXPORT ?= SigmaStudioExperimental\n")
+    assert dsp_registry.selected_export_dir() == tmp_path / "SigmaStudioExperimental"
+    # The environment wins, as it does for make.
+    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", "SigmaStudioExport")
+    assert dsp_registry.selected_export_dir() == tmp_path / "SigmaStudioExport"
+    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", str(tmp_path / "elsewhere"))
+    assert dsp_registry.selected_export_dir() == tmp_path / "elsewhere"
 
 
 def test_dsp_api_against_the_emulator():

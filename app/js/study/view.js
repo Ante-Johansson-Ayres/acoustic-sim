@@ -57,15 +57,18 @@ export function createView(container, {session}) {
       if (taper.applied) text += ` · boot taper σ ${taper.sigma.toFixed(2)}, ${taper.verified} gains verified`;
       else { text += ` · boot taper not in place: ${taper.verified}/${taper.written} gains verified, code ${taper.code}`; tone = 'connecting'; }
     }
+    const program = session.latest?.dsp;
+    const mismatch = session.open && program && !program.matches;
+    if (mismatch) { text = `The device runs a different DSP program than ${program.program}; this register map does not apply`; tone = 'fault'; }
     devState.dataset.state = tone;
     setText(devText, text);
-    const locked = !status?.supported;
+    const locked = !status?.supported || mismatch;
     if (locked) state.writes = false;
     writesSwitch.disabled = locked;
     writesSwitch.setAttribute('aria-checked', String(state.writes));
     missing.hidden = !dsp.error;
     if (dsp.error) missing.replaceChildren(h('h1', {}, 'The register map could not be loaded'),
-      h('p', {}, `${dsp.error}. The backend reads the SigmaStudio export from ../MAX78002/SigmaStudioExport, or from the path in HEIMDALL_DSP_EXPORT.`));
+      h('p', {}, `${dsp.error}. The backend reads the SigmaStudio export in the MAX78002 folder selected by HEIMDALL_DSP_EXPORT (project.mk, or the environment).`));
     params.el.hidden = state.sub !== 'parameters' || Boolean(dsp.error);
     measure.el.hidden = state.sub !== 'measurements';
     const modified = status?.modified_words ?? 0;

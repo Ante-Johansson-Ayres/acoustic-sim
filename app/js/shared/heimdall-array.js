@@ -1,6 +1,6 @@
 /**
  * heimdall-array.js — the deployed Heimdall microphone layout (DSP00–DSP43),
- * copied from data/heimdall_acoustic_contract.json. Millimetres, contract
+ * copied from the generated beam table contract (beam_table_2d.json). Millimetres, contract
  * axes: x = right, y = up, as seen from behind the array.
  */
 

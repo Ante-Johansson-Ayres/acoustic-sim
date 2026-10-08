@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 import queue
 import random
@@ -24,6 +25,38 @@ TRACK_FAILURE_LIMIT = 3
 TRACK_MOVE_CONFIRMATIONS = 2
 GLOBAL_RESCAN_INTERVAL = 50
 FLIGHT_PROFILES = frozenset({"crossing", "approach", "orbit", "patrol", "evasive", "legacy"})
+
+
+@dataclass(frozen=True)
+class DeployedProgram:
+    """The DSP program the firmware is built for, as its beam table contract describes it."""
+    name: str = "emulated"
+    style: str = "per_mic"
+    steer_words: int = 44
+    signature_words: int = 44
+    table_words: int = 0
+    taper_sigma: float = 0.0
+
+    @classmethod
+    def from_contract(cls, contract: dict[str, Any]) -> "DeployedProgram":
+        steering = contract["steering"]
+        return cls(
+            name=str(contract["dsp_export"]["name"]),
+            style=str(steering["style"]),
+            steer_words=len(steering["steer_addresses"]),
+            signature_words=len(contract["signature"]),
+            table_words=int(steering["table_words"]),
+            taper_sigma=float(contract["taper_sigma"]),
+        )
+
+    def boot_lines(self) -> list[str]:
+        """What the firmware prints after INFO when the EEPROM holds this program."""
+        words = self.signature_words
+        return [
+            f"DSP,{self.name},{self.style},{self.steer_words},{words},{words},0",
+            f"TAPER,{int(round(self.taper_sigma * 1000.0))},44,44,0",
+            f"TABLES,{self.table_words},{self.table_words},{self.table_words},0",
+        ]
 
 
 class HeimdallTransport:
@@ -260,7 +293,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
                  elevation_min_deg: float = -60.0, elevation_max_deg: float = 60.0,
                  sector_time_s: float = 0.0028, flight_profile: str = "crossing",
                  flight_speed: float = 1.0, clock=time.monotonic,
-                 level_provider=None, taper_sigma: float = 0.0) -> None:
+                 level_provider=None, program: DeployedProgram = DeployedProgram()) -> None:
         HeimdallTransport.__init__(self, clock=clock)
         threading.Thread.__init__(self, daemon=True)
         if not 1 <= rows <= 20 or not 1 <= columns <= 20:
@@ -281,7 +314,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.flight_profile = flight_profile
         self.flight_speed = flight_speed
         self.level_provider = level_provider
-        self.taper_sigma_milli = int(round(taper_sigma * 1000.0))
+        self.program = program
         self.commands: queue.Queue[str] = queue.Queue()
         self.mode = "IDLE"
         self.transport_name = "acoustic-emulator" if level_provider is not None else "emulator"
@@ -367,7 +400,8 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.apply_line(f"READY,2D,{self.rows},{self.columns},{sectors},44")
         self.apply_line("AZIMUTH," + str(self.columns) + "," + ",".join(_format_angle(v) for v in self.azimuth_deg))
         self.apply_line("ELEVATION," + str(self.rows) + "," + ",".join(_format_angle(v) for v in self.elevation_deg))
-        self.apply_line(f"TAPER,{self.taper_sigma_milli},44,44,0")
+        for line in self.program.boot_lines():
+            self.apply_line(line)
 
     def _scan_pass(self, mode: str) -> None:
         started = time.monotonic()

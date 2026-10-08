@@ -20,12 +20,12 @@ from scipy.io import wavfile
 from scipy.signal import fftconvolve, firwin, resample_poly
 
 from acoustic_utils import air_absorption_kwargs, spl_to_amplitude
+from dsp_registry import selected_export_dir
 
 
 ACOUSTIC_MODEL_VERSION = "heimdall-acoustic-v7"
 ROOM_CACHE_MODEL_VERSION = "heimdall-room-v1"
-DEFAULT_CONTRACT_PATH = Path(__file__).resolve().parent / "data" / "heimdall_acoustic_contract.json"
-DEFAULT_FIRMWARE_HEADER_PATH = Path(__file__).resolve().parents[1] / "MAX78002" / "beam_table_2d.h"
+CONTRACT_NAME = "beam_table_2d.json"
 DEFAULT_CACHE_ROOT = Path(__file__).resolve().parent / ".cache" / "heimdall_acoustic"
 DEFAULT_ROOM_CACHE_ROOT = DEFAULT_CACHE_ROOT / "rooms"
 ProgressCallback = Callable[[dict], None]
@@ -173,15 +173,22 @@ def _signed_8_24(raw: int) -> float:
     return signed / float(1 << 24)
 
 
-def load_beam_contract(path=DEFAULT_CONTRACT_PATH,
-                       firmware_header_path=DEFAULT_FIRMWARE_HEADER_PATH) -> BeamContract:
-    path = Path(path)
+def default_contract_path() -> Path:
+    """The beam table contract generated for the selected DSP export."""
+    return selected_export_dir() / CONTRACT_NAME
+
+
+def load_beam_contract(path=None, firmware_header_path=None) -> BeamContract:
+    """Load a contract; it must match the firmware header generated with it (its sibling by default)."""
+    path = Path(path) if path is not None else default_contract_path()
+    firmware_header_path = (Path(firmware_header_path) if firmware_header_path is not None
+                            else path.with_suffix(".h"))
     data = json.loads(path.read_text(encoding="ascii"))
-    if data.get("schema") != "heimdall-beam-table-v1":
+    if data.get("schema") != "heimdall-beam-table-v2":
         raise ValueError("unsupported Heimdall beam contract schema")
-    if firmware_header_path is not None and Path(firmware_header_path).is_file():
+    if firmware_header_path.is_file():
         # The contract hashes the LF-normalised header; Windows checkouts use CRLF.
-        header = Path(firmware_header_path).read_bytes().replace(b"\r\n", b"\n")
+        header = firmware_header_path.read_bytes().replace(b"\r\n", b"\n")
         firmware_hash = sha256(header).hexdigest()
         if firmware_hash != str(data.get("source_c_header_sha256", "")).lower():
             raise ValueError("acoustic beam contract does not match firmware beam_table_2d.h")
@@ -792,7 +799,7 @@ def load_room_acoustic_cache(cache_id: str,
 
 
 def prepare_room_acoustic_cache(scenario=AcousticScenario(),
-                                contract_path=DEFAULT_CONTRACT_PATH,
+                                contract_path=None,
                                 cache_root=DEFAULT_ROOM_CACHE_ROOT,
                                 progress: ProgressCallback | None = None,
                                 cancel_event: threading.Event | None = None) -> RoomAcousticCache:
@@ -909,12 +916,13 @@ def _progress(callback: ProgressCallback | None, stage: str, completed: int,
     })
 
 
-def prepare_acoustic_cache(scenario=AcousticScenario(), contract_path=DEFAULT_CONTRACT_PATH,
+def prepare_acoustic_cache(scenario=AcousticScenario(), contract_path=None,
                            cache_root=DEFAULT_CACHE_ROOT, progress: ProgressCallback | None = None,
                            cancel_event: threading.Event | None = None,
                            grid_spec: AcousticGridSpec | None = None,
                            room_cache_root: Path | None = None) -> AcousticCache:
     scenario.validate()
+    contract_path = Path(contract_path) if contract_path is not None else default_contract_path()
     deployment_contract = load_beam_contract(contract_path)
     grid_spec = grid_spec or AcousticGridSpec()
     contract, grid_mode = build_acoustic_grid(deployment_contract, grid_spec)

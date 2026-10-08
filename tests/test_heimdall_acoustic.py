@@ -60,6 +60,18 @@ def test_deployment_contract_rejects_mismatched_firmware_header(tmp_path):
         load_beam_contract(firmware_header_path=header)
 
 
+def test_contract_follows_the_selected_dsp_export(monkeypatch):
+    contracts = {}
+    for folder in ("SigmaStudioExport", "SigmaStudioExperimental"):
+        monkeypatch.setenv("HEIMDALL_DSP_EXPORT", folder)
+        contracts[folder] = load_beam_contract()
+        assert contracts[folder].path.parent.name == folder
+    # Both programs steer the same grid with the same delays; only how they are written differs.
+    per_mic, lut = contracts.values()
+    assert np.array_equal(per_mic.delay_fixpt, lut.delay_fixpt)
+    assert not np.array_equal(per_mic.delay_addresses, lut.delay_addresses)
+
+
 def test_default_acoustic_grid_reuses_exact_deployment_contract():
     deployment = load_beam_contract()
     grid, mode = build_acoustic_grid(deployment, AcousticGridSpec())
