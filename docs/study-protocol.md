@@ -1,8 +1,8 @@
 # Study mode: proposed firmware commands (protocol v3)
 
-Status: **proposal**. The GUI and the emulator implement this. The MAX78002
-firmware does not yet; until it does, the Study screen treats serial hardware
-as read-only and says so.
+Status: **implemented** in MAX78002 firmware, acoustic-sim serial transport,
+emulator, and Study UI. Writes are enabled only when the device map hash matches
+the selected export.
 
 The goal is to change DSP parameters at runtime (gain tapers, FIR taps, detector
 settings, mutes) to characterise the array without reflashing. This document is
@@ -37,7 +37,7 @@ between the start of the line and `*`, as two upper-case hex digits (NMEA style)
 | --- | --- | --- |
 | `PW,<addr>,<w1>[,<w2>…<w5>]*CS` | Safeload write of 1–5 words to consecutive addresses starting at `<addr>` (decimal). Words are 8 hex digits, two's complement (8.24 or int32 as the parameter defines). | `PW_OK,<addr>,<n>` or `ERR,PW,<code>` |
 | `PR,<addr>,<n>` | Read `n` (1–16) words starting at `<addr>`. | `PV,<addr>,<w1>,…,<wn>` or `ERR,PR,<code>` |
-| `SET,<key>,<value>` | Change a firmware setting at runtime. First key: `settle_us` (50–20000), the wait after steering before the level is read. | `SET_OK,<key>,<value>` or `ERR,SET,<code>` |
+| `SET,<key>,<value>` | Change an idle-only firmware setting: `settle_us`, `guard_us`, `window_us`, `measure`, `band`, `channel`, `map_record`, or `tone`. | `SET_OK,<key>,<value>` or `ERR,SET,<code>` |
 | `I` (extended) | Existing info reply, plus one line `MAP,<sha256-16>` with the first 16 hex digits of the register map the firmware was built for, and `SETTINGS,settle_us=<v>`. | as today, plus the two lines |
 
 Error codes: `BUSY` (not idle), `ADDR` (address not in the allow-list or
@@ -89,11 +89,17 @@ more single-word commands; nothing in the GUI hard-codes address ranges.
   own history.
 - A boot-time sanity check could read back each `MaxDelay` word and expect 68.
 
-## What the GUI does today
+## Host behavior
 
-- Parses the export, shows every block, and plans writes as above.
-- Writes and reads through the emulator's parameter memory
-  (`/dsp/write`, `/dsp/read`, `/dsp/memory`, `/dsp/set`), which answers as the
-  firmware would. Levels in the emulator do not react to the parameters yet.
-- For serial transports, `/dsp/status` reports "not supported" until the
-  firmware implements these commands.
+- Parses the export, shows every block, applies the write allow-list, and plans
+  consecutive five-word safeload runs as above.
+- Uses `/dsp/write`, `/dsp/read`, `/dsp/memory`, and `/dsp/set` for emulator and
+  serial transports. Serial calls wait for parsed `PW_OK`, `PV`, and `SET_OK`
+  replies and verify readback.
+- Refuses serial writes when `MAP` is absent or differs from the selected
+  export's generated contract.
+- Models the shared DSP detector with the contract time constant and provides
+  exact MCU-window mode in the emulator.
+- The Hardware screen controls measurement source, settle, guard, and window;
+  it also displays `TONE` records. The Study screen runs microphone survey,
+  beam cuts, detector step, steering accuracy, and array gain.
