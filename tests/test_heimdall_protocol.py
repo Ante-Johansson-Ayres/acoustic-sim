@@ -579,3 +579,48 @@ def test_emulator_adaptive_matches_move_hysteresis_and_reacquisition():
     assert emulator.adaptive_state == "SEARCH"
     assert emulator.snapshot()["target"] is None
     assert emulator.measured_sectors == emulator._neighborhood(neighbor)
+
+def _configured_state(rows=2, columns=3):
+    state = HeimdallState()
+    state.apply_line(f"READY,2D,{rows},{columns},{rows * columns},44")
+    state.apply_line(f"AZIMUTH,{columns}," + ",".join(f"{c * 10.0:.4f}" for c in range(columns)))
+    state.apply_line(f"ELEVATION,{rows}," + ",".join(f"{r * 10.0:.4f}" for r in range(rows)))
+    return state
+
+
+def test_study_protocol_records_reach_the_snapshot():
+    state = _configured_state()
+    state.apply_line("MAP,0123456789abcdef")
+    state.apply_line("SETTINGS,settle_us=1250,guard_us=500,window_us=5000,measure=1,band=1,channel=0,map_record=1,tone=0")
+    state.apply_line("SET_OK,window_us,8000")
+    state.apply_line("PW_OK,2338,2")
+    state.apply_line("PV,2338,00000001,FFFFFFFF")
+    snapshot = state.snapshot()
+    assert snapshot["map_hash"] == "0123456789abcdef"
+    assert snapshot["settings"]["measure"] == 1 and snapshot["settings"]["window_us"] == 8000
+    assert parse_line("PV,2338,00000001,FFFFFFFF")["words"] == [1, -1]  # signed, like the register map
+    assert parse_line("PW_OK,2338,2") == {"type": "pw_ok", "address": 2338, "count": 2}
+
+
+def test_compact_scan_map_fills_every_sector():
+    state = _configured_state()
+    state.apply_line("LEVELS,S,2,3,1,2,3,4,5,6")
+    assert state.snapshot()["levels_raw"] == [[1, 2, 3], [4, 5, 6]]
+    with pytest.raises(ProtocolError):
+        state.apply_line("LEVELS,S,3,3,1,2,3,4,5,6,7,8,9")
+
+
+def test_tone_class_dirset_and_recording_metadata():
+    state = _configured_state()
+    state.apply_line("TONE,0,1875,123,6,-213")
+    state.apply_line("CLASS,1,drone,0.87")
+    state.apply_line("DIRSET,2,3,264,264,0,61234")
+    state.apply_line("REC_META,4,2,12")
+    snapshot = state.snapshot()
+    assert snapshot["tones"]["0"]["harmonics"] == 6
+    assert snapshot["classes"]["1"]["label"] == "drone"
+    assert snapshot["direction_set"]["verified"] == 264
+    assert snapshot["recording_meta"] is not None
+    for line in ("TONE,2,1,1,1,1", "DIRSET,2,3,1,1,0", "PW_OK,1,6", "MAP"):
+        with pytest.raises(ProtocolError):
+            parse_line(line)

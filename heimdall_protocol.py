@@ -12,6 +12,19 @@ class ProtocolError(ValueError):
     """Raised when a firmware line violates the Heimdall protocol."""
 
 
+# Firmware runtime settings (MAX78002 heimdall_settings.c): name -> (minimum, maximum, default).
+FIRMWARE_SETTINGS = {
+    "settle_us": (50, 20000, 1250),
+    "guard_us": (0, 20000, 500),
+    "window_us": (1000, 100000, 5000),
+    "measure": (0, 1, 0),
+    "band": (0, 1, 1),
+    "channel": (0, 1, 0),
+    "map_record": (0, 1, 0),
+    "tone": (0, 10000, 0),
+}
+
+
 @dataclass(frozen=True)
 class BeamConfiguration:
     rows: int
@@ -147,18 +160,81 @@ def parse_line(line: str) -> dict[str, Any]:
             "bank_beams": _integer(parts[2], "bank beams", 0, 400),
         }
 
-    if record_type == "LEVELS" and len(parts) >= 5 and parts[1] == "B":
-        rows = _integer(parts[2], "rows", 1, 20)
-        columns = _integer(parts[3], "columns", 1, 20)
+    if record_type == "LEVELS" and len(parts) >= 5 and parts[1] in {"B", "S"}:
+        rows = _integer(parts[2], "rows", 1, 255)
+        columns = _integer(parts[3], "columns", 1, 255)
         if len(parts) != 4 + rows * columns:
             raise ProtocolError("level count does not match rows and columns")
         return {
             "type": "levels",
-            "source": "B",
+            "source": parts[1],
             "rows": rows,
             "columns": columns,
             "raw_levels": [_integer(value, "raw level") for value in parts[4:]],
         }
+
+    if record_type == "SETTINGS" and len(parts) >= 2:
+        values = {}
+        for item in parts[1:]:
+            key, separator, value = item.partition("=")
+            if not separator or not key:
+                raise ProtocolError("SETTINGS items are key=value")
+            values[key] = _signed_integer(value, key)
+        return {"type": "settings", "values": values}
+
+    if record_type == "MAP" and len(parts) == 2:
+        if len(parts[1]) != 16 or any(c not in "0123456789abcdef" for c in parts[1]):
+            raise ProtocolError("MAP must carry 16 lower-case hex digits")
+        return {"type": "map", "hash": parts[1]}
+
+    if record_type == "SET_OK" and len(parts) == 3 and parts[1]:
+        return {"type": "set_ok", "key": parts[1], "value": _signed_integer(parts[2], "value")}
+
+    if record_type == "PW_OK" and len(parts) == 3:
+        return {"type": "pw_ok", "address": _integer(parts[1], "address", 0, 0xFFFF),
+                "count": _integer(parts[2], "count", 1, 5)}
+
+    if record_type == "PV" and 3 <= len(parts) <= 18:
+        words = []
+        for value in parts[2:]:
+            if len(value) != 8:
+                raise ProtocolError("PV words are 8 hex digits")
+            try:
+                word = int(value, 16)
+            except ValueError as error:
+                raise ProtocolError("PV words are 8 hex digits") from error
+            words.append(word - (1 << 32) if word >= (1 << 31) else word)
+        return {"type": "pv", "address": _integer(parts[1], "address", 0, 0xFFFF), "words": words}
+
+    if record_type == "TONE" and len(parts) == 6:
+        return {
+            "type": "tone",
+            "channel": _integer(parts[1], "channel", 0, 1),
+            "f0_hz": _number(parts[2], "f0"),
+            "score_db": _number(parts[3], "score"),
+            "harmonics": _integer(parts[4], "harmonics", 0, 64),
+            "level_db": _number(parts[5], "level"),
+        }
+
+    if record_type == "CLASS" and len(parts) == 4 and parts[2]:
+        return {"type": "class", "channel": _integer(parts[1], "channel", 0, 1),
+                "label": parts[2], "confidence": _number(parts[3], "confidence")}
+
+    if record_type == "DIRSET" and len(parts) == 7:
+        return {
+            "type": "dirset",
+            "rows": _integer(parts[1], "rows", 1, 255),
+            "columns": _integer(parts[2], "columns", 1, 255),
+            "transferred": _integer(parts[3], "transferred", 0, 65535),
+            "verified": _integer(parts[4], "verified", 0, 65535),
+            "code": _signed_integer(parts[5], "error code"),
+            "elapsed_us": _integer(parts[6], "elapsed"),
+        }
+
+    if record_type == "REC_META" and len(parts) == 4:
+        return {"type": "recording_meta", "sector": _signed_integer(parts[1], "sector"),
+                "ch1_source": _integer(parts[2], "Ch1 source", 0, 2),
+                "ch1_index": _integer(parts[3], "Ch1 index", 0, 399)}
 
     if record_type == "BANK_TARGET" and len(parts) == 7:
         return {
@@ -329,6 +405,12 @@ class HeimdallState:
         self.bank_target: dict[str, Any] | None = None
         self.outputs: dict[str, Any] | None = None
         self.ch1: dict[str, Any] | None = None
+        self.settings: dict[str, int] = {}
+        self.map_hash: str | None = None
+        self.tones: dict[int, dict[str, Any]] = {}
+        self.classes: dict[int, dict[str, Any]] = {}
+        self.direction_set: dict[str, Any] | None = None
+        self.recording_meta: dict[str, Any] | None = None
 
     def apply_line(self, line: str) -> dict[str, Any]:
         record = parse_line(line)
@@ -377,10 +459,32 @@ class HeimdallState:
         elif record_type == "outputs":
             self.outputs = {key: record[key] for key in ("microphones", "bank_beams")}
         elif record_type == "levels":
-            if self.bank is None or (record["rows"], record["columns"]) != (self.bank["rows"], self.bank["columns"]):
-                raise ProtocolError("bank levels do not match the BANK record")
-            self.bank_levels_raw = record["raw_levels"]
-            self.bank_maps += 1
+            if record["source"] == "S":
+                self._require_configuration()
+                if (record["rows"], record["columns"]) != (self.configuration.rows, self.configuration.columns):
+                    raise ProtocolError("map levels do not match READY dimensions")
+                columns = record["columns"]
+                raw = record["raw_levels"]
+                self.levels_raw = [raw[row * columns:(row + 1) * columns] for row in range(record["rows"])]
+            else:
+                if self.bank is None or (record["rows"], record["columns"]) != (self.bank["rows"], self.bank["columns"]):
+                    raise ProtocolError("bank levels do not match the BANK record")
+                self.bank_levels_raw = record["raw_levels"]
+                self.bank_maps += 1
+        elif record_type == "settings":
+            self.settings = dict(record["values"])
+        elif record_type == "set_ok":
+            self.settings[record["key"]] = record["value"]
+        elif record_type == "map":
+            self.map_hash = record["hash"]
+        elif record_type == "tone":
+            self.tones[record["channel"]] = {k: v for k, v in record.items() if k != "type"}
+        elif record_type == "class":
+            self.classes[record["channel"]] = {k: v for k, v in record.items() if k != "type"}
+        elif record_type == "dirset":
+            self.direction_set = {k: v for k, v in record.items() if k != "type"}
+        elif record_type == "recording_meta":
+            self.recording_meta = {k: v for k, v in record.items() if k != "type"}
         elif record_type == "bank_target":
             self._require_configuration()
             if record["sector"] >= self.configuration.sectors:
@@ -439,6 +543,7 @@ class HeimdallState:
             self.recording_state = "recording"
             self.last_recording = record
             self.audio_transfer = None
+            self.recording_meta = None
         elif record_type == "recording_stopped":
             self.recording_state = "ready"
             self.last_recording = record
@@ -498,6 +603,12 @@ class HeimdallState:
             "bank": self._bank_snapshot(),
             "outputs": deepcopy(self.outputs),
             "ch1": deepcopy(self.ch1),
+            "settings": dict(self.settings),
+            "map_hash": self.map_hash,
+            "tones": {str(channel): dict(tone) for channel, tone in self.tones.items()},
+            "classes": {str(channel): dict(item) for channel, item in self.classes.items()},
+            "direction_set": deepcopy(self.direction_set),
+            "recording_meta": deepcopy(self.recording_meta),
         }
 
     def _bank_snapshot(self) -> dict[str, Any] | None:
