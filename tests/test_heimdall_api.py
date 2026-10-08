@@ -50,7 +50,7 @@ def test_hardware_recording_wav_endpoint_packages_pcm():
             return {
                 "sample_rate_hz": 48000,
                 "bits_per_sample": 16,
-                "channels": 1,
+                "channels": 2,
                 "pcm": b"\x01\x00\xff\xff\x02\x00\xfe\xff",
             }
 
@@ -62,9 +62,41 @@ def test_hardware_recording_wav_endpoint_packages_pcm():
         assert response.headers["content-type"] == "audio/wav"
         with wave.open(io.BytesIO(response.content), "rb") as wav:
             assert wav.getframerate() == 48000
-            assert wav.getnchannels() == 1
+            assert wav.getnchannels() == 2
             assert wav.getsampwidth() == 2
-            assert wav.getnframes() == 4
+            assert wav.getnframes() == 2
+
+
+def test_hardware_recording_metadata_describes_channels_and_settings():
+    class AudioTransport(RecordingTransport):
+        transport_name = "serial:COM7"
+
+        def get_audio_download(self):
+            return {"sample_rate_hz": 48000, "bits_per_sample": 16, "channels": 2,
+                    "pcm": b"\0" * 192000}
+
+        def snapshot(self):
+            return {
+                "transport": self.transport_name,
+                "configuration": {"rows": 7, "columns": 7, "sectors": 49, "microphones": 44},
+                "map_hash": "0123456789abcdef",
+                "settings": {"measure": 1, "window_us": 5000},
+                "recording_meta": {"sector": 24, "ch1_source": 2, "ch1_index": 12},
+                "last_steer": {"sector": 24, "azimuth_deg": 0.0, "elevation_deg": 0.0},
+                "direction_set": None,
+            }
+
+    sim_server._heimdall_transport = AudioTransport()
+    with TestClient(sim_server.app) as client:
+        response = client.get("/hw_recording_metadata.json")
+        assert response.status_code == 200
+        metadata = response.json()
+        assert metadata["schema"] == "heimdall-recording-v1"
+        assert metadata["audio"]["channels"] == 2
+        assert metadata["audio"]["duration_s"] == 1.0
+        assert metadata["channel_roles"] == ["steered_beam", "bank_beam_12"]
+        assert metadata["settings"]["window_us"] == 5000
+        assert metadata["map_hash"] == "0123456789abcdef"
 
 
 def test_emulator_connect_command_stream_and_disconnect():

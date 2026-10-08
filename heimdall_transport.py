@@ -39,6 +39,7 @@ class DeployedProgram:
     table_words: int = 0
     taper_sigma: float = 0.0
     microphones: int = 44
+    sectors: int = 49
     selectors: bool = False
     bank_rows: int = 0
     bank_columns: int = 0
@@ -60,6 +61,7 @@ class DeployedProgram:
             table_words=int(steering["table_words"]),
             taper_sigma=float(contract["taper_sigma"]),
             microphones=int(contract.get("microphones", 44)),
+            sectors=int(contract.get("sectors", 49)),
             selectors=bool(contract.get("selectors")),
             bank_rows=int(bank.get("rows", 0)),
             bank_columns=int(bank.get("columns", 0)),
@@ -373,6 +375,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.azimuth_deg = _cell_centers(azimuth_min_deg, azimuth_max_deg, columns)
         self.elevation_deg = _cell_centers(elevation_min_deg, elevation_max_deg, rows)
         self.default_grid = (rows, columns, list(self.azimuth_deg), list(self.elevation_deg))
+        self.grid_capacity = max(rows * columns, program.sectors)
         self.sector_time_s = sector_time_s
         self.flight_profile = flight_profile
         self.flight_speed = flight_speed
@@ -434,7 +437,10 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
             self.running = False
 
     def send_command(self, command: str) -> None:
-        self.commands.put(validate_command(command, self.rows * self.columns))
+        validated = validate_command(command, self.grid_capacity)
+        if validated.startswith("S,") and int(validated[2:]) >= self.rows * self.columns:
+            raise ValueError("sector is outside the active grid")
+        self.commands.put(validated)
 
     def _handle_command(self, command: str) -> None:
         if command == "I":

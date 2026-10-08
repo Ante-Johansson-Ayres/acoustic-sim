@@ -23,6 +23,7 @@ from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDiscon
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from array_theory import theory_cut
 from heimdall_transport import DeployedProgram, EmulatorHeimdallTransport, SerialHeimdallTransport
 from dsp_registry import DspParameterService, plan_writes
 from heimdall_acoustic import (
@@ -1120,6 +1121,16 @@ def hw_status():
         "configuration": snapshot["configuration"],
         "scan_count": snapshot["scan_count"],
         "protocol_errors": snapshot["protocol_errors"],
+        "settings": snapshot.get("settings") or {},
+        "map_hash": snapshot.get("map_hash"),
+        "tones": snapshot.get("tones") or {},
+        "classes": snapshot.get("classes") or {},
+        "direction_set": snapshot.get("direction_set"),
+        "recording_meta": snapshot.get("recording_meta"),
+        "bank": snapshot.get("bank"),
+        "outputs": snapshot.get("outputs"),
+        "ch1": snapshot.get("ch1"),
+        "level_time_constant_ms": _deployed_program().level_time_constant_ms,
         "taper": snapshot.get("taper"),
         "dsp": snapshot.get("dsp"),
         "tables": snapshot.get("tables"),
@@ -1265,6 +1276,25 @@ def dsp_set(request: DspSetRequest):
     return _dsp_call(lambda: {"settings": _dsp_service.set(_current_transport(), request.key, request.value)})
 
 
+@app.get("/study/theory/cut")
+def study_theory_cut(axis: str = "azimuth", steer_azimuth_deg: float = 0.0,
+                     steer_elevation_deg: float = 0.0, frequency_hz: float = 2000.0,
+                     minimum_deg: float = -60.0, maximum_deg: float = 60.0,
+                     step_deg: float = 1.0):
+    try:
+        return theory_cut(
+            axis=axis,
+            steer_azimuth_deg=steer_azimuth_deg,
+            steer_elevation_deg=steer_elevation_deg,
+            frequency_hz=frequency_hz,
+            minimum_deg=minimum_deg,
+            maximum_deg=maximum_deg,
+            step_deg=step_deg,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @app.get("/hw_recording.wav")
 def hw_recording_wav():
     with _heimdall_transport_lock:
@@ -1274,7 +1304,7 @@ def hw_recording_wav():
     capture = transport.get_audio_download()
     if capture is None:
         raise HTTPException(status_code=404, detail="no completed audio download is available")
-    if capture["bits_per_sample"] != 16 or capture["channels"] != 1:
+    if capture["bits_per_sample"] != 16 or capture["channels"] not in {1, 2}:
         raise HTTPException(status_code=422, detail="unsupported captured PCM format")
 
     output = io.BytesIO()
@@ -1288,6 +1318,47 @@ def hw_recording_wav():
         media_type="audio/wav",
         headers={"Content-Disposition": "attachment; filename=heimdall-recording.wav"},
     )
+
+
+@app.get("/hw_recording_metadata.json")
+def hw_recording_metadata():
+    with _heimdall_transport_lock:
+        transport = _heimdall_transport
+    if transport is None:
+        raise HTTPException(status_code=404, detail="no hardware transport is active")
+    capture = transport.get_audio_download()
+    if capture is None:
+        raise HTTPException(status_code=404, detail="no completed audio download is available")
+    snapshot = transport.snapshot()
+    channels = int(capture["channels"])
+    bytes_per_frame = channels * int(capture["bits_per_sample"]) // 8
+    frames = len(capture["pcm"]) // max(1, bytes_per_frame)
+    recording_meta = snapshot.get("recording_meta") or {}
+    roles = ["steered_beam"]
+    if channels > 1:
+        source = int(recording_meta.get("ch1_source", 0))
+        index = int(recording_meta.get("ch1_index", 0))
+        roles.append({0: "steered_beam", 1: f"microphone_{index}",
+                      2: f"bank_beam_{index}"}.get(source, "unknown"))
+    return {
+        "schema": "heimdall-recording-v1",
+        "generated_at_unix_s": time.time(),
+        "transport": snapshot.get("transport"),
+        "map_hash": snapshot.get("map_hash"),
+        "configuration": snapshot.get("configuration"),
+        "steering": snapshot.get("last_steer"),
+        "recording_meta": recording_meta,
+        "channel_roles": roles,
+        "settings": snapshot.get("settings") or {},
+        "direction_set": snapshot.get("direction_set"),
+        "audio": {
+            "sample_rate_hz": int(capture["sample_rate_hz"]),
+            "bits_per_sample": int(capture["bits_per_sample"]),
+            "channels": channels,
+            "frames": frames,
+            "duration_s": frames / int(capture["sample_rate_hz"]),
+        },
+    }
 
 
 @app.websocket("/realtime_hw")
@@ -1437,6 +1508,16 @@ def _hardware_payload(payload_type, snapshot):
         "audio_download_ready": snapshot["audio_download_ready"],
         "audio_download_error": snapshot["audio_download_error"],
         "protocol_errors": snapshot["protocol_errors"],
+        "settings": snapshot.get("settings") or {},
+        "map_hash": snapshot.get("map_hash"),
+        "tones": snapshot.get("tones") or {},
+        "classes": snapshot.get("classes") or {},
+        "direction_set": snapshot.get("direction_set"),
+        "recording_meta": snapshot.get("recording_meta"),
+        "bank": snapshot.get("bank"),
+        "outputs": snapshot.get("outputs"),
+        "ch1": snapshot.get("ch1"),
+        "level_time_constant_ms": _deployed_program().level_time_constant_ms,
         "taper": snapshot.get("taper"),
         "dsp": snapshot.get("dsp"),
         "tables": snapshot.get("tables"),

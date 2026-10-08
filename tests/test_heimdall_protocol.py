@@ -370,6 +370,8 @@ def test_emulator_study_commands_round_trip_through_protocol():
         direction_set = emulator.request("DG,-4000,4000,3,-3000,3000,2", {"dirset"})
         assert (direction_set["rows"], direction_set["columns"]) == (2, 3)
         assert emulator.snapshot()["configuration"]["sectors"] == 6
+        direction_set = emulator.request("DG,-4000,4000,3,-3000,3000,3", {"dirset"})
+        assert (direction_set["rows"], direction_set["columns"]) == (3, 3)
     finally:
         emulator.stop()
         emulator.join(timeout=1.0)

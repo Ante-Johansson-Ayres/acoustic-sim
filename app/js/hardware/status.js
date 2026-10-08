@@ -295,7 +295,8 @@ export class StatusColumn {
     let text = capable ? 'No recording yet.' : 'Recording needs the serial connection to the MAX78002.';
     if (state === 'recording') text = 'Recording the beam output…';
     else if (state === 'ready' && recording) {
-      text = `Ready to save · ${(Number(recording.samples || 0) / 48000).toFixed(1)} s, 48 kHz mono, ${recording.overruns || 0} overruns`;
+      const channels = Number(frame?.audio_format?.channels || 1);
+      text = `Ready to save · ${(Number(recording.samples || 0) / 48000).toFixed(1)} s, 48 kHz ${channels === 2 ? 'stereo' : 'mono'}, ${recording.overruns || 0} overruns`;
     } else if (state === 'downloading') text = `Downloading · ${Math.round(progress * 100)}%`;
     else if (state === 'downloaded') text = 'Downloaded and checksum-verified.';
     else if (state === 'error') text = frame?.audio_download_error || 'Recording error';

@@ -275,6 +275,28 @@ export class HardwareSession extends EventTarget {
     }
   }
 
+  async setDirectionGrid({azimuthMin, azimuthMax, columns, elevationMin, elevationMax, rows}) {
+    if (this.firmwareMode !== 'IDLE') {
+      this.command('X');
+      const deadline = performance.now() + 3000;
+      while (this.firmwareMode !== 'IDLE' && performance.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    const beforeSequence = Number(this.latest?.sequence || 0);
+    const command = `DG,${Math.round(azimuthMin * 100)},${Math.round(azimuthMax * 100)},${columns},${Math.round(elevationMin * 100)},${Math.round(elevationMax * 100)},${rows}`;
+    if (!this.command(command)) throw new Error('No active hardware link.');
+    const deadline = performance.now() + 5000;
+    while (performance.now() < deadline) {
+      const directionSet = this.latest?.direction_set;
+      const configuration = this.configuration;
+      if (directionSet && Number(this.latest?.sequence || 0) > beforeSequence && directionSet.code === 0 &&
+          configuration?.rows === rows && configuration?.columns === columns) return directionSet;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out waiting for the direction set.');
+  }
+
   modeCommand(command, text, tone = '') {
     this.stopMonitor();
     if (this.command(command)) this.addEvent('MODE', text, tone);
@@ -378,10 +400,17 @@ export class HardwareSession extends EventTarget {
     this.downloadCommandSent = false;
     this.downloadStopSent = false;
     try {
-      const response = await fetch(API_BASE + '/hw_recording.wav');
-      if (!response.ok) throw new Error(await response.text());
-      download(await response.blob(), `heimdall-${fileStamp()}.wav`);
-      this.addEvent('AUDIO', 'WAV saved and checksum-verified');
+      const [audioResponse, metadataResponse] = await Promise.all([
+        fetch(API_BASE + '/hw_recording.wav'),
+        fetch(API_BASE + '/hw_recording_metadata.json'),
+      ]);
+      if (!audioResponse.ok) throw new Error(await audioResponse.text());
+      if (!metadataResponse.ok) throw new Error(await metadataResponse.text());
+      const stamp = fileStamp();
+      download(await audioResponse.blob(), `heimdall-${stamp}.wav`);
+      download(new Blob([JSON.stringify(await metadataResponse.json(), null, 2) + '\n'],
+        {type: 'application/json'}), `heimdall-${stamp}.json`);
+      this.addEvent('AUDIO', 'WAV and metadata saved and checksum-verified');
     } catch (error) {
       this.addEvent('ERROR', `Saving the recording failed: ${error.message}`, 'error');
     }
