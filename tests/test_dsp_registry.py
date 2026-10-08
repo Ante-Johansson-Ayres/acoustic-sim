@@ -114,6 +114,45 @@ def test_service_reports_serial_as_unsupported(small_registry):
         service.write(_Transport(name="serial:COM7"), [{"address": 100, "word": 0}])
 
 
+def test_service_uses_serial_protocol_when_register_map_matches(small_registry):
+    class SerialTransport(_Transport):
+        def __init__(self, map_hash):
+            super().__init__(name="serial:COM7")
+            self.map_hash = map_hash
+            self.commands = []
+
+        def snapshot(self):
+            return {"mode": self.mode, "map_hash": self.map_hash}
+
+        def request(self, command, response_types):
+            self.commands.append(command)
+            if command.startswith("PW,"):
+                body = command.split("*")[0].split(",")
+                return {"type": "pw_ok", "address": int(body[1]), "count": len(body) - 2}
+            if command.startswith("PR,"):
+                _, address, count = command.split(",")
+                return {"type": "pv", "address": int(address),
+                        "words": [_word(0.5)] * int(count)}
+            key, value = command.split(",")[1:]
+            return {"type": "set_ok", "key": key, "value": int(value)}
+
+    small_registry["map_hash"] = "0123456789abcdef"
+    service = dsp_registry.DspParameterService(loader=lambda: small_registry)
+    mismatch = SerialTransport("fedcba9876543210")
+    assert not service.status(mismatch)["supported"]
+    with pytest.raises(PermissionError, match="does not match"):
+        service.write(mismatch, [{"address": 100, "word": _word(0.5)}])
+
+    transport = SerialTransport("0123456789abcdef")
+    result = service.write(transport, [{"address": 100, "word": _word(0.5)}])
+    assert result["readback"] == {100: _word(0.5)}
+    assert transport.commands[0].startswith("PW,100,00800000*")
+    assert transport.commands[1] == "PR,100,1"
+    assert service.read(transport, 100, 1) == [_word(0.5)]
+    assert service.set(transport, "window_us", 8000)["window_us"] == 8000
+    assert transport.commands[-1] == "SET,window_us,8000"
+
+
 def test_service_memory_resets_when_the_transport_changes(small_registry):
     service = dsp_registry.DspParameterService(loader=lambda: small_registry)
     first = _Transport()

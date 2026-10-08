@@ -3,7 +3,7 @@
  * refreshes, scenario truth for emulators, recording, and the event log.
  */
 
-import { h, setText } from '../shared/dom.js';
+import { h, segmented, setText } from '../shared/dom.js';
 import { clockTime, deg, formatAge, hz, num } from '../shared/format.js';
 
 export function operatingMode(session) {
@@ -65,6 +65,49 @@ export class StatusColumn {
       this.truthMeta,
     );
 
+    this.measureMode = segmented([['0', 'DSP detector'], ['1', 'MCU window']], {
+      label: 'Measurement source',
+      onPick: async (key) => {
+        this.measureMode.setDisabled(true);
+        try { await session.setSetting('measure', Number(key), 'measurement source'); }
+        finally { this.renderMeasurement(session.frame); }
+      },
+    });
+    const timingInput = (key, minimum, maximum, step) => {
+      const input = h('input', {class: 'input input--mono', type: 'number', min: minimum,
+        max: maximum, step, style: {width: '96px'}});
+      this.measureInputs ||= {};
+      this.measureInputs[key] = input;
+      return input;
+    };
+    this.measureInputs = {};
+    this.measureApply = h('button', {type: 'button', class: 'btn', onClick: async () => {
+      this.measureApply.disabled = true;
+      try {
+        await session.setMeasurementSettings({
+          settle_us: Number(this.measureInputs.settle_us.value),
+          guard_us: Number(this.measureInputs.guard_us.value),
+          window_us: Number(this.measureInputs.window_us.value),
+        });
+      } finally { this.renderMeasurement(session.frame); }
+    }}, 'Apply');
+    const measurement = h('section', {class: 'section', 'aria-labelledby': 'hw-measure-title'},
+      h('h2', {class: 'section__title', id: 'hw-measure-title'}, 'Measurement'),
+      this.measureMode.el,
+      h('div', {class: 'advanced', style: {marginTop: '12px'}},
+        h('label', {class: 'inline-field'}, 'Settle (µs)', timingInput('settle_us', 50, 20000, 50)),
+        h('label', {class: 'inline-field'}, 'Guard (µs)', timingInput('guard_us', 0, 20000, 50)),
+        h('label', {class: 'inline-field'}, 'Window (µs)', timingInput('window_us', 1000, 100000, 500)),
+        this.measureApply,
+      ),
+    );
+
+    this.toneList = h('div', {class: 'advanced'});
+    const tones = h('section', {class: 'section', 'aria-labelledby': 'hw-tones-title'},
+      h('h2', {class: 'section__title', id: 'hw-tones-title'}, 'Tonal detector'),
+      this.toneList,
+    );
+
     this.recText = h('p', {class: 'recording__text'}, 'No recording yet.');
     this.recIcon = h('span', {class: 'btn__rec', 'aria-hidden': 'true'});
     this.recLabel = h('span', {}, 'Record');
@@ -100,7 +143,7 @@ export class StatusColumn {
     );
 
     this.el = h('aside', {class: 'hw-aside scroll-y', 'aria-label': 'Status'},
-      answer, refresh, this.truth, extra || null, recording, events, advanced);
+      answer, refresh, this.truth, extra || null, measurement, tones, recording, events, advanced);
     session.addEventListener('events', () => this.renderEvents());
     this.renderEvents();
   }
@@ -162,6 +205,8 @@ export class StatusColumn {
 
     this.renderRates(mode, frame);
     this.renderTruth(frame);
+    this.renderMeasurement(frame);
+    this.renderTones(frame);
     this.renderRecording(frame);
     setText(this.freezeButton, session.frozen ? 'Resume display' : 'Freeze display');
     this.freezeButton.setAttribute('aria-pressed', String(session.frozen));
@@ -214,6 +259,31 @@ export class StatusColumn {
       ? ` · answer off by ${num(Math.hypot(frame.est_az_deg - truth.azimuth_deg, frame.est_el_deg - truth.elevation_deg), 1)}°`
       : '';
     setText(this.truthMeta, `Range ${num(truth.range_m, 1)} m${error}. Shown on the map as a green cross.`);
+  }
+
+  renderMeasurement(frame) {
+    const settings = frame?.settings || {};
+    const idle = this.session.ready && this.session.firmwareMode === 'IDLE';
+    this.measureMode.set(String(settings.measure ?? 0));
+    this.measureMode.setDisabled(!idle);
+    for (const [key, input] of Object.entries(this.measureInputs)) {
+      if (document.activeElement !== input && Number.isFinite(settings[key])) input.value = settings[key];
+      input.disabled = !idle;
+    }
+    this.measureApply.disabled = !idle;
+  }
+
+  renderTones(frame) {
+    const tones = Object.values(frame?.tones || {}).sort((a, b) => a.channel - b.channel);
+    if (!tones.length) {
+      this.toneList.replaceChildren(h('p', {class: 'note note--body'}, 'No tonal estimate.'));
+      return;
+    }
+    this.toneList.replaceChildren(...tones.map((tone) =>
+      h('div', {class: 'section__row'},
+        h('span', {class: 'figure-label'}, `Channel ${tone.channel}`),
+        h('span', {class: 'readout'}, `${num(tone.f0_hz, 1)} Hz · ${num(tone.score_db, 1)} dB · ${tone.harmonics} harmonics · ${num(tone.level_db, 1)} dBFS`),
+      )));
   }
 
   renderRecording(frame) {

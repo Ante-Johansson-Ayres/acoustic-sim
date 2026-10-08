@@ -258,6 +258,23 @@ export class HardwareSession extends EventTarget {
     if (this.command(`O,${source},${index}`)) this.addEvent('AUDIO', `Ch1 set to ${names[source]}`);
   }
 
+  async setSetting(key, value, label = key) {
+    try {
+      await apiJson('/dsp/set', {method: 'POST', body: {key, value}});
+      this.addEvent('SETTING', `${label}: ${value}`);
+      return true;
+    } catch (error) {
+      this.addEvent('ERROR', `Could not set ${label}: ${error.message}`, 'error');
+      throw error;
+    }
+  }
+
+  async setMeasurementSettings(settings) {
+    for (const [key, value] of Object.entries(settings)) {
+      await this.setSetting(key, value, key.replace('_us', ''));
+    }
+  }
+
   modeCommand(command, text, tone = '') {
     this.stopMonitor();
     if (this.command(command)) this.addEvent('MODE', text, tone);

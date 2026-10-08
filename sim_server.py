@@ -1004,6 +1004,7 @@ def hw_connect(request: HardwareConnectRequest):
                 flight_profile=request.flight_profile,
                 flight_speed=request.flight_speed,
                 program=_deployed_program(),
+                parameter_service=_dsp_service,
             )
         elif request.transport == "acoustic":
             cache = _acoustic_preparation.ready_cache(request.acoustic_cache_id)
@@ -1021,6 +1022,7 @@ def hw_connect(request: HardwareConnectRequest):
                 elevation_max_deg=float(grid["elevation_max_deg"]),
                 level_provider=AcousticCacheLevelProvider(cache),
                 program=_deployed_program(),
+                parameter_service=_dsp_service,
             )
         elif request.transport == "serial":
             if not request.port:

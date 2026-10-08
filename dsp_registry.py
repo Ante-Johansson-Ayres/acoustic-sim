@@ -222,9 +222,18 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
             "contiguous": max(addresses) - min(addresses) + 1 == len(set(addresses)),
         })
 
+    map_hash = None
+    contract_path = path.parent / "beam_table_2d.json"
+    if contract_path.exists():
+        try:
+            map_hash = json.loads(contract_path.read_text(encoding="utf-8"))["register_map"]["map_hash"]
+        except (KeyError, TypeError, ValueError):
+            pass
+
     return {
         "schema": SCHEMA,
         "export": {"file": path.name, "sha256": digest},
+        "map_hash": map_hash,
         "parameters": parameters,
         "states": states,
         "groups": groups,
@@ -291,10 +300,20 @@ def plan_writes(writes: list[dict[str, int]], registry: dict[str, Any], baud: in
 class DspParameterService:
     """Parameter memory and settings per transport.
 
-    The emulator keeps a memory seeded from the export defaults and answers
-    reads and writes like the proposed firmware commands. Serial hardware is
-    reported as unsupported until the firmware implements protocol v3.
+    The emulator keeps a memory seeded from the export defaults. Serial hardware
+    uses the firmware PW/PR/SET commands after its register-map hash is verified.
     """
+
+    SETTINGS = {
+        "settle_us": (50, 20000, 1250),
+        "guard_us": (0, 20000, 0),
+        "window_us": (1000, 100000, 5000),
+        "measure": (0, 1, 0),
+        "band": (0, 1, 1),
+        "channel": (0, 1, 0),
+        "map_record": (0, 1, 0),
+        "tone": (0, 10000, 0),
+    }
 
     def __init__(self, loader=load_registry):
         self._loader = loader
@@ -302,8 +321,12 @@ class DspParameterService:
         self._registry_error = None
         self._lock = threading.RLock()
         self._memory: dict[int, int] = {}
-        self._settings = {"settle_us": 1250}
+        self._settings = self._default_settings()
         self._owner = None
+
+    @classmethod
+    def _default_settings(cls) -> dict[str, int]:
+        return {key: limits[2] for key, limits in cls.SETTINGS.items()}
 
     def registry(self) -> dict[str, Any]:
         with self._lock:
@@ -320,20 +343,29 @@ class DspParameterService:
         if transport is not self._owner:
             self._owner = transport
             self._memory = {}
-            self._settings = {"settle_us": 1250}
+            self._settings = self._default_settings()
             registry = self.registry()
             for item in registry["parameters"]:
                 for offset, word in enumerate(item["default_words"]):
                     self._memory[item["address"] + offset] = word
 
-    @staticmethod
-    def supports(transport) -> tuple[bool, str]:
+    def supports(self, transport) -> tuple[bool, str]:
         if transport is None:
             return False, "No device is connected."
         name = str(getattr(transport, "transport_name", ""))
         if name in ("emulator", "acoustic-emulator"):
             return True, ""
-        return False, "This firmware does not accept parameter writes yet (protocol v3, PW/PR/SET)."
+        if name.startswith("serial:"):
+            expected = self.registry().get("map_hash")
+            actual = transport.snapshot().get("map_hash")
+            if not expected:
+                return False, "The selected export has no register-map hash."
+            if not actual:
+                return False, "The firmware has not reported its register-map hash."
+            if actual != expected:
+                return False, f"Firmware map {actual} does not match export map {expected}."
+            return True, ""
+        return False, "This transport does not support PW/PR/SET."
 
     def status(self, transport) -> dict[str, Any]:
         supported, reason = self.supports(transport)
@@ -342,6 +374,7 @@ class DspParameterService:
         try:
             registry = self.registry()
             result["export_sha256"] = registry["export"]["sha256"]
+            result["map_hash"] = registry.get("map_hash")
         except FileNotFoundError as error:
             result.update(supported=False, reason=str(error))
             return result
@@ -381,6 +414,11 @@ class DspParameterService:
         self._require(transport, write=False)
         if not 1 <= count <= 16:
             raise ValueError("read between 1 and 16 words")
+        if str(getattr(transport, "transport_name", "")).startswith("serial:"):
+            record = transport.request(f"PR,{address},{count}", {"pv"})
+            if record["address"] != address or len(record["words"]) != count:
+                raise RuntimeError("firmware returned a mismatched PR response")
+            return record["words"]
         with self._lock:
             self._bind(transport)
             return [self._memory.get(address + i, 0) for i in range(count)]
@@ -389,6 +427,21 @@ class DspParameterService:
         self._require(transport, write=True)
         registry = self.registry()
         plan = plan_writes(writes, registry)
+        if str(getattr(transport, "transport_name", "")).startswith("serial:"):
+            readback = {}
+            for command, run in zip(plan["commands"], plan["runs"]):
+                response = transport.request(command, {"pw_ok"})
+                if response["address"] != run["address"] or response["count"] != run["words"]:
+                    raise RuntimeError("firmware returned a mismatched PW response")
+                values = self.read(transport, run["address"], run["words"])
+                readback.update({run["address"] + offset: word
+                                 for offset, word in enumerate(values)})
+            with self._lock:
+                self._bind(transport)
+                self._memory.update(readback)
+                plan["modified_words"] = self._modified_count()
+            plan["readback"] = readback
+            return plan
         with self._lock:
             self._bind(transport)
             for write in writes:
@@ -401,11 +454,17 @@ class DspParameterService:
 
     def set(self, transport, key: str, value: float) -> dict[str, Any]:
         self._require(transport, write=True)
-        if key != "settle_us":
+        if key not in self.SETTINGS:
             raise ValueError(f"unknown setting {key!r}")
-        if not 50 <= float(value) <= 20000:
-            raise ValueError("settle_us must be between 50 and 20000")
+        minimum, maximum, _ = self.SETTINGS[key]
+        setting = int(round(float(value)))
+        if not minimum <= setting <= maximum:
+            raise ValueError(f"{key} must be between {minimum} and {maximum}")
+        if str(getattr(transport, "transport_name", "")).startswith("serial:"):
+            response = transport.request(f"SET,{key},{setting}", {"set_ok"})
+            if response["key"] != key or response["value"] != setting:
+                raise RuntimeError("firmware returned a mismatched SET response")
         with self._lock:
             self._bind(transport)
-            self._settings[key] = int(round(float(value)))
+            self._settings[key] = setting
             return dict(self._settings)

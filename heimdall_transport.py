@@ -14,6 +14,7 @@ import time
 from typing import Any
 import zlib
 
+from dsp_registry import DspParameterService, checksum
 from heimdall_bank import BankTracker, LOST_MAPS as BANK_LOST_MAPS, PERIOD_S as BANK_PERIOD_S
 from heimdall_protocol import HeimdallState, ProtocolError
 
@@ -44,6 +45,8 @@ class DeployedProgram:
     bank_rate_hz: int = 0
     bank_azimuth_deg: tuple[float, ...] = ()
     bank_elevation_deg: tuple[float, ...] = ()
+    map_hash: str | None = None
+    level_time_constant_ms: float = 8.665
 
     @classmethod
     def from_contract(cls, contract: dict[str, Any]) -> "DeployedProgram":
@@ -63,6 +66,8 @@ class DeployedProgram:
             bank_rate_hz=int(bank.get("sample_rate_hz", 0)),
             bank_azimuth_deg=tuple(float(value) for value in bank.get("azimuth_deg", ())),
             bank_elevation_deg=tuple(float(value) for value in bank.get("elevation_deg", ())),
+            map_hash=(contract.get("study") or {}).get("map_hash"),
+            level_time_constant_ms=float(contract.get("level_time_constant_ms", 8.665)),
         )
 
     @property
@@ -104,10 +109,13 @@ class HeimdallTransport:
         self.audio_download_received = 0
         self.audio_download_error: str | None = None
         self.latest_audio: dict[str, Any] | None = None
+        self.response_condition = threading.Condition(self.lock)
+        self.response_sequence = 0
+        self.response_records: deque[tuple[int, dict[str, Any]]] = deque(maxlen=64)
 
     def apply_line(self, line: str) -> dict[str, Any] | None:
         try:
-            with self.lock:
+            with self.response_condition:
                 record = self.state.apply_line(line)
                 record_type = record["type"]
                 if record_type in {"scan_started", "scan_stopped", "steer_ok", "target_lost"}:
@@ -122,6 +130,9 @@ class HeimdallTransport:
                     self.audio_download_expected = 0
                     self.audio_download_received = 0
                     self.audio_download_error = None
+                self.response_sequence += 1
+                self.response_records.append((self.response_sequence, record))
+                self.response_condition.notify_all()
                 return record
         except ProtocolError:
             self.protocol_errors += 1
@@ -160,6 +171,27 @@ class HeimdallTransport:
 
     def send_command(self, command: str) -> None:
         raise NotImplementedError
+
+    def request(self, command: str, response_types: set[str], timeout: float = 2.0) -> dict[str, Any]:
+        with self.response_condition:
+            baseline = self.response_sequence
+        self.send_command(command)
+        deadline = self.clock() + timeout
+        with self.response_condition:
+            while True:
+                for sequence, record in self.response_records:
+                    if sequence <= baseline:
+                        continue
+                    if record["type"] == "error":
+                        detail = ": ".join([record["reason"], *record["details"]])
+                        raise RuntimeError(detail)
+                    if record["type"] in response_types:
+                        return record
+                remaining = deadline - self.clock()
+                if remaining <= 0.0:
+                    expected = ", ".join(sorted(response_types))
+                    raise TimeoutError(f"timed out waiting for {expected}")
+                self.response_condition.wait(remaining)
 
     def stop(self) -> None:
         self.running = False
@@ -322,7 +354,8 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
                  elevation_min_deg: float = -60.0, elevation_max_deg: float = 60.0,
                  sector_time_s: float = 0.0028, flight_profile: str = "crossing",
                  flight_speed: float = 1.0, clock=time.monotonic,
-                 level_provider=None, program: DeployedProgram = DeployedProgram()) -> None:
+                 level_provider=None, program: DeployedProgram = DeployedProgram(),
+                 parameter_service: DspParameterService | None = None) -> None:
         HeimdallTransport.__init__(self, clock=clock)
         threading.Thread.__init__(self, daemon=True)
         if not 1 <= rows <= 20 or not 1 <= columns <= 20:
@@ -339,11 +372,13 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.columns = columns
         self.azimuth_deg = _cell_centers(azimuth_min_deg, azimuth_max_deg, columns)
         self.elevation_deg = _cell_centers(elevation_min_deg, elevation_max_deg, rows)
+        self.default_grid = (rows, columns, list(self.azimuth_deg), list(self.elevation_deg))
         self.sector_time_s = sector_time_s
         self.flight_profile = flight_profile
         self.flight_speed = flight_speed
         self.level_provider = level_provider
         self.program = program
+        self.parameter_service = parameter_service or DspParameterService()
         self.commands: queue.Queue[str] = queue.Queue()
         self.mode = "IDLE"
         self.transport_name = "acoustic-emulator" if level_provider is not None else "emulator"
@@ -364,6 +399,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.bank_lost_maps = 0
         self.bank_target_sector = 0
         self.ch1_bank_beam: int | None = None
+        self.detector_level = 0.0
 
     def snapshot(self) -> dict[str, Any]:
         snapshot = super().snapshot()
@@ -402,6 +438,9 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
 
     def _handle_command(self, command: str) -> None:
         if command == "I":
+            self.rows, self.columns, azimuth, elevation = self.default_grid
+            self.azimuth_deg = list(azimuth)
+            self.elevation_deg = list(elevation)
             self._emit_configuration()
         elif command == "F":
             self.mode = "F"
@@ -451,16 +490,66 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
             self.current_sector = sector
             self._emit_steer_ok(sector)
             self._emit_measurement(sector, delay=False)
+        elif command.startswith("SET,"):
+            _, key, value = command.split(",")
+            try:
+                settings = self.parameter_service.set(self, key, int(value))
+                self.apply_line(f"SET_OK,{key},{settings[key]}")
+            except RuntimeError:
+                self.apply_line("ERR,SET,BUSY")
+            except (PermissionError, ValueError):
+                self.apply_line("ERR,SET,RANGE")
+        elif command.startswith("PW,"):
+            body = command.split("*", 1)[0]
+            fields = body.split(",")
+            address = int(fields[1])
+            words = [int(value, 16) for value in fields[2:]]
+            writes = [{"address": address + offset, "word": word}
+                      for offset, word in enumerate(words)]
+            try:
+                self.parameter_service.write(self, writes)
+                self.apply_line(f"PW_OK,{address},{len(words)}")
+            except RuntimeError:
+                self.apply_line("ERR,PW,BUSY")
+            except (PermissionError, ValueError):
+                self.apply_line("ERR,PW,ADDR")
+        elif command.startswith("PR,"):
+            _, address_text, count_text = command.split(",")
+            address = int(address_text)
+            count = int(count_text)
+            try:
+                words = self.parameter_service.read(self, address, count)
+                values = ",".join(f"{word & 0xFFFFFFFF:08X}" for word in words)
+                self.apply_line(f"PV,{address},{values}")
+            except (PermissionError, ValueError):
+                self.apply_line("ERR,PR,ADDR")
+        elif command.startswith("DG,"):
+            azimuth_min, azimuth_max, columns, elevation_min, elevation_max, rows = (
+                int(value) for value in command[3:].split(",")
+            )
+            self.columns = columns
+            self.rows = rows
+            self.azimuth_deg = _grid_axis(azimuth_min / 100.0, azimuth_max / 100.0, columns)
+            self.elevation_deg = _grid_axis(elevation_min / 100.0, elevation_max / 100.0, rows)
+            words = rows * columns * self.program.steer_words
+            self.apply_line(f"DIRSET,{rows},{columns},{words},{words},0,0")
+            self._emit_configuration(include_boot=False)
 
-    def _emit_configuration(self) -> None:
+    def _emit_configuration(self, include_boot: bool = True) -> None:
         sectors = self.rows * self.columns
         self.apply_line(f"READY,2D,{self.rows},{self.columns},{sectors},44")
         self.apply_line("AZIMUTH," + str(self.columns) + "," + ",".join(_format_angle(v) for v in self.azimuth_deg))
         self.apply_line("ELEVATION," + str(self.rows) + "," + ",".join(_format_angle(v) for v in self.elevation_deg))
         for line in self.program.configuration_lines():
             self.apply_line(line)
-        for line in self.program.boot_lines():
-            self.apply_line(line)
+        if include_boot:
+            for line in self.program.boot_lines():
+                self.apply_line(line)
+            if self.program.map_hash:
+                self.apply_line(f"MAP,{self.program.map_hash}")
+            settings = self.parameter_service.status(self)["settings"]
+            self.apply_line("SETTINGS," + ",".join(f"{key}={value}"
+                                                    for key, value in settings.items()))
 
     def _stare_cycle(self) -> None:
         """One bank map, as the firmware's step_stare does it."""
@@ -656,14 +745,37 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
     def _emit_measurement(self, sector: int, delay: bool = True) -> int:
         self.current_sector = sector
         row, column = divmod(sector, self.columns)
-        level = self._level_for_sector(sector)
+        level = self._measurement_level(sector)
         self.apply_line(
             f"P,{row},{column},{_format_angle(self.azimuth_deg[column])},"
             f"{_format_angle(self.elevation_deg[row])},{level}"
         )
-        if delay and self.sector_time_s > 0:
-            time.sleep(self.sector_time_s)
+        if delay:
+            duration = self._measurement_duration()
+            if duration > 0.0:
+                time.sleep(duration)
         return level
+
+    def _measurement_duration(self) -> float:
+        settings = self.parameter_service.status(self)["settings"]
+        if settings["measure"] == 1:
+            return (settings["guard_us"] + settings["window_us"]) / 1_000_000.0
+        return max(self.sector_time_s, settings["settle_us"] / 1_000_000.0)
+
+    def _measurement_level(self, sector: int) -> int:
+        settings = self.parameter_service.status(self)["settings"]
+        instantaneous = self._level_for_sector(sector)
+        duration = self._measurement_duration()
+        tau = max(1e-6, self.program.level_time_constant_ms / 1000.0)
+        alpha = -math.expm1(-duration / tau)
+        self.detector_level += alpha * (instantaneous - self.detector_level)
+        if settings["measure"] == 0:
+            return max(0, min(0x7FFFFFFF, round(self.detector_level)))
+        if self.level_provider is not None:
+            return instantaneous
+        window_s = max(0.001, settings["window_us"] / 1_000_000.0)
+        scale = 1.0 + self.random.uniform(-0.002, 0.002) * math.sqrt(0.005 / window_s)
+        return max(0, min(0x7FFFFFFF, round(instantaneous * scale)))
 
     def _emit_steer_ok(self, sector: int) -> None:
         row, column = divmod(sector, self.columns)
@@ -774,12 +886,46 @@ def validate_command(command: str, sectors: int = 65535) -> str:
         return command
     if re.fullmatch(r"O,[0-2],\d{1,3}", command):
         return command
+    if re.fullmatch(
+        r"SET,(?:settle_us|guard_us|window_us|measure|band|channel|map_record|tone),-?\d+",
+        command,
+    ):
+        return command
+    match = re.fullmatch(r"(PW,(\d+)(?:,[0-9A-Fa-f]{8}){1,5})(?:\*([0-9A-Fa-f]{2}))?", command)
+    if match and int(match.group(2)) <= 0xFFFF:
+        body = match.group(1)
+        expected = checksum(body)
+        if match.group(3) is not None and int(match.group(3), 16) != expected:
+            raise ValueError("invalid PW checksum")
+        return f"{body}*{expected:02X}"
+    match = re.fullmatch(r"PR,(\d+),(\d+)", command)
+    if match and int(match.group(1)) <= 0xFFFF and 1 <= int(match.group(2)) <= 16:
+        return command
+    match = re.fullmatch(r"DG,(-?\d+),(-?\d+),(\d+),(-?\d+),(-?\d+),(\d+)", command)
+    if match:
+        azimuth_min, azimuth_max, columns, elevation_min, elevation_max, rows = map(
+            int, match.groups()
+        )
+        if (
+            all(-9000 <= angle <= 9000 for angle in
+                (azimuth_min, azimuth_max, elevation_min, elevation_max))
+            and columns >= 1
+            and rows >= 1
+            and columns * rows <= sectors
+        ):
+            return command
     raise ValueError("invalid Heimdall command")
 
 
 def _cell_centers(minimum: float, maximum: float, count: int) -> list[float]:
     step = (maximum - minimum) / count
     return [minimum + (index + 0.5) * step for index in range(count)]
+
+
+def _grid_axis(minimum: float, maximum: float, count: int) -> list[float]:
+    if count == 1:
+        return [(minimum + maximum) / 2.0]
+    return [minimum + (maximum - minimum) * index / (count - 1) for index in range(count)]
 
 
 def _format_angle(value: float) -> str:

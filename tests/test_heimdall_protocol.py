@@ -6,6 +6,7 @@ import zlib
 
 import pytest
 
+from dsp_registry import DspParameterService
 from heimdall_protocol import HeimdallState, ProtocolError, parse_line
 from heimdall_transport import (
     DeployedProgram,
@@ -19,7 +20,11 @@ from heimdall_transport import (
 
 class DeterministicAdaptiveEmulator(EmulatorHeimdallTransport):
     def __init__(self, rows=7, columns=7):
-        super().__init__(rows=rows, columns=columns, sector_time_s=0.0)
+        registry = {"export": {"sha256": "0" * 64}, "map_hash": None, "parameters": []}
+        service = DspParameterService(loader=lambda: registry)
+        super().__init__(rows=rows, columns=columns, sector_time_s=0.0,
+                         parameter_service=service)
+        service.set(self, "measure", 1)
         self.test_levels = [100] * (rows * columns)
         self.measured_sectors = []
         self.running = True
@@ -191,10 +196,24 @@ def test_command_validation():
     assert validate_command("R,1") == "R,1"
     assert validate_command("R,0") == "R,0"
     assert validate_command("D") == "D"
+    assert validate_command("SET,window_us,5000") == "SET,window_us,5000"
+    pw_body = "PW,1134,01000000,FFFFFFFF"
+    checked_pw = validate_command(pw_body)
+    assert checked_pw.startswith(f"{pw_body}*")
+    assert validate_command(checked_pw) == checked_pw
+    assert validate_command("PR,1134,16") == "PR,1134,16"
+    assert validate_command("DG,-4000,4000,7,-3000,3000,7", sectors=49) == \
+        "DG,-4000,4000,7,-3000,3000,7"
     with pytest.raises(ValueError):
         validate_command("S,400", sectors=400)
     with pytest.raises(ValueError):
         validate_command("s,1")
+    with pytest.raises(ValueError):
+        validate_command("PW,1134,01000000*00")
+    with pytest.raises(ValueError):
+        validate_command("PR,1134,17")
+    with pytest.raises(ValueError):
+        validate_command("DG,-4000,4000,8,-3000,3000,7", sectors=49)
 
 
 def test_recording_and_audio_transfer_records():
@@ -278,6 +297,21 @@ def test_serial_audio_payload_uses_exact_length_not_newline_framing():
     assert transport.serial.writes == [b"\x06", b"\x06"]
 
 
+def test_transport_request_waits_for_matching_reply_and_reports_firmware_errors():
+    class ReplyTransport(HeimdallTransport):
+        def send_command(self, command):
+            if command == "PR,100,2":
+                self.apply_line("PV,100,01000000,FFFFFFFF")
+            else:
+                self.apply_line("ERR,PW,ADDR")
+
+    transport = ReplyTransport()
+    record = transport.request("PR,100,2", {"pv"})
+    assert record == {"type": "pv", "address": 100, "words": [1 << 24, -1]}
+    with pytest.raises(RuntimeError, match="PW: ADDR"):
+        transport.request("PW,100,01000000", {"pw_ok"})
+
+
 def test_emulator_uses_the_same_protocol_state_path():
     emulator = EmulatorHeimdallTransport(
         rows=3,
@@ -305,6 +339,68 @@ def test_emulator_uses_the_same_protocol_state_path():
     finally:
         emulator.stop()
         emulator.join(timeout=1.0)
+
+
+def test_emulator_study_commands_round_trip_through_protocol():
+    registry = {
+        "export": {"sha256": "0" * 64},
+        "map_hash": "0123456789abcdef",
+        "parameters": [{
+            "block": "Gain_DSP00", "name": "Gain", "address": 100, "words": 1,
+            "default_words": [1 << 24], "writable": True, "reason": "",
+        }],
+    }
+    service = DspParameterService(loader=lambda: registry)
+    emulator = EmulatorHeimdallTransport(
+        rows=3,
+        columns=3,
+        sector_time_s=0.0,
+        parameter_service=service,
+        program=DeployedProgram(map_hash="0123456789abcdef"),
+    )
+    emulator.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while emulator.snapshot()["map_hash"] is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert emulator.snapshot()["map_hash"] == "0123456789abcdef"
+        assert emulator.request("SET,window_us,8000", {"set_ok"})["value"] == 8000
+        assert emulator.request("PW,100,00800000", {"pw_ok"})["count"] == 1
+        assert emulator.request("PR,100,1", {"pv"})["words"] == [1 << 23]
+        direction_set = emulator.request("DG,-4000,4000,3,-3000,3000,2", {"dirset"})
+        assert (direction_set["rows"], direction_set["columns"]) == (2, 3)
+        assert emulator.snapshot()["configuration"]["sectors"] == 6
+    finally:
+        emulator.stop()
+        emulator.join(timeout=1.0)
+
+
+def test_emulator_shared_detector_smears_but_mcu_window_does_not():
+    class Provider:
+        def level_for_sector(self, sector):
+            return (1000, 0)[sector]
+
+        def metadata(self):
+            return {}
+
+    registry = {"export": {"sha256": "0" * 64}, "map_hash": None, "parameters": []}
+    service = DspParameterService(loader=lambda: registry)
+    emulator = EmulatorHeimdallTransport(
+        rows=1,
+        columns=2,
+        sector_time_s=0.01,
+        level_provider=Provider(),
+        parameter_service=service,
+        program=DeployedProgram(level_time_constant_ms=10.0),
+    )
+    first = emulator._measurement_level(0)
+    smeared_quiet = emulator._measurement_level(1)
+    assert 600 <= first <= 650
+    assert 200 <= smeared_quiet <= 250
+
+    service.set(emulator, "measure", 1)
+    assert emulator._measurement_level(0) == 1000
+    assert emulator._measurement_level(1) == 0
 
 
 def test_acoustic_level_provider_uses_the_same_emulator_policy():
@@ -447,6 +543,7 @@ def test_emulator_evasive_dropout_forces_loss_and_reacquisition():
     emulator.running = True
     emulator.connected = True
     emulator._emit_configuration()
+    emulator.parameter_service.set(emulator, "measure", 1)
     emulator._handle_command("G")
     for _ in range(3):
         emulator._adaptive_cycle()
