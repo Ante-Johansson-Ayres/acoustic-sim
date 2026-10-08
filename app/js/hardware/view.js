@@ -7,6 +7,7 @@
 import { h, options, segmented, setText } from '../shared/dom.js';
 import { deg, formatAge, num } from '../shared/format.js';
 import { SectorMap } from './map.js';
+import { BankPanel } from './bank.js';
 import { HistoryCharts } from './history.js';
 import { StatusColumn } from './status.js';
 import { AcousticScene, AuditionPanel, ConnectionPanel } from './connection.js';
@@ -33,7 +34,8 @@ export function createView(container, {session}) {
   const acoustic = new AcousticScene();
   const connection = new ConnectionPanel(session, acoustic);
   const audition = new AuditionPanel(session, acoustic);
-  const status = new StatusColumn(session, {extra: audition.el});
+  const bank = new BankPanel(session);
+  const status = new StatusColumn(session, {extra: h('div', {class: 'hw-extra'}, bank.el, audition.el)});
   const history = new HistoryCharts();
   const map = new SectorMap({onPick: (sector) => steerTo(sector, ' from the map'), onHover: setHover});
   let scene3d = null;
@@ -45,6 +47,8 @@ export function createView(container, {session}) {
   });
   const stopButton = h('button', {type: 'button', class: 'btn btn--lg', onClick: () => session.stop()},
     h('span', {class: 'btn__stop', 'aria-hidden': 'true'}), 'Stop');
+  const stareButton = h('button', {type: 'button', class: 'btn btn--lg', 'aria-pressed': 'false', hidden: true,
+    title: 'Watch every bank direction at once and steer to the strongest', onClick: () => session.stare()}, 'Stare');
   const sectorInput = h('input', {id: 'hw-sector', class: 'input input--mono input--lg', type: 'number', min: 0, value: 21,
     style: {width: '76px'}, onInput: () => { state.sectorTouched = true; }});
   const steerButton = h('button', {type: 'button', class: 'btn btn--lg',
@@ -58,7 +62,7 @@ export function createView(container, {session}) {
   const rateSelect = h('select', {class: 'select select--sm', 'aria-label': 'Monitor rate',
     onChange: () => session.setMonitorRate(parseInt(rateSelect.value, 10))}, options(RATES, String(session.monitorRate)));
   const toolbar = h('div', {class: 'toolbar', role: 'toolbar', 'aria-label': 'Scan controls'},
-    modeSeg.el, stopButton,
+    modeSeg.el, stareButton, stopButton,
     h('span', {class: 'toolbar__divider', 'aria-hidden': 'true'}),
     h('label', {for: 'hw-sector', class: 'toolbar__label'}, 'Sector'), sectorInput, steerButton,
     monitorButton, rateSelect,
@@ -265,6 +269,11 @@ export function createView(container, {session}) {
     modeSeg.setDisabled(!ready);
     const active = session.monitoring ? null : session.firmwareMode;
     modeSeg.set(['F', 'C', 'G'].includes(active) ? active : null);
+    stareButton.hidden = !frame?.bank;
+    stareButton.disabled = !ready;
+    stareButton.setAttribute('aria-pressed', String(active === 'B'));
+    stareButton.classList.toggle('is-active', active === 'B');
+    bank.render(frame, {floor: prefs.floor});
     stopButton.disabled = !open;
     steerButton.disabled = !ready;
     monitorButton.disabled = !ready;

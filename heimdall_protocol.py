@@ -129,8 +129,55 @@ def parse_line(line: str) -> dict[str, Any]:
     if record_type == "SCAN_STOPPED" and len(parts) == 1:
         return {"type": "scan_stopped"}
 
-    if record_type == "SCAN_STARTED" and len(parts) == 2 and parts[1] in {"F", "C", "G"}:
+    if record_type == "SCAN_STARTED" and len(parts) == 2 and parts[1] in {"F", "C", "G", "B"}:
         return {"type": "scan_started", "mode": parts[1]}
+
+    if record_type == "BANK" and len(parts) == 4:
+        return {
+            "type": "bank",
+            "rows": _integer(parts[1], "bank rows", 1, 20),
+            "columns": _integer(parts[2], "bank columns", 1, 20),
+            "rate_hz": _integer(parts[3], "bank rate", 1),
+        }
+
+    if record_type == "OUTPUTS" and len(parts) == 3:
+        return {
+            "type": "outputs",
+            "microphones": _integer(parts[1], "microphones", 1, 255),
+            "bank_beams": _integer(parts[2], "bank beams", 0, 400),
+        }
+
+    if record_type == "LEVELS" and len(parts) >= 5 and parts[1] == "B":
+        rows = _integer(parts[2], "rows", 1, 20)
+        columns = _integer(parts[3], "columns", 1, 20)
+        if len(parts) != 4 + rows * columns:
+            raise ProtocolError("level count does not match rows and columns")
+        return {
+            "type": "levels",
+            "source": "B",
+            "rows": rows,
+            "columns": columns,
+            "raw_levels": [_integer(value, "raw level") for value in parts[4:]],
+        }
+
+    if record_type == "BANK_TARGET" and len(parts) == 7:
+        return {
+            "type": "bank_target",
+            "beam": _integer(parts[1], "beam", 0, 399),
+            "second_beam": _integer(parts[2], "second beam", 0, 399),
+            "azimuth_deg": _number(parts[3], "azimuth"),
+            "elevation_deg": _number(parts[4], "elevation"),
+            "sector": _integer(parts[5], "sector", 0, 65535),
+            "raw_level": _integer(parts[6], "raw level"),
+        }
+
+    if record_type == "CH1" and len(parts) == 4:
+        return {
+            "type": "ch1",
+            "source": _integer(parts[1], "Ch1 source", 0, 2),
+            "index": _integer(parts[2], "Ch1 index", 0, 399),
+            "code": _signed_integer(parts[3], "error code"),
+        }
 
     if record_type == "STEER_OK" and len(parts) == 6:
         return {
@@ -276,6 +323,12 @@ class HeimdallState:
         self.taper: dict[str, Any] | None = None
         self.dsp: dict[str, Any] | None = None
         self.tables: dict[str, Any] | None = None
+        self.bank: dict[str, Any] | None = None
+        self.bank_levels_raw: list[int] | None = None
+        self.bank_maps = 0
+        self.bank_target: dict[str, Any] | None = None
+        self.outputs: dict[str, Any] | None = None
+        self.ch1: dict[str, Any] | None = None
 
     def apply_line(self, line: str) -> dict[str, Any]:
         record = parse_line(line)
@@ -283,6 +336,11 @@ class HeimdallState:
 
         if record_type == "ready":
             configuration = record["configuration"]
+            # The bank and output lines follow READY on every INFO.
+            self.bank = None
+            self.bank_levels_raw = None
+            self.bank_target = None
+            self.outputs = None
             if configuration != self.configuration:
                 self.configuration = configuration
                 self.azimuth_deg = []
@@ -313,6 +371,23 @@ class HeimdallState:
             self.mode = record["mode"]
             self.target = None
             self.last_steer = None
+            self.bank_target = None
+        elif record_type == "bank":
+            self.bank = {key: record[key] for key in ("rows", "columns", "rate_hz")}
+        elif record_type == "outputs":
+            self.outputs = {key: record[key] for key in ("microphones", "bank_beams")}
+        elif record_type == "levels":
+            if self.bank is None or (record["rows"], record["columns"]) != (self.bank["rows"], self.bank["columns"]):
+                raise ProtocolError("bank levels do not match the BANK record")
+            self.bank_levels_raw = record["raw_levels"]
+            self.bank_maps += 1
+        elif record_type == "bank_target":
+            self._require_configuration()
+            if record["sector"] >= self.configuration.sectors:
+                raise ProtocolError("bank target sector is outside READY dimensions")
+            self.bank_target = record
+        elif record_type == "ch1":
+            self.ch1 = {key: record[key] for key in ("source", "index", "code")}
         elif record_type == "scan_done":
             self.scan_count += 1
             if self.mode == "F":
@@ -320,6 +395,7 @@ class HeimdallState:
         elif record_type == "scan_stopped":
             self.mode = "IDLE"
             self.target = None
+            self.bank_target = None
         elif record_type == "steer_ok":
             self._validate_grid_position(record)
             self.mode = "IDLE"
@@ -419,6 +495,26 @@ class HeimdallState:
             "taper": deepcopy(self.taper),
             "dsp": deepcopy(self.dsp),
             "tables": deepcopy(self.tables),
+            "bank": self._bank_snapshot(),
+            "outputs": deepcopy(self.outputs),
+            "ch1": deepcopy(self.ch1),
+        }
+
+    def _bank_snapshot(self) -> dict[str, Any] | None:
+        if self.bank is None:
+            return None
+        rows, columns = self.bank["rows"], self.bank["columns"]
+        raw = self.bank_levels_raw
+        db = None if raw is None else [
+            [linear_to_db(raw_8_24_to_linear(raw[row * columns + column])) for column in range(columns)]
+            for row in range(rows)
+        ]
+        return {
+            **self.bank,
+            "levels_raw": None if raw is None else list(raw),
+            "levels_db": db,
+            "maps": self.bank_maps,
+            "target": deepcopy(self.bank_target),
         }
 
     def _require_configuration(self) -> None:

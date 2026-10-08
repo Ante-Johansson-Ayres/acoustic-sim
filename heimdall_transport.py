@@ -14,6 +14,7 @@ import time
 from typing import Any
 import zlib
 
+from heimdall_bank import BankTracker, LOST_MAPS as BANK_LOST_MAPS, PERIOD_S as BANK_PERIOD_S
 from heimdall_protocol import HeimdallState, ProtocolError
 
 
@@ -36,10 +37,18 @@ class DeployedProgram:
     signature_words: int = 44
     table_words: int = 0
     taper_sigma: float = 0.0
+    microphones: int = 44
+    selectors: bool = False
+    bank_rows: int = 0
+    bank_columns: int = 0
+    bank_rate_hz: int = 0
+    bank_azimuth_deg: tuple[float, ...] = ()
+    bank_elevation_deg: tuple[float, ...] = ()
 
     @classmethod
     def from_contract(cls, contract: dict[str, Any]) -> "DeployedProgram":
         steering = contract["steering"]
+        bank = contract.get("bank") or {}
         return cls(
             name=str(contract["dsp_export"]["name"]),
             style=str(steering["style"]),
@@ -47,7 +56,27 @@ class DeployedProgram:
             signature_words=len(contract["signature"]),
             table_words=int(steering["table_words"]),
             taper_sigma=float(contract["taper_sigma"]),
+            microphones=int(contract.get("microphones", 44)),
+            selectors=bool(contract.get("selectors")),
+            bank_rows=int(bank.get("rows", 0)),
+            bank_columns=int(bank.get("columns", 0)),
+            bank_rate_hz=int(bank.get("sample_rate_hz", 0)),
+            bank_azimuth_deg=tuple(float(value) for value in bank.get("azimuth_deg", ())),
+            bank_elevation_deg=tuple(float(value) for value in bank.get("elevation_deg", ())),
         )
+
+    @property
+    def bank_beams(self) -> int:
+        return self.bank_rows * self.bank_columns
+
+    def configuration_lines(self) -> list[str]:
+        """What the firmware prints after AZIMUTH/ELEVATION for this program."""
+        lines = []
+        if self.bank_beams:
+            lines.append(f"BANK,{self.bank_rows},{self.bank_columns},{self.bank_rate_hz}")
+        if self.selectors:
+            lines.append(f"OUTPUTS,{self.microphones},{self.bank_beams}")
+        return lines
 
     def boot_lines(self) -> list[str]:
         """What the firmware prints after INFO when the EEPROM holds this program."""
@@ -330,6 +359,11 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.failed_track_passes = 0
         self.tracking_passes = 0
         self.confirm_passes = 0
+        self.bank_tracker: BankTracker | None = None
+        self.bank_has_target = False
+        self.bank_lost_maps = 0
+        self.bank_target_sector = 0
+        self.ch1_bank_beam: int | None = None
 
     def snapshot(self) -> dict[str, Any]:
         snapshot = super().snapshot()
@@ -349,13 +383,16 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         try:
             while self.running:
                 try:
-                    command = self.commands.get(timeout=0.01 if self.mode == "IDLE" else 0.0)
+                    timeout = 0.01 if self.mode == "IDLE" else BANK_PERIOD_S if self.mode == "B" else 0.0
+                    command = self.commands.get(timeout=timeout)
                     self._handle_command(command)
                 except queue.Empty:
                     if self.mode == "C":
                         self._scan_pass("C")
                     elif self.mode == "G":
                         self._adaptive_cycle()
+                    elif self.mode == "B":
+                        self._stare_cycle()
         finally:
             self.connected = False
             self.running = False
@@ -378,6 +415,26 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
             self.mode = "G"
             self._reset_adaptive_search()
             self.apply_line("SCAN_STARTED,G")
+        elif command == "B":
+            if not self.program.bank_beams:
+                self.apply_line("ERR,MALFORMED_COMMAND")
+                return
+            self.mode = "B"
+            self.bank_tracker = BankTracker(
+                self.program.bank_rows, self.program.bank_columns,
+                list(self.program.bank_azimuth_deg), list(self.program.bank_elevation_deg),
+                self.azimuth_deg, self.elevation_deg,
+            )
+            self.bank_has_target = False
+            self.bank_lost_maps = 0
+            self.apply_line("SCAN_STARTED,B")
+        elif command.startswith("O,"):
+            source, index = (int(value) for value in command[2:].split(","))
+            limit = {0: 1, 1: self.program.microphones, 2: self.program.bank_beams}[source]
+            valid = self.program.selectors and index < limit
+            if valid and source == 2:
+                self.ch1_bank_beam = index
+            self.apply_line(f"CH1,{source},{index},{0 if valid else -1}")
         elif command == "X":
             self.mode = "IDLE"
             self.adaptive_state = "IDLE"
@@ -400,8 +457,39 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.apply_line(f"READY,2D,{self.rows},{self.columns},{sectors},44")
         self.apply_line("AZIMUTH," + str(self.columns) + "," + ",".join(_format_angle(v) for v in self.azimuth_deg))
         self.apply_line("ELEVATION," + str(self.rows) + "," + ",".join(_format_angle(v) for v in self.elevation_deg))
+        for line in self.program.configuration_lines():
+            self.apply_line(line)
         for line in self.program.boot_lines():
             self.apply_line(line)
+
+    def _stare_cycle(self) -> None:
+        """One bank map, as the firmware's step_stare does it."""
+        program = self.program
+        levels = [self._level_for_direction(azimuth, elevation)
+                  for azimuth, elevation in zip(program.bank_azimuth_deg, program.bank_elevation_deg)]
+        self.apply_line(f"LEVELS,B,{program.bank_rows},{program.bank_columns}," + ",".join(map(str, levels)))
+        result = self.bank_tracker.update(levels)
+        if not result.beams:
+            if self.bank_has_target:
+                self.bank_lost_maps += 1
+                if self.bank_lost_maps >= BANK_LOST_MAPS:
+                    self._emit_target("TARGET_LOST", self.bank_target_sector, 0)
+                    self.bank_has_target = False
+            return
+        self.bank_lost_maps = 0
+        listen = result.beams[1] if len(result.beams) > 1 else result.beams[0]
+        self.apply_line(
+            f"BANK_TARGET,{result.beams[0]},{listen},{_format_angle(result.azimuth_deg)},"
+            f"{_format_angle(result.elevation_deg)},{result.sector},{result.levels[0]}"
+        )
+        if program.selectors and self.ch1_bank_beam != listen:
+            self.ch1_bank_beam = listen
+            self.apply_line(f"CH1,2,{listen},0")
+        self.current_sector = result.sector
+        self.bank_target_sector = result.sector
+        level = self._level_for_sector(result.sector)
+        self._emit_target("TARGET_UPDATED" if self.bank_has_target else "TARGET_ACQUIRED", result.sector, level)
+        self.bank_has_target = True
 
     def _scan_pass(self, mode: str) -> None:
         started = time.monotonic()
@@ -633,9 +721,15 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         if self.level_provider is not None:
             return self.level_provider.level_for_sector(sector)
         row, column = divmod(sector, self.columns)
+        return self._level_for_direction(self.azimuth_deg[column], self.elevation_deg[row])
+
+    def _level_for_direction(self, azimuth_deg: float, elevation_deg: float) -> int:
+        if self.level_provider is not None:
+            # The acoustic cache holds the steered sectors only; a bank beam reads its nearest one.
+            return self.level_provider.level_for_sector(self.bank_tracker.nearest_sector(azimuth_deg, elevation_deg))
         target_azimuth, target_elevation, target_range, attenuation = self._target_state()
-        azimuth_error = self.azimuth_deg[column] - target_azimuth
-        elevation_error = self.elevation_deg[row] - target_elevation
+        azimuth_error = azimuth_deg - target_azimuth
+        elevation_error = elevation_deg - target_elevation
         distance_squared = azimuth_error * azimuth_error + elevation_error * elevation_error
         # Far-field pressure amplitude is proportional to 1/r; 30 m is the reference.
         range_gain = min(1.4, 30.0 / max(8.0, target_range))
@@ -673,10 +767,12 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
 
 def validate_command(command: str, sectors: int = 65535) -> str:
     command = command.strip()
-    if command in {"F", "C", "G", "X", "I", "M", "R,1", "R,0", "D"}:
+    if command in {"F", "C", "G", "B", "X", "I", "M", "R,1", "R,0", "D"}:
         return command
     match = re.fullmatch(r"S,(\d+)", command)
     if match and int(match.group(1)) < sectors:
+        return command
+    if re.fullmatch(r"O,[0-2],\d{1,3}", command):
         return command
     raise ValueError("invalid Heimdall command")
 

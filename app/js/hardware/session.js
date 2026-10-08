@@ -17,7 +17,7 @@ export const HISTORY_WINDOW_S = 30;
 const HISTORY_MAX = 600;
 const EVENT_LOG_MAX = 50;
 
-const MODE_NAMES = {F: 'Single sweep', C: 'Continuous scan', G: 'Tracking', IDLE: 'Idle'};
+const MODE_NAMES = {F: 'Single sweep', C: 'Continuous scan', G: 'Tracking', B: 'Stare', IDLE: 'Idle'};
 
 export class HardwareSession extends EventTarget {
   constructor() {
@@ -250,7 +250,13 @@ export class HardwareSession extends EventTarget {
   sweepOnce() { this.modeCommand('F', 'Single sweep requested'); }
   continuous() { this.modeCommand('C', 'Continuous scan requested'); }
   track() { this.modeCommand('G', 'Tracking requested'); }
+  stare() { this.modeCommand('B', 'Stare requested'); }
   stop() { this.modeCommand('X', 'Stop requested', 'warning'); }
+
+  selectOutput(source, index) {
+    const names = ['the steered beam', `microphone ${index}`, `bank beam ${index}`];
+    if (this.command(`O,${source},${index}`)) this.addEvent('AUDIO', `Ch1 set to ${names[source]}`);
+  }
 
   modeCommand(command, text, tone = '') {
     this.stopMonitor();
@@ -505,8 +511,12 @@ export class HardwareSession extends EventTarget {
       kind = marker ? 'strongest' : null;
     }
     if (!marker) return null;
-    const azimuth = Number.isFinite(marker.azimuth_deg) ? marker.azimuth_deg : frame.azimuth_deg?.[marker.column];
-    const elevation = Number.isFinite(marker.elevation_deg) ? marker.elevation_deg : frame.elevation_deg?.[marker.row];
+    // In stare mode the bank interpolates between its beams, finer than the sector grid.
+    const bankTarget = kind === 'target' ? frame.bank?.target : null;
+    const azimuth = Number.isFinite(bankTarget?.azimuth_deg) ? bankTarget.azimuth_deg
+      : Number.isFinite(marker.azimuth_deg) ? marker.azimuth_deg : frame.azimuth_deg?.[marker.column];
+    const elevation = Number.isFinite(bankTarget?.elevation_deg) ? bankTarget.elevation_deg
+      : Number.isFinite(marker.elevation_deg) ? marker.elevation_deg : frame.elevation_deg?.[marker.row];
     const level = frame.levels_db?.[marker.row]?.[marker.column];
     return {
       kind,

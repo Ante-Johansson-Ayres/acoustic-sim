@@ -11,6 +11,7 @@ export function operatingMode(session) {
   if (session.monitoring) return 'fixed';
   const mode = frame?.firmware_mode;
   if (mode === 'G') return 'track';
+  if (mode === 'B') return 'stare';
   if (mode === 'C') return 'continuous';
   if (mode === 'F') return 'once';
   if (frame?.last_steer) return 'fixed';
@@ -135,6 +136,9 @@ export class StatusColumn {
         } else if (mode === 'track') {
           chip = 'Searching';
           detail = `Searching the field for a source. ${where} is strongest so far at ${level}.`;
+        } else if (mode === 'stare') {
+          chip = 'Watching';
+          detail = 'The beam bank listens in every direction at once. No direction stands out yet.';
         } else {
           chip = mode === 'once' ? 'Single sweep' : 'Last sweep';
           detail = `${where} at ${level}, from the last full pass ${formatAge(answer.ageMs)} ago.`;
@@ -143,6 +147,9 @@ export class StatusColumn {
     } else if (mode === 'track') {
       chip = 'Searching'; tone = 'plain';
       detail = 'Searching the field for a source.';
+    } else if (mode === 'stare') {
+      chip = 'Watching'; tone = 'plain';
+      detail = 'The beam bank listens in every direction at once. No direction stands out yet.';
     }
     setText(this.title, title);
     setText(this.chip, chip);
@@ -178,6 +185,10 @@ export class StatusColumn {
     } else if (mode === 'continuous') {
       values = [hz(scan, 1), hz(scan, 1)];
       note = cfg ? `Every pass re-measures all ${cfg.sectors} sectors.` : '';
+    } else if (mode === 'stare') {
+      labels = ['Direction updates', 'Bank directions'];
+      values = [trackCurrent ? hz(track, 0) : '—', frame?.bank ? String(frame.bank.rows * frame.bank.columns) : '—'];
+      note = 'The bank measures all its directions together every 50 ms; the steered beam follows the strongest.';
     } else if (mode === 'once') {
       values = ['—', '1 pass'];
       note = 'The map holds the result of one pass until you start another.';
