@@ -1,8 +1,9 @@
 # Acoustic Visualiser
 
 The project has one Vite frontend source under `app/` and one FastAPI backend in
-`sim_server.py`. Do not maintain a separate HTML implementation under
-`results/`.
+`sim_server.py`. The early comparison study (plots and the old single-file
+explorer) is archived under `docs/archive/early_comparison_study/`; the guides
+are in `docs/`.
 
 ## Setup
 

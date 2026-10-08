@@ -19,6 +19,11 @@ venv/
 # IDE
 .vscode/
 .idea/
+.specstory/
+.cursorindexingignore
+
+# run_comparison.py output
+results/
 
 # OS
 Thumbs.db
