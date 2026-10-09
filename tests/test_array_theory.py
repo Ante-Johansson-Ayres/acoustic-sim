@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 from fastapi.testclient import TestClient
 
-from array_theory import array_factor, beam_cut, beamwidth
+from array_theory import array_factor, beam_cut, beamwidth, white_noise_gain_db
 from heimdall_acoustic import load_beam_contract
 import sim_server
+
+
+def test_white_noise_gain_is_largest_for_equal_weights():
+    assert white_noise_gain_db([1.0] * 44) == pytest.approx(10 * math.log10(44))
+    assert white_noise_gain_db([1.0] * 43 + [0.25]) < 10 * math.log10(44)
 
 
 def test_array_factor_is_normalized_at_the_steering_direction():
@@ -37,4 +44,5 @@ def test_study_theory_cut_endpoint():
         body = response.json()
         assert len(body["points"]) == 61
         assert body["beamwidth_3db"]["width_deg"] == pytest.approx(20.0, abs=2.0)
+        assert 0.0 < body["white_noise_gain_db"] <= 10 * math.log10(44) + 1e-9
         assert client.get("/study/theory/cut", params={"axis": "range"}).status_code == 400

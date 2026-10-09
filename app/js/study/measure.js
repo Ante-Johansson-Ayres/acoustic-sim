@@ -14,21 +14,22 @@ import { download } from '../shared/dom.js';
 import { apiJson } from '../shared/api.js';
 import { dsp } from './dsp.js';
 import { runCsv } from './runcsv.js';
+import { arrayGainDb, fitDetectorDecay, refinePeak, refinePeak2d, signalDb, snrDb } from './analysis.js';
 
 const RUNS_KEY = 'heimdall.study.runs';
 const put = (el, ...kids) => el.replaceChildren(...kids.flat().filter(Boolean));
 
 const TEMPLATES = [
   {key: 'microphones', name: 'Microphone survey', ready: true,
-    text: 'Route each microphone to Ch1 and compare it with a reference under the same broadside source. Finds weak, dead, noisy or reversed channels and produces calibration rows.'},
+    text: 'Route each microphone to Ch1 under the same broadside source and compare it with a reference. An optional pass with the source off gives each microphone\'s noise and SNR. Needs a program with an output selector.'},
   {key: 'beamcut', name: 'Beam-pattern cut', ready: true,
     text: 'Load a fine direction set across a fixed speaker, measure every direction, and overlay the deployed-array theory at the chosen frequency.'},
-  {key: 'detectorstep', name: 'Detector step response', ready: true,
-    text: 'Jump from a loud direction to a quiet direction and fit the shared detector decay time constant from the transient samples.'},
+  {key: 'detectorstep', name: 'Detector time constant', ready: true,
+    text: 'Dwell on a loud direction, then steer to a quiet one and read once after a settle time set in the firmware. Sweeping the settle time traces the shared detector\'s decay with firmware timing.'},
   {key: 'steering', name: 'Steering accuracy', ready: true,
     text: 'Search a fine grid around a marked speaker angle and report the measured peak and angular error.'},
   {key: 'arraygain', name: 'Array gain', ready: true,
-    text: 'Compare the steered beam on Ch0 with one selected microphone on Ch1 using identical MCU windows.'},
+    text: 'Beam SNR minus single-microphone SNR, each from captures with the source on and off. Fixed gains on either path cancel. Needs a program with an output selector.'},
   {key: 'snr', name: 'Signal-to-noise ratio', ready: true,
     text: 'Hold one beam on the source. Capture the level with the source on, then off. SNR is the on/off power ratio above the floor.'},
   {key: 'width', name: 'Main-lobe width, move the source', ready: true,
@@ -101,39 +102,48 @@ async function capture(session, sector, seconds, rate, onProgress) {
     std_db: stdDb(levels), min_db: Math.min(...levels), max_db: Math.max(...levels)};
 }
 
-async function captureSeries(session, sector, seconds, rate, onProgress) {
-  if (!session.ready || !session.validSector(sector)) throw new Error('Connect to a device and choose a valid sector.');
-  if (session.firmwareMode !== 'IDLE') session.command('X');
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function ensureIdle(session) {
+  if (session.firmwareMode === 'IDLE') return;
+  session.command('X');
   const deadline = performance.now() + 3000;
-  while (session.firmwareMode !== 'IDLE' && performance.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
+  while (session.firmwareMode !== 'IDLE' && performance.now() < deadline) await sleep(25);
+}
+
+/** Send S,<sector> or M and return the one level the firmware reads (it settles after a steer). */
+async function readOnce(session, command, sector) {
+  const before = Number(session.latest?.sequence || 0);
+  if (!session.command(command)) throw new Error('No active hardware link.');
+  const deadline = performance.now() + 2000;
+  while (performance.now() < deadline) {
+    const frame = session.latest;
+    if (Number(frame?.sequence || 0) > before && frame.last_record?.type === 'measurement' &&
+        frame.last_steer?.sector === sector) {
+      const level = frame.levels_db?.[frame.last_steer.row]?.[frame.last_steer.column];
+      if (Number.isFinite(level)) return level;
+    }
+    await sleep(5);
   }
-  session.setMonitorRate(rate);
-  const samples = [];
-  let lastSeq = null;
-  const started = performance.now();
-  const onFrame = () => {
-    const frame = session.frame;
-    if (!frame || frame.sequence === lastSeq || frame.last_record?.type !== 'measurement') return;
-    lastSeq = frame.sequence;
-    if (frame.last_steer?.sector !== sector) return;
-    const level = frame.levels_db?.[frame.last_steer.row]?.[frame.last_steer.column];
-    if (Number.isFinite(level)) samples.push({time_ms: performance.now() - started, level_db: level});
-  };
-  session.addEventListener('frame', onFrame);
-  session.startMonitor(sector);
-  await new Promise((resolve) => {
-    const tick = () => {
-      const elapsed = (performance.now() - started) / 1000;
-      onProgress?.(Math.min(1, elapsed / seconds), samples.length);
-      if (elapsed >= seconds) resolve(); else setTimeout(tick, 20);
-    };
-    tick();
-  });
-  session.removeEventListener('frame', onFrame);
-  session.stopMonitor();
-  if (samples.length < 3) throw new Error('Too few transient readings arrived.');
-  return samples;
+  throw new Error(`No level reading arrived for ${command}.`);
+}
+
+/** Apply settings for one procedure and put the user's values back afterwards. */
+async function withSettings(session, changes, action) {
+  const before = session.latest?.settings || {};
+  const restore = Object.fromEntries(Object.keys(changes)
+    .filter((key) => Number.isFinite(before[key])).map((key) => [key, before[key]]));
+  await session.setMeasurementSettings(changes);
+  try {
+    return await action();
+  } finally {
+    await session.setMeasurementSettings(restore).catch(() => {});
+  }
+}
+
+/** Mean of detector readings on the raw state word, back in dB. */
+function rawMeanDb(levels) {
+  return 20 * Math.log10(levels.reduce((sum, db) => sum + 10 ** (db / 20), 0) / levels.length);
 }
 
 function widthAt(points, drop) {
@@ -186,7 +196,7 @@ export function measurementsScreen({session}) {
     return {
       device: session.open ? session.transportLabel : 'not connected',
       grid: session.configuration ? `${session.configuration.rows}x${session.configuration.columns}` : '',
-      register_map: dsp.registry?.export?.sha256?.slice(0, 16) || '',
+      map_hash: session.latest?.map_hash || dsp.registry?.map_hash || '',
       modified_words: dsp.status?.modified_words ?? '',
       detector_tau_ms: session.latest?.level_time_constant_ms ?? '',
       settings: {...(session.latest?.settings || dsp.status?.settings || {})},
@@ -289,72 +299,100 @@ export function measurementsScreen({session}) {
       return;
     }
 
+    const selectorWarning = connected && !session.hasSelectors
+      ? h('p', {class: 'note is-warn'}, 'This DSP program has no output selector, so Ch1 cannot carry one microphone. Use the Characterisation or Bank program.')
+      : null;
+    const parseMicList = (text) => {
+      const values = [];
+      for (const item of text.split(',')) {
+        const match = item.trim().match(/^(\d+)(?:-(\d+))?$/);
+        if (!match) continue;
+        const first = Number(match[1]); const last = Number(match[2] ?? match[1]);
+        for (let mic = first; mic <= last && mic < 44; mic++) if (!values.includes(mic)) values.push(mic);
+      }
+      return values;
+    };
+
     if (t.key === 'microphones') {
       const controls = captureControls({sectorDefault: defaultSector()});
       controls.seconds.input.value = 1;
       const reference = numberInput('Reference microphone', 0, {width: '110px', step: 1});
       const microphones = h('input', {class: 'input input--mono', value: '0-43', style: {width: '180px'}});
       const notes = notesInput();
-      const parseMics = () => {
-        const values = [];
-        for (const item of microphones.value.split(',')) {
-          const match = item.trim().match(/^(\d+)(?:-(\d+))?$/);
-          if (!match) continue;
-          const first = Number(match[1]); const last = Number(match[2] ?? match[1]);
-          for (let mic = first; mic <= last && mic < 44; mic++) if (!values.includes(mic)) values.push(mic);
-        }
-        return values;
-      };
-      const run = async () => {
-        const mics = parseMics();
-        if (!mics.length || !mics.includes(reference.value)) { setText(status, 'Include the reference microphone in the survey list.'); return; }
-        state.busy = true; progress.hidden = false;
-        const captures = [];
-        try {
-          await session.setMeasurementSettings({measure: 1, channel: 1});
-          for (let index = 0; index < mics.length; index++) {
-            const mic = mics[index];
-            session.selectOutput(1, mic);
-            await new Promise((resolve) => setTimeout(resolve, 75));
-            setText(status, `Measuring microphone ${mic} (${index + 1}/${mics.length})…`);
-            const measured = await capture(session, controls.sector.value, controls.seconds.value,
-              Number(controls.rate.value), (fraction) => { progress.value = (index + fraction) / mics.length; });
-            captures.push({label: `microphone ${mic}`, value: mic, ...measured});
-          }
-          const referenceCapture = captures.find((item) => item.value === reference.value);
-          const rows = captures.map((item) => ({
-            microphone: item.value,
-            relative_gain_db: item.mean_db - referenceCapture.mean_db,
-            gain_db: referenceCapture.mean_db - item.mean_db,
+      const draft = state.draft ||= {on: new Map(), off: new Map()};
+      const surveyRows = () => {
+        const ref = draft.on.get(reference.value);
+        if (!ref) return [];
+        const refOff = draft.off.get(reference.value);
+        return [...draft.on.values()].sort((a, b) => a.value - b.value).map((on) => {
+          const off = draft.off.get(on.value);
+          // With both noise passes, compare the source power alone.
+          const useOff = Boolean(refOff && off);
+          const micLevel = useOff ? signalDb(on.mean_db, off.mean_db) : on.mean_db;
+          const refLevel = useOff ? signalDb(ref.mean_db, refOff.mean_db) : ref.mean_db;
+          return {
+            microphone: on.value,
+            gain_db: Number.isFinite(micLevel) && Number.isFinite(refLevel) ? refLevel - micLevel : null,
             delay_us: null,
             polarity: null,
-            level_dbfs: item.mean_db,
-            noise_dbfs: item.min_db,
-            noise_std_db: item.std_db,
-          }));
-          state.draft = {captures, rows};
-          results.replaceChildren(
-            ...rows.map((row) => h('div', {class: 'ms-row'}, h('span', {}, `Mic ${row.microphone}`),
-              h('span', {class: 'mono'}, `${num(row.relative_gain_db, 2)} dB · noise σ ${num(row.noise_std_db, 2)} dB`))),
+            level_dbfs: on.mean_db,
+            noise_dbfs: off ? off.mean_db : null,
+            snr_db: off ? snrDb(on.mean_db, off.mean_db) : null,
+          };
+        });
+      };
+      const show = () => {
+        const rows = surveyRows();
+        const corrected = draft.off.has(reference.value);
+        put(results,
+          ...rows.map((row) => h('div', {class: 'ms-row'}, h('span', {}, `Mic ${row.microphone}`),
+            h('span', {class: 'mono'}, (row.gain_db === null ? 'no signal above its noise' : `correction ${num(row.gain_db, 2)} dB`) +
+              (row.snr_db === null ? '' : ` · SNR ${num(row.snr_db, 1)} dB`)))),
+          rows.length ? h('p', {class: 'note'}, corrected
+            ? 'Corrections use the source power above each microphone\'s noise.'
+            : 'Run the noise pass to correct for each microphone\'s noise. Delay and polarity are not measured yet.') : null,
+          rows.length ? h('div', {class: 'toolbar'},
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('microphones',
-              `Microphone survey, reference ${reference.value}`, captures,
-              {reference_microphone: reference.value, microphones: rows,
+              `Microphone survey, reference ${reference.value}`, [...draft.on.values(), ...draft.off.values()],
+              {reference_microphone: reference.value, noise_corrected: corrected, microphones: rows,
                 summary: `${rows.length} microphones, ref ${reference.value}`}, notes.value)}, 'Save run'),
             h('button', {type: 'button', class: 'btn', onClick: () => download(new Blob([
               JSON.stringify({schema: 'heimdall-microphone-calibration-v1',
                 generated_at: new Date().toISOString(), reference_microphone: reference.value,
                 microphones: rows.map(({microphone, gain_db, delay_us, polarity, noise_dbfs}) =>
                   ({microphone, gain_db, delay_us, polarity, noise_dbfs}))}, null, 2) + '\n'],
-            {type: 'application/json'}), `heimdall-microphone-calibration-${fileStamp()}.json`)}, 'Export calibration JSON'));
-          setText(status, `Measured ${rows.length} microphones.`);
-        } catch (error) { setText(status, error.message); }
-        finally { state.busy = false; progress.hidden = true; }
+            {type: 'application/json'}), `heimdall-microphone-calibration-${fileStamp()}.json`)}, 'Export calibration JSON')) : null);
       };
-      put(body, header(t), needConnection, controls.el,
+      const pass = async (key) => {
+        const mics = parseMicList(microphones.value);
+        if (!mics.length || !mics.includes(reference.value)) { setText(status, 'Include the reference microphone in the survey list.'); return; }
+        state.busy = true; progress.hidden = false;
+        try {
+          await withSettings(session, {measure: 1, channel: 1}, async () => {
+            for (let index = 0; index < mics.length; index++) {
+              const mic = mics[index];
+              await session.selectOutputChecked(1, mic);
+              setText(status, `Microphone ${mic} (${index + 1}/${mics.length}), source ${key}…`);
+              const measured = await capture(session, controls.sector.value, controls.seconds.value,
+                Number(controls.rate.value), (fraction) => { progress.value = (index + fraction) / mics.length; });
+              draft[key].set(mic, {label: `microphone ${mic}, source ${key}`, value: mic, ...measured});
+            }
+          });
+          setText(status, `Measured ${mics.length} microphones with the source ${key}.`);
+        } catch (error) { setText(status, error.message); }
+        finally { state.busy = false; progress.hidden = true; show(); }
+      };
+      const usable = connected && session.hasSelectors;
+      put(body, header(t), needConnection, selectorWarning, controls.el,
         h('div', {class: 'form-row'}, reference.el,
           h('div', {class: 'field'}, h('label', {}, 'Microphones (list or range)'), microphones)),
-        h('button', {type: 'button', class: 'btn btn--primary', disabled: !connected, onClick: run}, 'Run survey'),
-        progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes));
+        h('div', {class: 'toolbar'},
+          h('button', {type: 'button', class: 'btn btn--primary', disabled: !usable, onClick: () => pass('on')}, 'Survey with the source on'),
+          h('button', {type: 'button', class: 'btn', disabled: !usable, onClick: () => pass('off')}, 'Noise pass with the source off'),
+          h('button', {type: 'button', class: 'btn btn--ghost', onClick: () => { draft.on.clear(); draft.off.clear(); show(); }}, 'Start over')),
+        progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes),
+        h('p', {class: 'note'}, 'Keep the source level and position constant for both passes; microphones are measured one after another.'));
+      show();
       return;
     }
 
@@ -362,89 +400,135 @@ export function measurementsScreen({session}) {
       const controls = captureControls({sectorDefault: defaultSector()});
       const microphone = numberInput('Comparison microphone', 0, {width: '120px', step: 1});
       const notes = notesInput();
-      const run = async () => {
+      const draft = state.draft ||= {on: null, off: null, theory: null};
+      const show = () => {
+        const rows = ['on', 'off'].map((key) => h('div', {class: 'ms-row'}, h('span', {}, `Source ${key}`),
+          h('span', {class: 'mono'}, draft[key]
+            ? `beam ${num(draft[key].beam.mean_db, 1)} · microphone ${num(draft[key].mic.mean_db, 1)} dBFS` : '—')));
+        let figure = null;
+        if (draft.on && draft.off) {
+          const levels = {beamOn: draft.on.beam.mean_db, beamOff: draft.off.beam.mean_db,
+            micOn: draft.on.mic.mean_db, micOff: draft.off.mic.mean_db};
+          const gain = arrayGainDb(levels);
+          const beamSnr = snrDb(levels.beamOn, levels.beamOff);
+          const micSnr = snrDb(levels.micOn, levels.micOff);
+          const expected = draft.theory?.white_noise_gain_db;
+          figure = [
+            h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Array gain'),
+              h('span', {class: 'ms-figure__value'}, Number.isFinite(gain) ? `${num(gain, 1)} dB` : 'source below the noise')),
+            h('p', {class: 'note'}, `Beam SNR ${num(beamSnr, 1)} dB, microphone SNR ${num(micSnr, 1)} dB.` +
+              (Number.isFinite(expected) ? ` Theory against noise uncorrelated between microphones: ${num(expected, 1)} dB. Room noise is partly correlated at low frequencies, so expect less.` : '')),
+            h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('arraygain',
+              `Array gain, sector ${controls.sector.value}, microphone ${microphone.value}`,
+              [draft.on.beam, draft.on.mic, draft.off.beam, draft.off.mic],
+              {array_gain_db: gain, beam_snr_db: beamSnr, microphone_snr_db: micSnr,
+                theory_white_noise_gain_db: expected ?? null, summary: `${num(gain, 1)} dB`}, notes.value)}, 'Save run'),
+          ];
+        }
+        put(results, ...rows, figure);
+      };
+      const pass = async (key) => {
         state.busy = true; progress.hidden = false;
         try {
-          await session.setMeasurementSettings({measure: 1, channel: 0});
-          const beam = await capture(session, controls.sector.value, controls.seconds.value,
-            Number(controls.rate.value), (fraction) => { progress.value = fraction / 2; });
-          session.selectOutput(1, microphone.value);
-          await session.setMeasurementSettings({channel: 1});
-          const mic = await capture(session, controls.sector.value, controls.seconds.value,
-            Number(controls.rate.value), (fraction) => { progress.value = 0.5 + fraction / 2; });
-          const gain = beam.mean_db - mic.mean_db;
-          const captures = [{label: 'steered beam', value: controls.sector.value, ...beam},
-            {label: `microphone ${microphone.value}`, value: microphone.value, ...mic}];
-          put(results,
-            h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Array gain'),
-              h('span', {class: 'ms-figure__value'}, `${num(gain, 1)} dB`)),
-            h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('arraygain',
-              `Array gain, sector ${controls.sector.value}`, captures,
-              {beam_dbfs: beam.mean_db, microphone_dbfs: mic.mean_db, array_gain_db: gain,
-                summary: `${num(gain, 1)} dB`}, notes.value)}, 'Save run'));
-          setText(status, `Beam ${num(beam.mean_db, 1)} dBFS, microphone ${num(mic.mean_db, 1)} dBFS.`);
+          draft[key] = await withSettings(session, {measure: 1, channel: 0}, async () => {
+            const beam = await capture(session, controls.sector.value, controls.seconds.value,
+              Number(controls.rate.value), (fraction) => { progress.value = fraction / 2; });
+            await session.selectOutputChecked(1, microphone.value);
+            await session.setSetting('channel', 1, 'channel', false);
+            const mic = await capture(session, controls.sector.value, controls.seconds.value,
+              Number(controls.rate.value), (fraction) => { progress.value = 0.5 + fraction / 2; });
+            return {beam: {label: `steered beam, source ${key}`, value: controls.sector.value, ...beam},
+              mic: {label: `microphone ${microphone.value}, source ${key}`, value: microphone.value, ...mic}};
+          });
+          draft.theory ||= await apiJson('/study/theory/cut?step_deg=10').catch(() => null);
+          setText(status, `Captured the beam and the microphone with the source ${key}.`);
         } catch (error) { setText(status, error.message); }
-        finally { state.busy = false; progress.hidden = true; }
+        finally { state.busy = false; progress.hidden = true; show(); }
       };
-      put(body, header(t), needConnection, controls.el, microphone.el,
-        h('button', {type: 'button', class: 'btn btn--primary', disabled: !connected, onClick: run}, 'Measure array gain'),
+      const usable = connected && session.hasSelectors;
+      put(body, header(t), needConnection, selectorWarning, controls.el, microphone.el,
+        h('div', {class: 'toolbar'},
+          h('button', {type: 'button', class: 'btn btn--primary', disabled: !usable, onClick: () => pass('on')}, 'Capture with the source on'),
+          h('button', {type: 'button', class: 'btn', disabled: !usable, onClick: () => pass('off')}, 'Capture with the source off')),
         progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes));
+      show();
       return;
     }
 
     if (t.key === 'detectorstep') {
       const loud = numberInput('Loud sector', defaultSector(), {width: '100px', step: 1});
       const quiet = numberInput('Quiet sector', 0, {width: '100px', step: 1});
-      const seconds = numberInput('Transient (s)', 0.5, {width: '100px', step: 0.1});
-      const rate = numberInput('Read rate (Hz)', 100, {width: '100px', step: 10});
+      const settles = h('input', {class: 'input input--mono', style: {width: '100%'},
+        value: '250,500,750,1000,1500,2000,3000,4000,6000,8000,12000,16000,20000'});
+      const repeats = numberInput('Repeats', 3, {width: '90px', step: 1});
       const notes = notesInput();
       const run = async () => {
+        const list = settles.value.split(',').map((v) => Math.round(Number(v.trim())))
+          .filter((v) => v >= 50 && v <= 20000);
+        const count = Math.max(1, Math.min(10, Math.round(repeats.value)));
+        if (list.length < 3) { setText(status, 'Give at least three settle times between 50 and 20000 µs.'); return; }
         state.busy = true; progress.hidden = false;
         try {
-          await session.setMeasurementSettings({measure: 0});
-          setText(status, 'Settling on the loud direction…');
-          await capture(session, loud.value, 0.25, Math.max(20, rate.value), null);
-          setText(status, 'Capturing detector decay…');
-          const samples = await captureSeries(session, quiet.value, seconds.value,
-            Math.max(20, rate.value), (fraction, count) => {
-              progress.value = fraction; setText(status, `Capturing detector decay… ${count} readings`);
-            });
-          const linear = samples.map((sample) => 10 ** (sample.level_db / 20));
-          const finalCount = Math.max(2, Math.floor(linear.length / 5));
-          const final = linear.slice(-finalCount).reduce((sum, value) => sum + value, 0) / finalCount;
-          const initial = linear[0];
-          const fit = [];
-          for (let index = 0; index < samples.length; index++) {
-            const ratio = (linear[index] - final) / Math.max(1e-12, initial - final);
-            if (ratio > 0.08 && ratio < 0.95) fit.push({x: (samples[index].time_ms - samples[0].time_ms) / 1000, y: Math.log(ratio)});
-          }
-          const meanX = fit.reduce((sum, point) => sum + point.x, 0) / Math.max(1, fit.length);
-          const meanY = fit.reduce((sum, point) => sum + point.y, 0) / Math.max(1, fit.length);
-          const slope = fit.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0) /
-            Math.max(1e-12, fit.reduce((sum, point) => sum + (point.x - meanX) ** 2, 0));
-          const tauMs = slope < 0 && fit.length >= 2 ? -1000 / slope : null;
+          await ensureIdle(session);
+          const original = session.latest?.settings?.settle_us ?? 1250;
+          const {quietDb, loudDb, readings} = await withSettings(session, {measure: 0, settle_us: original}, async () => {
+            const dwell = async (sector) => {
+              await readOnce(session, `S,${sector}`, sector);
+              await sleep(150);
+              const levels = [];
+              for (let i = 0; i < 5; i++) levels.push(await readOnce(session, 'M', sector));
+              return rawMeanDb(levels);
+            };
+            setText(status, 'Measuring the quiet and loud directions…');
+            const quietLevel = await dwell(quiet.value);
+            const loudLevel = await dwell(loud.value);
+            const bySettle = new Map(list.map((settle) => [settle, []]));
+            let done = 0;
+            for (let pass = 0; pass < count; pass++) {
+              for (const settle of list) {
+                // Dwell on the loud beam, then the firmware times the steer, settle and read.
+                await readOnce(session, `S,${loud.value}`, loud.value);
+                await sleep(150);
+                await session.setSetting('settle_us', settle, 'settle', false);
+                bySettle.get(settle).push(await readOnce(session, `S,${quiet.value}`, quiet.value));
+                done += 1;
+                progress.value = done / (count * list.length);
+                setText(status, `Settle ${settle} µs, pass ${pass + 1} of ${count}…`);
+              }
+            }
+            return {quietDb: quietLevel, loudDb: loudLevel, readings: bySettle};
+          });
+          const points = list.map((settle) => ({settle_us: settle, level_db: rawMeanDb(readings.get(settle))}));
+          const fit = fitDetectorDecay(points, quietDb, loudDb);
           const contractTau = Number(session.latest?.level_time_constant_ms || 8.665);
-          const captureSummary = {label: 'loud-to-quiet transient', value: null, n: samples.length,
-            mean_db: powerMean(samples.map((sample) => sample.level_db)),
-            std_db: stdDb(samples.map((sample) => sample.level_db)),
-            min_db: Math.min(...samples.map((sample) => sample.level_db)),
-            max_db: Math.max(...samples.map((sample) => sample.level_db))};
+          const captures = list.map((settle) => {
+            const levels = readings.get(settle);
+            return {label: `settle ${settle} us`, value: settle, n: levels.length, mean_db: rawMeanDb(levels),
+              std_db: stdDb(levels), min_db: Math.min(...levels), max_db: Math.max(...levels)};
+          });
           put(results,
-            h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Measured tau'),
-              h('span', {class: 'ms-figure__value'}, tauMs ? `${num(tauMs, 2)} ms` : 'no fit')),
-            h('p', {class: 'note'}, `Contract ${num(contractTau, 3)} ms · ${samples.length} transient readings.`),
+            h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Detector time constant'),
+              h('span', {class: 'ms-figure__value'}, fit ? `${num(fit.tau_ms, 2)} ms` : 'no fit')),
+            h('p', {class: 'note'}, `${fit ? `${fit.points_used} settle times used, r² ${num(fit.r2, 3)}. ` : ''}` +
+              `Contract ${num(contractTau, 3)} ms. Loud ${num(loudDb, 1)} dBFS, quiet ${num(quietDb, 1)} dBFS.` +
+              (loudDb - quietDb < 10 ? ' The directions differ by less than 10 dB; move the source or pick directions further apart.' : '')),
+            ...points.map((point) => h('div', {class: 'ms-row'}, h('span', {}, `${point.settle_us} µs`),
+              h('span', {class: 'mono'}, `${num(point.level_db, 2)} dBFS`))),
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('detectorstep',
-              `Detector step, sectors ${loud.value} to ${quiet.value}`, [captureSummary],
-              {tau_ms: tauMs, contract_tau_ms: contractTau, samples,
-                summary: tauMs ? `${num(tauMs, 2)} ms` : 'no fit'}, notes.value)}, 'Save run'));
-          setText(status, tauMs ? `Fitted detector tau ${num(tauMs, 2)} ms.` : 'Could not fit a clean one-pole decay.');
+              `Detector time constant, sectors ${loud.value} to ${quiet.value}`, captures,
+              {tau_ms: fit?.tau_ms ?? null, r2: fit?.r2 ?? null, points_used: fit?.points_used ?? 0,
+                contract_tau_ms: contractTau, loud_dbfs: loudDb, quiet_dbfs: quietDb,
+                summary: fit ? `${num(fit.tau_ms, 2)} ms` : 'no fit'}, notes.value)}, 'Save run'));
+          setText(status, fit ? `Fitted ${num(fit.tau_ms, 2)} ms.` : 'Could not fit a decay; check the two directions differ clearly.');
         } catch (error) { setText(status, error.message); }
         finally { state.busy = false; progress.hidden = true; }
       };
       put(body, header(t), needConnection,
-        h('div', {class: 'form-row'}, loud.el, quiet.el, seconds.el, rate.el),
-        h('button', {type: 'button', class: 'btn btn--primary', disabled: !connected, onClick: run}, 'Measure step response'),
-        progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes));
+        h('div', {class: 'form-row'}, loud.el, quiet.el, repeats.el),
+        h('div', {class: 'field'}, h('label', {}, 'Settle times (µs)'), settles),
+        h('button', {type: 'button', class: 'btn btn--primary', disabled: !connected, onClick: run}, 'Measure time constant'),
+        progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes),
+        h('p', {class: 'note'}, 'Uses the DSP detector. Pick a loud direction on the source and a quiet one well away from it.'));
       return;
     }
 
@@ -455,6 +539,7 @@ export function measurementsScreen({session}) {
       const maximum = numberInput('Maximum (°)', 30, {width: '100px'});
       const count = numberInput('Directions', 13, {width: '90px', step: 1});
       const fixed = numberInput('Other axis (°)', 0, {width: '100px'});
+      const speaker = numberInput('Speaker on the cut axis (°)', 0, {width: '120px'});
       const frequency = numberInput('Theory frequency (Hz)', 2000, {width: '120px', step: 100});
       const seconds = numberInput('Per direction (s)', 0.5, {width: '110px', step: 0.1});
       const notes = notesInput();
@@ -482,15 +567,17 @@ export function measurementsScreen({session}) {
               (fraction) => { progress.value = (sector + fraction) / directions; });
             captures.push({label: `${axis.value} ${angle}`, value: angle, ...measured});
           }
+          // Steering across a fixed source traces the same pattern as a source moving past a fixed beam.
           const query = new URLSearchParams({axis: axis.value,
-            steer_azimuth_deg: String(isAzimuth ? (minimum.value + maximum.value) / 2 : fixed.value),
-            steer_elevation_deg: String(isAzimuth ? fixed.value : (minimum.value + maximum.value) / 2),
+            steer_azimuth_deg: String(isAzimuth ? speaker.value : fixed.value),
+            steer_elevation_deg: String(isAzimuth ? fixed.value : speaker.value),
             frequency_hz: String(frequency.value), minimum_deg: String(minimum.value),
             maximum_deg: String(maximum.value), step_deg: String((maximum.value - minimum.value) / (directions - 1))});
           const theory = await apiJson(`/study/theory/cut?${query}`);
           const peak = Math.max(...captures.map((item) => item.mean_db));
           const measuredPoints = captures.map((item) => ({angle: item.value, level: item.mean_db - peak}));
           const measuredWidth = widthAt(measuredPoints, 3);
+          const measuredPeak = refinePeak(captures.map((item) => item.mean_db), captures.map((item) => item.value));
           const x = (angle) => 48 + (angle - minimum.value) / (maximum.value - minimum.value) * 440;
           const y = (level) => 16 + Math.min(30, Math.max(0, -level)) / 30 * 180;
           chart.replaceChildren(
@@ -505,10 +592,11 @@ export function measurementsScreen({session}) {
             ...measuredPoints.map((point) => s('circle', {cx: x(point.angle), cy: y(point.level), r: 3, fill: 'var(--accent)'})),
           );
           put(results, chart,
-            h('p', {class: 'ms-prompt'}, `Measured −3 dB width ${measuredWidth ? `${num(measuredWidth.width, 2)}°` : 'not bracketed'} · theory ${num(theory.beamwidth_3db?.width_deg, 2)}°.`),
+            h('p', {class: 'ms-prompt'}, `Measured −3 dB width ${measuredWidth ? `${num(measuredWidth.width, 2)}°` : 'not bracketed'} · theory ${num(theory.beamwidth_3db?.width_deg, 2)}°. Peak at ${deg(measuredPeak, 2)}, ${num(measuredPeak - speaker.value, 2)}° from the speaker.`),
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('beamcut',
               `${axis.value} beam cut, ${frequency.value} Hz`, captures,
-              {axis: axis.value, frequency_hz: frequency.value,
+              {axis: axis.value, frequency_hz: frequency.value, speaker_deg: speaker.value,
+                measured_peak_deg: measuredPeak,
                 measured_width_3db_deg: measuredWidth?.width ?? null,
                 theory_width_3db_deg: theory.beamwidth_3db?.width_deg ?? null,
                 theory: theory.points, summary: measuredWidth ? `${num(measuredWidth.width, 1)}°` : 'edge not bracketed'}, notes.value)}, 'Save run'));
@@ -518,7 +606,7 @@ export function measurementsScreen({session}) {
       };
       put(body, header(t), needConnection,
         h('div', {class: 'form-row'}, h('div', {class: 'field'}, h('label', {}, 'Cut axis'), axis),
-          minimum.el, maximum.el, count.el, fixed.el, frequency.el, seconds.el),
+          minimum.el, maximum.el, count.el, fixed.el, speaker.el, frequency.el, seconds.el),
         h('div', {class: 'toolbar'},
           h('button', {type: 'button', class: 'btn btn--primary', disabled: !connected, onClick: run}, 'Measure cut'),
           h('button', {type: 'button', class: 'btn btn--ghost', onClick: () => session.send({type: 'request_init'})}, 'Restore deployment grid')),
@@ -553,17 +641,21 @@ export function measurementsScreen({session}) {
               elevation_deg: elevation, ...measured});
           }
           const peak = captures.reduce((best, item) => item.mean_db > best.mean_db ? item : best);
-          const azimuthError = peak.azimuth_deg - trueAzimuth.value;
-          const elevationError = peak.elevation_deg - trueElevation.value;
+          const grid = Array.from({length: size}, (_, row) =>
+            captures.slice(row * size, (row + 1) * size).map((item) => item.mean_db));
+          const refined = refinePeak2d(grid, session.latest.azimuth_deg, session.latest.elevation_deg);
+          const azimuthError = refined.azimuth - trueAzimuth.value;
+          const elevationError = refined.elevation - trueElevation.value;
           const error = Math.hypot(azimuthError, elevationError);
           put(results,
             h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Steering error'),
               h('span', {class: 'ms-figure__value'}, `${num(error, 2)}°`)),
-            h('p', {class: 'note'}, `Peak ${deg(peak.azimuth_deg, 2)}, ${deg(peak.elevation_deg, 2)} at ${num(peak.mean_db, 1)} dBFS.`),
+            h('p', {class: 'note'}, `Interpolated peak ${deg(refined.azimuth, 2)}, ${deg(refined.elevation, 2)}; strongest grid point ${deg(peak.azimuth_deg, 2)}, ${deg(peak.elevation_deg, 2)} at ${num(peak.mean_db, 1)} dBFS.`),
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('steering',
               `Steering accuracy at ${trueAzimuth.value},${trueElevation.value}`, captures,
               {true_azimuth_deg: trueAzimuth.value, true_elevation_deg: trueElevation.value,
-                peak_azimuth_deg: peak.azimuth_deg, peak_elevation_deg: peak.elevation_deg,
+                peak_azimuth_deg: refined.azimuth, peak_elevation_deg: refined.elevation,
+                grid_peak_azimuth_deg: peak.azimuth_deg, grid_peak_elevation_deg: peak.elevation_deg,
                 azimuth_error_deg: azimuthError, elevation_error_deg: elevationError,
                 angular_error_deg: error, summary: `${num(error, 2)}°`}, notes.value)}, 'Save run'));
           setText(status, `Peak angular error ${num(error, 2)}°.`);

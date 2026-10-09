@@ -12,6 +12,7 @@ import { API_BASE, WS_BASE, apiJson } from '../shared/api.js';
 import { download } from '../shared/dom.js';
 import { fileStamp } from '../shared/format.js';
 import { directionGridCommand, directionGridFailure, directionGridReady } from './dirgrid.js';
+import { outputReplyCode } from './replies.js';
 
 export const STALE_MS = 5000;
 export const HISTORY_WINDOW_S = 30;
@@ -259,10 +260,28 @@ export class HardwareSession extends EventTarget {
     if (this.command(`O,${source},${index}`)) this.addEvent('AUDIO', `Ch1 set to ${names[source]}`);
   }
 
-  async setSetting(key, value, label = key) {
+  get hasSelectors() {
+    return Number(this.latest?.outputs?.microphones || 0) > 0;
+  }
+
+  /** Route Ch1 and wait for the device to confirm it. */
+  async selectOutputChecked(source, index) {
+    const beforeSequence = Number(this.latest?.sequence || 0);
+    if (!this.command(`O,${source},${index}`)) throw new Error('No active hardware link.');
+    const deadline = performance.now() + 2000;
+    while (performance.now() < deadline) {
+      const code = outputReplyCode(this.latest, source, index, beforeSequence);
+      if (code === 0) return;
+      if (code !== null) throw new Error(`The device refused Ch1 = ${source},${index} (code ${code}).`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('No reply to the Ch1 selection. The DSP program may have no output selector.');
+  }
+
+  async setSetting(key, value, label = key, log = true) {
     try {
       await apiJson('/dsp/set', {method: 'POST', body: {key, value}});
-      this.addEvent('SETTING', `${label}: ${value}`);
+      if (log) this.addEvent('SETTING', `${label}: ${value}`);
       return true;
     } catch (error) {
       this.addEvent('ERROR', `Could not set ${label}: ${error.message}`, 'error');

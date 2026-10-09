@@ -3,7 +3,7 @@
  * refreshes, scenario truth for emulators, recording, and the event log.
  */
 
-import { h, segmented, setText } from '../shared/dom.js';
+import { h, options, segmented, setText } from '../shared/dom.js';
 import { clockTime, deg, formatAge, hz, num } from '../shared/format.js';
 
 export function operatingMode(session) {
@@ -103,8 +103,17 @@ export class StatusColumn {
     );
 
     this.toneList = h('div', {class: 'advanced'});
+    this.toneSelect = h('select', {class: 'select select--sm', 'aria-label': 'Tone report period',
+      onChange: async () => {
+        this.toneSelect.disabled = true;
+        try { await session.setSetting('tone', Number(this.toneSelect.value), 'tone reports'); }
+        catch (_) { /* logged by the session */ }
+        finally { this.renderTones(session.frame); }
+      }},
+    options([['0', 'Off'], ['100', 'Every 100 ms'], ['250', 'Every 250 ms'], ['500', 'Every 500 ms'], ['1000', 'Every 1 s']], '0'));
     const tones = h('section', {class: 'section', 'aria-labelledby': 'hw-tones-title'},
-      h('h2', {class: 'section__title', id: 'hw-tones-title'}, 'Tonal detector'),
+      h('div', {class: 'section__row'},
+        h('h2', {class: 'section__title', id: 'hw-tones-title'}, 'Tonal detector'), this.toneSelect),
       this.toneList,
     );
 
@@ -274,9 +283,15 @@ export class StatusColumn {
   }
 
   renderTones(frame) {
+    const period = Number(frame?.settings?.tone || 0);
+    const idle = this.session.ready && this.session.firmwareMode === 'IDLE';
+    if (document.activeElement !== this.toneSelect) this.toneSelect.value = String(period);
+    this.toneSelect.disabled = !idle;
+    this.toneSelect.title = idle ? '' : 'Stop the scan to change settings.';
     const tones = Object.values(frame?.tones || {}).sort((a, b) => a.channel - b.channel);
     if (!tones.length) {
-      this.toneList.replaceChildren(h('p', {class: 'note note--body'}, 'No tonal estimate.'));
+      this.toneList.replaceChildren(h('p', {class: 'note note--body'},
+        period > 0 ? 'No tonal estimate yet.' : 'Tone reports are off.'));
       return;
     }
     this.toneList.replaceChildren(...tones.map((tone) =>

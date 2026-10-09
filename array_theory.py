@@ -82,6 +82,12 @@ def beamwidth(points: list[dict[str, float]], drop_db: float = 3.0) -> dict[str,
             "peak_deg": points[peak_index]["angle_deg"]}
 
 
+def white_noise_gain_db(weights) -> float:
+    """Array gain of a steered beam against noise uncorrelated between microphones."""
+    weights = np.abs(np.asarray(weights, dtype=np.float64))
+    return float(10.0 * math.log10(np.sum(weights) ** 2 / np.sum(weights ** 2)))
+
+
 def theory_cut(**kwargs: Any) -> dict[str, Any]:
     """Serializable theory cut and geometry summary for the Study UI."""
     contract = load_beam_contract()
@@ -93,6 +99,7 @@ def theory_cut(**kwargs: Any) -> dict[str, Any]:
         "points": points,
         "beamwidth_3db": beamwidth(points, 3.0),
         "microphones": contract.microphones,
+        "white_noise_gain_db": white_noise_gain_db(contract.gains),
         "aperture_m": float(np.max(distances)),
         "nearest_spacing_m": float(np.min(nonzero)),
         "speed_of_sound_m_s": contract.speed_of_sound_m_s,
