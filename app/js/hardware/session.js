@@ -11,6 +11,7 @@
 import { API_BASE, WS_BASE, apiJson } from '../shared/api.js';
 import { download } from '../shared/dom.js';
 import { fileStamp } from '../shared/format.js';
+import { directionGridCommand, directionGridReady } from './dirgrid.js';
 
 export const STALE_MS = 5000;
 export const HISTORY_WINDOW_S = 30;
@@ -275,7 +276,7 @@ export class HardwareSession extends EventTarget {
     }
   }
 
-  async setDirectionGrid({azimuthMin, azimuthMax, columns, elevationMin, elevationMax, rows}) {
+  async setDirectionGrid(spec) {
     if (this.firmwareMode !== 'IDLE') {
       this.command('X');
       const deadline = performance.now() + 3000;
@@ -284,14 +285,10 @@ export class HardwareSession extends EventTarget {
       }
     }
     const beforeSequence = Number(this.latest?.sequence || 0);
-    const command = `DG,${Math.round(azimuthMin * 100)},${Math.round(azimuthMax * 100)},${columns},${Math.round(elevationMin * 100)},${Math.round(elevationMax * 100)},${rows}`;
-    if (!this.command(command)) throw new Error('No active hardware link.');
+    if (!this.command(directionGridCommand(spec))) throw new Error('No active hardware link.');
     const deadline = performance.now() + 5000;
     while (performance.now() < deadline) {
-      const directionSet = this.latest?.direction_set;
-      const configuration = this.configuration;
-      if (directionSet && Number(this.latest?.sequence || 0) > beforeSequence && directionSet.code === 0 &&
-          configuration?.rows === rows && configuration?.columns === columns) return directionSet;
+      if (directionGridReady(this.latest, spec, beforeSequence)) return this.latest.direction_set;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw new Error('Timed out waiting for the direction set.');

@@ -226,7 +226,7 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
     contract_path = path.parent / "beam_table_2d.json"
     if contract_path.exists():
         try:
-            map_hash = json.loads(contract_path.read_text(encoding="utf-8"))["register_map"]["map_hash"]
+            map_hash = json.loads(contract_path.read_text(encoding="utf-8"))["study"]["map_hash"]
         except (KeyError, TypeError, ValueError):
             pass
 
@@ -306,7 +306,7 @@ class DspParameterService:
 
     SETTINGS = {
         "settle_us": (50, 20000, 1250),
-        "guard_us": (0, 20000, 0),
+        "guard_us": (0, 20000, 500),
         "window_us": (1000, 100000, 5000),
         "measure": (0, 1, 0),
         "band": (0, 1, 1),
@@ -379,7 +379,8 @@ class DspParameterService:
             result.update(supported=False, reason=str(error))
             return result
         if transport is not None:
-            mode = transport.snapshot().get("mode")
+            snapshot = transport.snapshot()
+            mode = snapshot.get("mode")
             result["firmware_mode"] = mode
             result["idle"] = mode == "IDLE"
         if supported:
@@ -387,6 +388,8 @@ class DspParameterService:
                 self._bind(transport)
                 result["modified_words"] = self._modified_count()
                 result["settings"] = dict(self._settings)
+            if str(getattr(transport, "transport_name", "")).startswith("serial:"):
+                result["settings"].update(snapshot.get("settings") or {})
         return result
 
     def _modified_count(self) -> int:
@@ -467,4 +470,9 @@ class DspParameterService:
         with self._lock:
             self._bind(transport)
             self._settings[key] = setting
-            return dict(self._settings)
+            settings = dict(self._settings)
+        apply_line = getattr(transport, "apply_line", None)
+        if apply_line is not None and not str(transport.transport_name).startswith("serial:"):
+            # The emulator answers as the firmware would, so the GUI sees the change.
+            apply_line(f"SET_OK,{key},{setting}")
+        return settings

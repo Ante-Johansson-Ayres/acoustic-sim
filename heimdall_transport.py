@@ -499,8 +499,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         elif command.startswith("SET,"):
             _, key, value = command.split(",")
             try:
-                settings = self.parameter_service.set(self, key, int(value))
-                self.apply_line(f"SET_OK,{key},{settings[key]}")
+                self.parameter_service.set(self, key, int(value))
             except RuntimeError:
                 self.apply_line("ERR,SET,BUSY")
             except (PermissionError, ValueError):

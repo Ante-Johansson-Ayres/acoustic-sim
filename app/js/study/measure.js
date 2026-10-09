@@ -13,6 +13,7 @@ import { clockTime, deg, fileStamp, num } from '../shared/format.js';
 import { download } from '../shared/dom.js';
 import { apiJson } from '../shared/api.js';
 import { dsp } from './dsp.js';
+import { runCsv } from './runcsv.js';
 
 const RUNS_KEY = 'heimdall.study.runs';
 const put = (el, ...kids) => el.replaceChildren(...kids.flat().filter(Boolean));
@@ -196,16 +197,6 @@ export function measurementsScreen({session}) {
     state.runs.unshift({id: Date.now(), template, name, time: new Date().toISOString(), meta: meta(), captures, result, notes});
     saveRuns(state.runs);
     renderRuns();
-  }
-
-  function runCsv(run) {
-    const lines = [`# ${run.name}`, `# template: ${run.template}`, `# time: ${run.time}`,
-      ...Object.entries(run.meta || {}).map(([k, v]) => `# ${k}: ${v}`),
-      ...(run.notes ? [`# notes: ${String(run.notes).replace(/\n/g, ' ')}`] : []),
-      ...Object.entries(run.result || {}).map(([k, v]) => `# result.${k}: ${v}`),
-      'label,value,n,mean_dbfs,std_db,min_dbfs,max_dbfs'];
-    for (const c of run.captures || []) lines.push([c.label, c.value ?? '', c.n, c.mean_db?.toFixed(2), c.std_db?.toFixed(2), c.min_db?.toFixed(2), c.max_db?.toFixed(2)].join(','));
-    return lines.join('\n') + '\n';
   }
 
   function exportRun(run) {

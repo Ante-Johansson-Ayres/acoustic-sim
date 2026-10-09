@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from fastapi.testclient import TestClient
 
 import dsp_registry
 import sim_server
+from heimdall_transport import EmulatorHeimdallTransport
 
 
 def _word(value: float) -> int:
@@ -151,6 +153,47 @@ def test_service_uses_serial_protocol_when_register_map_matches(small_registry):
     assert service.read(transport, 100, 1) == [_word(0.5)]
     assert service.set(transport, "window_us", 8000)["window_us"] == 8000
     assert transport.commands[-1] == "SET,window_us,8000"
+
+
+def test_registry_reads_the_contract_map_hash(monkeypatch):
+    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", "SigmaStudioBank")
+    contract = json.loads(
+        (dsp_registry.selected_export_dir() / "beam_table_2d.json").read_text(encoding="utf-8"))
+    assert dsp_registry.load_registry()["map_hash"] == contract["study"]["map_hash"]
+
+
+def test_setting_limits_and_defaults_match_firmware():
+    config = (dsp_registry.FIRMWARE_DIR / "heimdall_config.h").read_text(encoding="utf-8")
+    names = {name: int(value) for name, value in
+             re.findall(r"#define\s+(HEIMDALL_\w+)\s+(-?\d+)[UL]*\b", config)}
+    names.update(MEASURE_DSP=0, MEASURE_WINDOW=1)
+
+    def resolve(token):
+        token = token.replace("(int32_t)", "").strip()
+        return int(token) if re.fullmatch(r"-?\d+", token) else names[token]
+
+    source = (dsp_registry.FIRMWARE_DIR / "heimdall_settings.c").read_text(encoding="utf-8")
+    firmware = {name: tuple(resolve(field) for field in fields) for name, *fields in
+                re.findall(r'\{\s*"(\w+)",\s*([^,]+),\s*([^,]+),\s*([^}]+?)\s*\}', source)}
+    assert firmware == dsp_registry.DspParameterService.SETTINGS
+
+
+def test_serial_status_reports_the_firmware_settings(small_registry):
+    small_registry["map_hash"] = "0123456789abcdef"
+
+    class SerialTransport(_Transport):
+        def snapshot(self):
+            return {"mode": "IDLE", "map_hash": "0123456789abcdef", "settings": {"guard_us": 700}}
+
+    service = dsp_registry.DspParameterService(loader=lambda: small_registry)
+    assert service.status(SerialTransport(name="serial:COM7"))["settings"]["guard_us"] == 700
+
+
+def test_emulator_setting_change_reaches_the_displayed_state(small_registry):
+    service = dsp_registry.DspParameterService(loader=lambda: small_registry)
+    emulator = EmulatorHeimdallTransport(rows=1, columns=1, parameter_service=service)
+    service.set(emulator, "measure", 1)
+    assert emulator.snapshot()["settings"].get("measure") == 1
 
 
 def test_service_memory_resets_when_the_transport_changes(small_registry):
