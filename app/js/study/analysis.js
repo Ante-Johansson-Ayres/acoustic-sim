@@ -19,18 +19,27 @@ export function arrayGainDb({beamOn, beamOff, micOn, micOff}) {
   return snrDb(beamOn, beamOff) - snrDb(micOn, micOff);
 }
 
-/**
- * Detector time constant from a settle sweep: dwell on a loud beam, steer to a quiet one and read
- * once after settle_us. The one-pole decay acts on the raw state word, 10^(dB/20).
- */
-export function fitDetectorDecay(points, quietDb, loudDb) {
+/** Below this loud-to-quiet contrast a settle-sweep reading carries no usable decay. */
+export const MIN_CONTRAST_DB = 6;
+
+/** How much of the loud level a settle-sweep point still holds, on the raw state word. */
+export function remainingFraction(point, quietDb = point.quiet_db, loudDb = point.loud_db) {
+  if (!(loudDb - quietDb >= MIN_CONTRAST_DB)) return NaN;
   const raw = (db) => 10 ** (db / 20);
   const quiet = raw(quietDb);
   const span = raw(loudDb) - quiet;
-  if (!(span > 0)) return null;
+  return span > 0 ? (raw(point.level_db) - quiet) / span : NaN;
+}
+
+/**
+ * Detector time constant from a settle sweep: dwell on a loud beam, steer to a quiet one and read
+ * once after settle_us. The one-pole decay acts on the raw state word, 10^(dB/20). Points may carry
+ * their own loud_db and quiet_db, measured next to them, so a drifting source cancels out.
+ */
+export function fitDetectorDecay(points, quietDb, loudDb) {
   const fit = [];
   for (const point of points) {
-    const fraction = (raw(point.level_db) - quiet) / span;
+    const fraction = remainingFraction(point, point.quiet_db ?? quietDb, point.loud_db ?? loudDb);
     if (fraction > 0.03 && fraction < 0.97) fit.push({x: point.settle_us / 1e6, y: Math.log(fraction)});
   }
   if (fit.length < 2) return null;

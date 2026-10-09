@@ -173,6 +173,7 @@
 .template.is-open { background: var(--surface); }
 .template__name { font-size: 14px; font-weight: 500; }
 .ms-results { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
+.ms-results > .btn { align-self: flex-start; }
 .ms-row { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; max-width: 520px; }
 .ms-prompt { font-size: 15px; line-height: 1.5; }
 .ms-figure { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding-top: 8px; }

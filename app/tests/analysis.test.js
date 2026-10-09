@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { arrayGainDb, fitDetectorDecay, refinePeak, refinePeak2d, signalDb, snrDb } from '../js/study/analysis.js';
+import { arrayGainDb, fitDetectorDecay, refinePeak, refinePeak2d, remainingFraction, signalDb, snrDb } from '../js/study/analysis.js';
 
 test('signal level subtracts the noise power', () => {
   assert.ok(Math.abs(signalDb(-20, -30) - 10 * Math.log10(0.01 - 0.001)) < 1e-9);
@@ -32,6 +32,27 @@ test('the settle sweep fit recovers the detector time constant', () => {
   assert.ok(Math.abs(fit.tau_ms - 8.665) < 0.01);
   assert.ok(fit.points_used >= 4 && fit.r2 > 0.999);
   assert.equal(fitDetectorDecay(points.slice(0, 1), db(quiet), db(loud)), null);
+});
+
+test('per-point references follow a source whose level drifts during the sweep', () => {
+  const tau = 8.665e-3;
+  const db = (raw) => 20 * Math.log10(raw);
+  const points = [500, 1000, 2000, 4000, 8000, 12000, 16000].map((settle_us, i) => {
+    const loud = 0.5 + 0.06 * i;
+    const quiet = 0.05 + 0.005 * i;
+    return {settle_us, loud_db: db(loud), quiet_db: db(quiet),
+      level_db: db(quiet + (loud - quiet) * Math.exp(-settle_us / 1e6 / tau))};
+  });
+  const fit = fitDetectorDecay(points);
+  assert.ok(Math.abs(fit.tau_ms - 8.665) < 0.01);
+  assert.equal(fit.points_used, 7);
+  assert.ok(Math.abs(remainingFraction(points[3]) - Math.exp(-4 / 8.665)) < 1e-9);
+});
+
+test('readings without enough loud-to-quiet contrast are left out', () => {
+  const flat = {settle_us: 1000, level_db: -20, loud_db: -19, quiet_db: -21};
+  assert.ok(Number.isNaN(remainingFraction(flat)));
+  assert.equal(fitDetectorDecay([flat, flat, flat]), null);
 });
 
 test('peak interpolation finds the vertex between grid points', () => {

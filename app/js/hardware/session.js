@@ -11,7 +11,7 @@
 import { API_BASE, WS_BASE, apiJson } from '../shared/api.js';
 import { download } from '../shared/dom.js';
 import { fileStamp } from '../shared/format.js';
-import { directionGridCommand, directionGridFailure, directionGridReady } from './dirgrid.js';
+import { activeGrid, directionGridCommand, directionGridFailure, directionGridReady, gridMatches } from './dirgrid.js';
 import { outputReplyCode } from './replies.js';
 
 export const STALE_MS = 5000;
@@ -28,6 +28,7 @@ export class HardwareSession extends EventTarget {
     this.init = null;
     this.frame = null;
     this.knownConfiguration = null;
+    this.homeGrid = null;             // grid in place before the first direction set
     this.link = 'disconnected';       // disconnected | connecting | online | fault
     this.linkDetail = 'Not connected';
     this.cellTimes = [];
@@ -223,6 +224,7 @@ export class HardwareSession extends EventTarget {
     this.init = null;
     this.frame = null;
     this.knownConfiguration = null;
+    this.homeGrid = null;
     this.frozen = false;
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
@@ -303,6 +305,7 @@ export class HardwareSession extends EventTarget {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
     }
+    this.homeGrid ||= activeGrid(this.latest);
     const beforeSequence = Number(this.latest?.sequence || 0);
     if (!this.command(directionGridCommand(spec))) throw new Error('No active hardware link.');
     const deadline = performance.now() + 5000;
@@ -314,6 +317,22 @@ export class HardwareSession extends EventTarget {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw new Error('Timed out waiting for the direction set.');
+  }
+
+  /** Put back the grid from before the first direction set; I restores the header grid. */
+  async restoreGrid() {
+    const home = this.homeGrid;
+    if (!home) return;
+    this.send({type: 'request_init'});
+    const deadline = performance.now() + 5000;
+    while (performance.now() < deadline) {
+      if (gridMatches(this.latest, home)) {
+        this.homeGrid = null;
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out restoring the deployment grid.');
   }
 
   modeCommand(command, text, tone = '') {
@@ -460,7 +479,8 @@ export class HardwareSession extends EventTarget {
       if (advanced) {
         this.logRecord(message);
         this.logTransitions(message, previous);
-        if (message.levels_db && message.configuration && message.last_record?.type === 'measurement') {
+        if (message.levels_db && message.configuration &&
+            message.last_measurement?.count !== previous?.last_measurement?.count) {
           this.history.push({
             t: message.timestamp_s,
             azimuth: message.est_az_deg,

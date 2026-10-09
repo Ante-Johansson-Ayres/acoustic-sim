@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { directionGridCommand, directionGridFailure, directionGridReady } from '../js/hardware/dirgrid.js';
+import { activeGrid, directionGridCommand, directionGridFailure, directionGridReady, gridMatches } from '../js/hardware/dirgrid.js';
 
 const spec = {azimuthMin: -30, azimuthMax: 30, columns: 3, elevationMin: 0, elevationMax: 0, rows: 1};
 const loaded = (azimuth, elevation, sequence = 12) => ({
@@ -34,4 +34,11 @@ test('a DG error after the request is reported, an older one is not', () => {
   assert.equal(directionGridFailure(refused, 10), 'UNSUPPORTED');
   assert.equal(directionGridFailure(refused, 12), null);
   assert.equal(directionGridFailure({sequence: 12, last_record: {type: 'dirset'}}, 10), null);
+});
+
+test('the deployment grid is recognised again only with its own angles', () => {
+  const home = activeGrid(loaded([-30, 0, 30], [0]));
+  assert.equal(gridMatches(loaded([-10, 0, 10], [0]), home), false);
+  assert.equal(gridMatches(loaded([-30, 0, 30], [0]), home), true);
+  assert.equal(activeGrid({sequence: 1}), null);
 });

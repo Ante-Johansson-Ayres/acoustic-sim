@@ -1493,6 +1493,7 @@ def _hardware_payload(payload_type, snapshot):
         "levels_raw": snapshot["levels_raw"],
         "levels_db": snapshot["levels_db"],
         "scan_count": snapshot["scan_count"],
+        "last_measurement": snapshot.get("last_measurement"),
         "firmware_mode": snapshot["mode"],
         "target": target,
         "last_steer": last_steer,

@@ -14,7 +14,8 @@ import { download } from '../shared/dom.js';
 import { apiJson } from '../shared/api.js';
 import { dsp } from './dsp.js';
 import { runCsv } from './runcsv.js';
-import { arrayGainDb, fitDetectorDecay, refinePeak, refinePeak2d, signalDb, snrDb } from './analysis.js';
+import { arrayGainDb, fitDetectorDecay, refinePeak, refinePeak2d, remainingFraction, signalDb, snrDb } from './analysis.js';
+import { newMeasurementDb } from '../hardware/replies.js';
 
 const RUNS_KEY = 'heimdall.study.runs';
 const put = (el, ...kids) => el.replaceChildren(...kids.flat().filter(Boolean));
@@ -72,15 +73,12 @@ async function capture(session, sector, seconds, rate, onProgress) {
   session.setMonitorRate(rate);
   const levels = [];
   let discarded = 0;
-  let lastSeq = null;
+  let lastCount = Number(session.latest?.last_measurement?.count || 0);
   const tauMs = Number(session.latest?.level_time_constant_ms || 8.665);
   const acceptAt = performance.now() + 5 * tauMs;
   const onFrame = () => {
-    const f = session.frame;
-    if (!f || f.sequence === lastSeq || f.last_record?.type !== 'measurement') return;
-    lastSeq = f.sequence;
-    if (f.last_steer?.sector !== sector) return;
-    const level = f.levels_db?.[f.last_steer.row]?.[f.last_steer.column];
+    const level = newMeasurementDb(session.frame, sector, lastCount);
+    lastCount = Math.max(lastCount, Number(session.frame?.last_measurement?.count || 0));
     if (!Number.isFinite(level)) return;
     if (performance.now() < acceptAt) discarded += 1;
     else levels.push(level);
@@ -113,16 +111,12 @@ async function ensureIdle(session) {
 
 /** Send S,<sector> or M and return the one level the firmware reads (it settles after a steer). */
 async function readOnce(session, command, sector) {
-  const before = Number(session.latest?.sequence || 0);
+  const before = Number(session.latest?.last_measurement?.count || 0);
   if (!session.command(command)) throw new Error('No active hardware link.');
   const deadline = performance.now() + 2000;
   while (performance.now() < deadline) {
-    const frame = session.latest;
-    if (Number(frame?.sequence || 0) > before && frame.last_record?.type === 'measurement' &&
-        frame.last_steer?.sector === sector) {
-      const level = frame.levels_db?.[frame.last_steer.row]?.[frame.last_steer.column];
-      if (Number.isFinite(level)) return level;
-    }
+    const level = newMeasurementDb(session.latest, sector, before);
+    if (Number.isFinite(level)) return level;
     await sleep(5);
   }
   throw new Error(`No level reading arrived for ${command}.`);
@@ -140,6 +134,22 @@ async function withSettings(session, changes, action) {
     await session.setMeasurementSettings(restore).catch(() => {});
   }
 }
+
+/** Load a direction set for one procedure, then put the deployment grid back so sector numbers mean what they did. */
+async function withDirectionGrid(session, spec, action) {
+  await session.setDirectionGrid(spec);
+  let result;
+  try {
+    result = await action([...session.latest.azimuth_deg], [...session.latest.elevation_deg]);
+  } catch (error) {
+    await session.restoreGrid().catch(() => {});
+    throw error;
+  }
+  await session.restoreGrid();
+  return result;
+}
+
+const snrText = (db) => Number.isFinite(db) ? `${num(db, 1)} dB` : 'below the noise';
 
 /** Mean of detector readings on the raw state word, back in dB. */
 function rawMeanDb(levels) {
@@ -347,7 +357,7 @@ export function measurementsScreen({session}) {
         put(results,
           ...rows.map((row) => h('div', {class: 'ms-row'}, h('span', {}, `Mic ${row.microphone}`),
             h('span', {class: 'mono'}, (row.gain_db === null ? 'no signal above its noise' : `correction ${num(row.gain_db, 2)} dB`) +
-              (row.snr_db === null ? '' : ` · SNR ${num(row.snr_db, 1)} dB`)))),
+              (row.snr_db === null ? '' : ` · SNR ${snrText(row.snr_db)}`)))),
           rows.length ? h('p', {class: 'note'}, corrected
             ? 'Corrections use the source power above each microphone\'s noise.'
             : 'Run the noise pass to correct for each microphone\'s noise. Delay and polarity are not measured yet.') : null,
@@ -416,13 +426,14 @@ export function measurementsScreen({session}) {
           figure = [
             h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Array gain'),
               h('span', {class: 'ms-figure__value'}, Number.isFinite(gain) ? `${num(gain, 1)} dB` : 'source below the noise')),
-            h('p', {class: 'note'}, `Beam SNR ${num(beamSnr, 1)} dB, microphone SNR ${num(micSnr, 1)} dB.` +
+            h('p', {class: 'note'}, `Beam SNR ${snrText(beamSnr)}, microphone SNR ${snrText(micSnr)}.` +
               (Number.isFinite(expected) ? ` Theory against noise uncorrelated between microphones: ${num(expected, 1)} dB. Room noise is partly correlated at low frequencies, so expect less.` : '')),
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('arraygain',
               `Array gain, sector ${controls.sector.value}, microphone ${microphone.value}`,
               [draft.on.beam, draft.on.mic, draft.off.beam, draft.off.mic],
               {array_gain_db: gain, beam_snr_db: beamSnr, microphone_snr_db: micSnr,
-                theory_white_noise_gain_db: expected ?? null, summary: `${num(gain, 1)} dB`}, notes.value)}, 'Save run'),
+                theory_white_noise_gain_db: expected ?? null,
+                summary: Number.isFinite(gain) ? `${num(gain, 1)} dB` : 'source below the noise'}, notes.value)}, 'Save run'),
           ];
         }
         put(results, ...rows, figure);
@@ -471,53 +482,52 @@ export function measurementsScreen({session}) {
         try {
           await ensureIdle(session);
           const original = session.latest?.settings?.settle_us ?? 1250;
-          const {quietDb, loudDb, readings} = await withSettings(session, {measure: 0, settle_us: original}, async () => {
-            const dwell = async (sector) => {
-              await readOnce(session, `S,${sector}`, sector);
-              await sleep(150);
-              const levels = [];
-              for (let i = 0; i < 5; i++) levels.push(await readOnce(session, 'M', sector));
-              return rawMeanDb(levels);
-            };
-            setText(status, 'Measuring the quiet and loud directions…');
-            const quietLevel = await dwell(quiet.value);
-            const loudLevel = await dwell(loud.value);
-            const bySettle = new Map(list.map((settle) => [settle, []]));
+          const readings = await withSettings(session, {measure: 0, settle_us: original}, async () => {
+            const taken = [];
             let done = 0;
             for (let pass = 0; pass < count; pass++) {
               for (const settle of list) {
-                // Dwell on the loud beam, then the firmware times the steer, settle and read.
+                // References are taken next to each reading, so a source that drifts cancels out.
                 await readOnce(session, `S,${loud.value}`, loud.value);
                 await sleep(150);
+                const loudDb = await readOnce(session, 'M', loud.value);
                 await session.setSetting('settle_us', settle, 'settle', false);
-                bySettle.get(settle).push(await readOnce(session, `S,${quiet.value}`, quiet.value));
+                const levelDb = await readOnce(session, `S,${quiet.value}`, quiet.value);
+                await sleep(150);
+                const quietDb = await readOnce(session, 'M', quiet.value);
+                taken.push({settle_us: settle, level_db: levelDb, loud_db: loudDb, quiet_db: quietDb});
                 done += 1;
                 progress.value = done / (count * list.length);
                 setText(status, `Settle ${settle} µs, pass ${pass + 1} of ${count}…`);
               }
             }
-            return {quietDb: quietLevel, loudDb: loudLevel, readings: bySettle};
+            return taken;
           });
-          const points = list.map((settle) => ({settle_us: settle, level_db: rawMeanDb(readings.get(settle))}));
-          const fit = fitDetectorDecay(points, quietDb, loudDb);
+          const fit = fitDetectorDecay(readings);
           const contractTau = Number(session.latest?.level_time_constant_ms || 8.665);
-          const captures = list.map((settle) => {
-            const levels = readings.get(settle);
+          const contrast = readings.map((r) => r.loud_db - r.quiet_db).sort((a, b) => a - b)[Math.floor(readings.length / 2)];
+          const rows = list.map((settle) => {
+            const group = readings.filter((r) => r.settle_us === settle);
+            const fractions = group.map((r) => remainingFraction(r)).filter(Number.isFinite);
+            return {settle, group, fraction: fractions.length ? fractions.reduce((sum, f) => sum + f, 0) / fractions.length : NaN};
+          });
+          const captures = rows.map(({settle, group}) => {
+            const levels = group.map((r) => r.level_db);
             return {label: `settle ${settle} us`, value: settle, n: levels.length, mean_db: rawMeanDb(levels),
               std_db: stdDb(levels), min_db: Math.min(...levels), max_db: Math.max(...levels)};
           });
           put(results,
             h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Detector time constant'),
               h('span', {class: 'ms-figure__value'}, fit ? `${num(fit.tau_ms, 2)} ms` : 'no fit')),
-            h('p', {class: 'note'}, `${fit ? `${fit.points_used} settle times used, r² ${num(fit.r2, 3)}. ` : ''}` +
-              `Contract ${num(contractTau, 3)} ms. Loud ${num(loudDb, 1)} dBFS, quiet ${num(quietDb, 1)} dBFS.` +
-              (loudDb - quietDb < 10 ? ' The directions differ by less than 10 dB; move the source or pick directions further apart.' : '')),
-            ...points.map((point) => h('div', {class: 'ms-row'}, h('span', {}, `${point.settle_us} µs`),
-              h('span', {class: 'mono'}, `${num(point.level_db, 2)} dBFS`))),
+            h('p', {class: 'note'}, `${fit ? `${fit.points_used} of ${readings.length} readings used, r² ${num(fit.r2, 3)}. ` : ''}` +
+              `Contract ${num(contractTau, 3)} ms. Loud and quiet directions differ by ${num(contrast, 1)} dB.` +
+              (contrast < 10 ? ' Less than 10 dB: move the source or pick directions further apart.' : '')),
+            ...rows.map(({settle, fraction}) => h('div', {class: 'ms-row'}, h('span', {}, `${settle} µs`),
+              h('span', {class: 'mono'}, `${num(100 * fraction, 1)} % left · ${num(100 * Math.exp(-settle / 1000 / contractTau), 1)} % at the contract time constant`))),
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('detectorstep',
               `Detector time constant, sectors ${loud.value} to ${quiet.value}`, captures,
               {tau_ms: fit?.tau_ms ?? null, r2: fit?.r2 ?? null, points_used: fit?.points_used ?? 0,
-                contract_tau_ms: contractTau, loud_dbfs: loudDb, quiet_dbfs: quietDb,
+                contract_tau_ms: contractTau, contrast_db: contrast, readings,
                 summary: fit ? `${num(fit.tau_ms, 2)} ms` : 'no fit'}, notes.value)}, 'Save run'));
           setText(status, fit ? `Fitted ${num(fit.tau_ms, 2)} ms.` : 'Could not fit a decay; check the two directions differ clearly.');
         } catch (error) { setText(status, error.message); }
@@ -550,29 +560,31 @@ export function measurementsScreen({session}) {
         try {
           const directions = Math.max(2, Math.min(49, Math.round(count.value)));
           const isAzimuth = axis.value === 'azimuth';
-          await session.setMeasurementSettings({measure: 1, channel: 0});
-          await session.setDirectionGrid({
+          const captures = await withSettings(session, {measure: 1, channel: 0}, () => withDirectionGrid(session, {
             azimuthMin: isAzimuth ? minimum.value : fixed.value,
             azimuthMax: isAzimuth ? maximum.value : fixed.value,
             columns: isAzimuth ? directions : 1,
             elevationMin: isAzimuth ? fixed.value : minimum.value,
             elevationMax: isAzimuth ? fixed.value : maximum.value,
             rows: isAzimuth ? 1 : directions,
-          });
-          const captures = [];
-          for (let sector = 0; sector < directions; sector++) {
-            const angle = isAzimuth ? session.latest.azimuth_deg[sector] : session.latest.elevation_deg[sector];
-            setText(status, `Measuring ${axis.value} ${deg(angle, 1)} (${sector + 1}/${directions})…`);
-            const measured = await capture(session, sector, seconds.value, 20,
-              (fraction) => { progress.value = (sector + fraction) / directions; });
-            captures.push({label: `${axis.value} ${angle}`, value: angle, ...measured});
-          }
+          }, async (azimuths, elevations) => {
+            const measured = [];
+            for (let sector = 0; sector < directions; sector++) {
+              const angle = isAzimuth ? azimuths[sector] : elevations[sector];
+              setText(status, `Measuring ${axis.value} ${deg(angle, 1)} (${sector + 1}/${directions})…`);
+              const levels = await capture(session, sector, seconds.value, 20,
+                (fraction) => { progress.value = (sector + fraction) / directions; });
+              measured.push({label: `${axis.value} ${angle}`, value: angle, ...levels});
+            }
+            return measured;
+          }));
           // Steering across a fixed source traces the same pattern as a source moving past a fixed beam.
+          // The theory is drawn finer than the measured spacing so its nulls show.
           const query = new URLSearchParams({axis: axis.value,
             steer_azimuth_deg: String(isAzimuth ? speaker.value : fixed.value),
             steer_elevation_deg: String(isAzimuth ? fixed.value : speaker.value),
             frequency_hz: String(frequency.value), minimum_deg: String(minimum.value),
-            maximum_deg: String(maximum.value), step_deg: String((maximum.value - minimum.value) / (directions - 1))});
+            maximum_deg: String(maximum.value), step_deg: String((maximum.value - minimum.value) / 240)});
           const theory = await apiJson(`/study/theory/cut?${query}`);
           const peak = Math.max(...captures.map((item) => item.mean_db));
           const measuredPoints = captures.map((item) => ({angle: item.value, level: item.mean_db - peak}));
@@ -580,18 +592,28 @@ export function measurementsScreen({session}) {
           const measuredPeak = refinePeak(captures.map((item) => item.mean_db), captures.map((item) => item.value));
           const x = (angle) => 48 + (angle - minimum.value) / (maximum.value - minimum.value) * 440;
           const y = (level) => 16 + Math.min(30, Math.max(0, -level)) / 30 * 180;
+          const span = maximum.value - minimum.value;
+          const tickStep = [1, 2, 5, 10, 15, 20, 30, 45, 90].find((step) => span / step <= 8) || 90;
+          const angleTicks = [];
+          for (let angle = Math.ceil(minimum.value / tickStep) * tickStep; angle <= maximum.value + 1e-9; angle += tickStep) {
+            angleTicks.push(angle);
+          }
           chart.replaceChildren(
             ...[0, -6, -12, -18, -24, -30].flatMap((level) => [
               s('line', {class: 'grid', x1: 48, x2: 488, y1: y(level), y2: y(level)}),
               s('text', {class: 'tick', x: 40, y: y(level) + 4, 'text-anchor': 'end'}, level),
             ]),
+            ...angleTicks.map((angle) => s('text', {class: 'tick', x: x(angle), y: 212, 'text-anchor': 'middle'}, `${angle}°`)),
+            s('text', {class: 'tick', x: 4, y: 10}, 'dB'),
             s('path', {d: theory.points.map((point, index) => `${index ? 'L' : 'M'}${x(point.angle_deg)} ${y(point.gain_db)}`).join(' '),
-              fill: 'none', stroke: 'var(--muted)', 'stroke-width': 2}),
+              fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.5, 'stroke-dasharray': '5 4'}),
             s('path', {d: measuredPoints.map((point, index) => `${index ? 'L' : 'M'}${x(point.angle)} ${y(point.level)}`).join(' '),
               fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.5}),
             ...measuredPoints.map((point) => s('circle', {cx: x(point.angle), cy: y(point.level), r: 3, fill: 'var(--accent)'})),
           );
           put(results, chart,
+            h('div', {class: 'chart-legend'}, h('span', {class: 'lg-line lg-line--proposed'}), 'Measured, normalised to its peak',
+              h('span', {class: 'lg-line lg-line--device'}), `Theory at ${frequency.value} Hz`),
             h('p', {class: 'ms-prompt'}, `Measured −3 dB width ${measuredWidth ? `${num(measuredWidth.width, 2)}°` : 'not bracketed'} · theory ${num(theory.beamwidth_3db?.width_deg, 2)}°. Peak at ${deg(measuredPeak, 2)}, ${num(measuredPeak - speaker.value, 2)}° from the speaker.`),
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('beamcut',
               `${axis.value} beam cut, ${frequency.value} Hz`, captures,
@@ -625,25 +647,30 @@ export function measurementsScreen({session}) {
         state.busy = true; progress.hidden = false;
         try {
           const size = Math.max(2, Math.min(7, Math.round(count.value)));
-          await session.setMeasurementSettings({measure: 1, channel: 0});
-          await session.setDirectionGrid({azimuthMin: trueAzimuth.value - span.value,
-            azimuthMax: trueAzimuth.value + span.value, columns: size,
-            elevationMin: trueElevation.value - span.value,
-            elevationMax: trueElevation.value + span.value, rows: size});
-          const captures = [];
-          for (let sector = 0; sector < size * size; sector++) {
-            const row = Math.floor(sector / size); const column = sector % size;
-            const azimuth = session.latest.azimuth_deg[column]; const elevation = session.latest.elevation_deg[row];
-            setText(status, `Measuring ${sector + 1}/${size * size}: ${deg(azimuth, 1)}, ${deg(elevation, 1)}…`);
-            const measured = await capture(session, sector, seconds.value, 20,
-              (fraction) => { progress.value = (sector + fraction) / (size * size); });
-            captures.push({label: `${azimuth},${elevation}`, value: sector, azimuth_deg: azimuth,
-              elevation_deg: elevation, ...measured});
-          }
+          let azimuths = []; let elevations = [];
+          const captures = await withSettings(session, {measure: 1, channel: 0}, () => withDirectionGrid(session, {
+            azimuthMin: trueAzimuth.value - span.value, azimuthMax: trueAzimuth.value + span.value, columns: size,
+            elevationMin: trueElevation.value - span.value, elevationMax: trueElevation.value + span.value, rows: size,
+          }, async (gridAzimuths, gridElevations) => {
+            azimuths = gridAzimuths; elevations = gridElevations;
+            const measured = [];
+            for (let sector = 0; sector < size * size; sector++) {
+              const row = Math.floor(sector / size); const column = sector % size;
+              const azimuth = azimuths[column]; const elevation = elevations[row];
+              setText(status, `Measuring ${sector + 1}/${size * size}: ${deg(azimuth, 1)}, ${deg(elevation, 1)}…`);
+              const levels = await capture(session, sector, seconds.value, 20,
+                (fraction) => { progress.value = (sector + fraction) / (size * size); });
+              measured.push({label: `${azimuth},${elevation}`, value: sector, azimuth_deg: azimuth,
+                elevation_deg: elevation, ...levels});
+            }
+            return measured;
+          }));
           const peak = captures.reduce((best, item) => item.mean_db > best.mean_db ? item : best);
+          const peakRow = Math.floor(peak.value / size); const peakColumn = peak.value % size;
+          const onEdge = peakRow === 0 || peakRow === size - 1 || peakColumn === 0 || peakColumn === size - 1;
           const grid = Array.from({length: size}, (_, row) =>
             captures.slice(row * size, (row + 1) * size).map((item) => item.mean_db));
-          const refined = refinePeak2d(grid, session.latest.azimuth_deg, session.latest.elevation_deg);
+          const refined = refinePeak2d(grid, azimuths, elevations);
           const azimuthError = refined.azimuth - trueAzimuth.value;
           const elevationError = refined.elevation - trueElevation.value;
           const error = Math.hypot(azimuthError, elevationError);
@@ -651,14 +678,16 @@ export function measurementsScreen({session}) {
             h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Steering error'),
               h('span', {class: 'ms-figure__value'}, `${num(error, 2)}°`)),
             h('p', {class: 'note'}, `Interpolated peak ${deg(refined.azimuth, 2)}, ${deg(refined.elevation, 2)}; strongest grid point ${deg(peak.azimuth_deg, 2)}, ${deg(peak.elevation_deg, 2)} at ${num(peak.mean_db, 1)} dBFS.`),
+            onEdge ? h('p', {class: 'note'}, 'The strongest point is on the edge of the search grid, so the true peak may lie outside it. Widen the half-span or move the search centre and measure again.') : null,
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('steering',
               `Steering accuracy at ${trueAzimuth.value},${trueElevation.value}`, captures,
               {true_azimuth_deg: trueAzimuth.value, true_elevation_deg: trueElevation.value,
                 peak_azimuth_deg: refined.azimuth, peak_elevation_deg: refined.elevation,
                 grid_peak_azimuth_deg: peak.azimuth_deg, grid_peak_elevation_deg: peak.elevation_deg,
+                peak_on_edge: onEdge,
                 azimuth_error_deg: azimuthError, elevation_error_deg: elevationError,
-                angular_error_deg: error, summary: `${num(error, 2)}°`}, notes.value)}, 'Save run'));
-          setText(status, `Peak angular error ${num(error, 2)}°.`);
+                angular_error_deg: error, summary: `${num(error, 2)}°${onEdge ? ' (edge)' : ''}`}, notes.value)}, 'Save run'));
+          setText(status, `Peak angular error ${num(error, 2)}°${onEdge ? ', peak on the grid edge' : ''}.`);
         } catch (error) { setText(status, error.message); }
         finally { state.busy = false; progress.hidden = true; }
       };
@@ -679,8 +708,8 @@ export function measurementsScreen({session}) {
         if (draft.on && draft.off) {
           const pOn = 10 ** (draft.on.mean_db / 10); const pOff = 10 ** (draft.off.mean_db / 10);
           const snr = pOn > pOff ? 10 * Math.log10((pOn - pOff) / pOff) : -Infinity;
-          figure = h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'SNR'), h('span', {class: 'ms-figure__value'}, Number.isFinite(snr) ? `${num(snr, 1)} dB` : 'below the floor'),
-            h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('snr', `SNR, sector ${controls.sector.value}`, [draft.on, draft.off], {snr_db: snr.toFixed(2), summary: `SNR ${num(snr, 1)} dB`}, notes.value)}, 'Save run'));
+          figure = h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'SNR'), h('span', {class: 'ms-figure__value'}, snrText(snr)),
+            h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('snr', `SNR, sector ${controls.sector.value}`, [draft.on, draft.off], {snr_db: Number.isFinite(snr) ? snr : null, summary: `SNR ${snrText(snr)}`}, notes.value)}, 'Save run'));
         }
         put(results, ...rows, figure);
       };

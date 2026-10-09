@@ -386,6 +386,8 @@ class HeimdallState:
         self.elevation_deg: list[float] = []
         self.levels_raw: list[list[int | None]] = []
         self.scan_count = 0
+        self.measurement_count = 0
+        self.last_measurement: dict[str, int] | None = None
         self.mode = "IDLE"
         self.target: dict[str, Any] | None = None
         self.last_steer: dict[str, Any] | None = None
@@ -449,6 +451,9 @@ class HeimdallState:
             self._validate_grid_position(record)
             self.levels_raw[record["row"]][record["column"]] = record["raw_level"]
             self._learn_angles(record)
+            self.measurement_count += 1
+            self.last_measurement = {"count": self.measurement_count, "row": record["row"],
+                                     "column": record["column"], "raw_level": record["raw_level"]}
         elif record_type == "scan_started":
             self.mode = record["mode"]
             self.target = None
@@ -587,6 +592,10 @@ class HeimdallState:
             "levels_linear": levels_linear,
             "levels_db": levels_db,
             "scan_count": self.scan_count,
+            "last_measurement": None if self.last_measurement is None else {
+                **self.last_measurement,
+                "level_db": linear_to_db(raw_8_24_to_linear(self.last_measurement["raw_level"])),
+            },
             "mode": self.mode,
             "target": deepcopy(self.target),
             "last_steer": deepcopy(self.last_steer),

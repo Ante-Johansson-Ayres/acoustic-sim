@@ -189,6 +189,18 @@ def test_stop_and_direct_steer_clear_tracking_state():
     assert state.snapshot()["target"] is None
 
 
+def test_last_measurement_survives_later_records():
+    state = HeimdallState()
+    state.apply_line("READY,2D,1,2,2,44")
+    state.apply_line("P,0,1,10.0000,0.0000,8388608")
+    state.apply_line("TONE,0,182.0,20.0,6,-10.0")
+    measurement = state.snapshot()["last_measurement"]
+    assert measurement["count"] == 1 and (measurement["row"], measurement["column"]) == (0, 1)
+    assert measurement["level_db"] == pytest.approx(-6.0206, abs=1e-3)
+    state.apply_line("P,0,0,-10.0000,0.0000,8388608")
+    assert state.snapshot()["last_measurement"]["count"] == 2
+
+
 def test_command_validation():
     assert validate_command("S,399", sectors=400) == "S,399"
     assert validate_command("I") == "I"

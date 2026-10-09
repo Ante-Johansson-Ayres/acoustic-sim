@@ -22,6 +22,20 @@ export function directionGridFailure(frame, beforeSequence) {
   return (record.details || []).join(' ') || 'refused';
 }
 
+/** The grid a frame shows, kept so it can be put back after a temporary direction set. */
+export function activeGrid(frame) {
+  const cfg = frame?.configuration;
+  if (!cfg || !Array.isArray(frame.azimuth_deg) || !Array.isArray(frame.elevation_deg)) return null;
+  return {rows: cfg.rows, columns: cfg.columns, azimuth_deg: [...frame.azimuth_deg], elevation_deg: [...frame.elevation_deg]};
+}
+
+/** True when `frame` shows `grid` (from activeGrid), angles included. */
+export function gridMatches(frame, grid) {
+  const cfg = frame?.configuration;
+  return cfg?.rows === grid.rows && cfg?.columns === grid.columns &&
+    sameAngles(frame.azimuth_deg, grid.azimuth_deg) && sameAngles(frame.elevation_deg, grid.elevation_deg);
+}
+
 /** True once `frame` shows the requested direction set loaded, angles included. */
 export function directionGridReady(frame, spec, beforeSequence) {
   const set = frame?.direction_set;

@@ -1,4 +1,4 @@
-# Study mode: proposed firmware commands (protocol v3)
+# Study mode: firmware commands (protocol v3)
 
 Status: **implemented** in MAX78002 firmware, acoustic-sim serial transport,
 emulator, and Study UI. Writes are enabled only when the device map hash matches

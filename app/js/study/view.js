@@ -30,7 +30,7 @@ export function createView(container, {session}) {
   const missing = h('div', {class: 'placeholder', hidden: true});
   const params = parametersScreen({canWrite: () => state.writes});
   const measure = measurementsScreen({session});
-  const footer = h('footer', {class: 'app-footer'}, h('span', {id: 'st-footer-left'}), h('span', {}, 'Proposed device commands: docs/study-protocol.md'));
+  const footer = h('footer', {class: 'app-footer'}, h('span', {id: 'st-footer-left'}), h('span', {}, 'Device commands (protocol v3): docs/study-protocol.md'));
   container.append(bar, missing, params.el, measure.el, footer);
 
   function subFromHash() {
