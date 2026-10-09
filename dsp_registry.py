@@ -400,6 +400,15 @@ class DspParameterService:
                     count += 1
         return count
 
+    def settings(self, transport) -> dict[str, int]:
+        """The settings for this transport, without the status bookkeeping."""
+        with self._lock:
+            try:
+                self._bind(transport)
+            except FileNotFoundError:
+                pass
+            return dict(self._settings)
+
     def _require(self, transport, write: bool) -> None:
         supported, reason = self.supports(transport)
         if not supported:

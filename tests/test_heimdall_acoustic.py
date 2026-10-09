@@ -60,6 +60,16 @@ def test_deployment_contract_rejects_mismatched_firmware_header(tmp_path):
         load_beam_contract(firmware_header_path=header)
 
 
+def test_reversed_polarity_gain_loads_as_its_magnitude(tmp_path):
+    data = json.loads(load_beam_contract().path.read_text(encoding="ascii"))
+    data["gain_fixpt_8_24"][0] = (-data["gain_fixpt_8_24"][0]) & 0xFFFFFFFF
+    path = tmp_path / "beam_table_2d.json"
+    path.write_text(json.dumps(data), encoding="ascii")
+    contract = load_beam_contract(path)
+    # The simulated microphones are wired correctly, so only the magnitude applies.
+    assert contract.gains[0] == pytest.approx(load_beam_contract().gains[0])
+
+
 def test_contract_follows_the_selected_dsp_export(monkeypatch):
     contracts = {}
     for folder in ("SigmaStudioExport", "SigmaStudioExperimental"):

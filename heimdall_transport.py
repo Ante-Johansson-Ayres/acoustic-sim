@@ -27,6 +27,7 @@ TRACK_FAILURE_LIMIT = 3
 TRACK_MOVE_CONFIRMATIONS = 2
 GLOBAL_RESCAN_INTERVAL = 50
 FLIGHT_PROFILES = frozenset({"crossing", "approach", "orbit", "patrol", "evasive", "legacy"})
+EMULATED_DRONE_F0_HZ = 182.0
 
 
 @dataclass(frozen=True)
@@ -403,6 +404,9 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         self.bank_target_sector = 0
         self.ch1_bank_beam: int | None = None
         self.detector_level = 0.0
+        self.detector_target = 0.0
+        self.detector_time: float | None = None
+        self.last_tone: float | None = None
 
     def snapshot(self) -> dict[str, Any]:
         snapshot = super().snapshot()
@@ -432,6 +436,7 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
                         self._adaptive_cycle()
                     elif self.mode == "B":
                         self._stare_cycle()
+                self._report_tones()
         finally:
             self.connected = False
             self.running = False
@@ -529,6 +534,13 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
             except (PermissionError, ValueError):
                 self.apply_line("ERR,PR,ADDR")
         elif command.startswith("DG,"):
+            if self.mode != "IDLE":
+                self.apply_line("ERR,DG,BUSY")
+                return
+            if self.level_provider is not None:
+                # The acoustic cache only holds levels for the grid it was prepared on.
+                self.apply_line("ERR,DG,UNSUPPORTED")
+                return
             azimuth_min, azimuth_max, columns, elevation_min, elevation_max, rows = (
                 int(value) for value in command[3:].split(",")
             )
@@ -750,30 +762,36 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
     def _emit_measurement(self, sector: int, delay: bool = True) -> int:
         self.current_sector = sector
         row, column = divmod(sector, self.columns)
-        level = self._measurement_level(sector)
+        settings = self.parameter_service.settings(self)
+        level = self._measurement_level(sector, settings)
         self.apply_line(
             f"P,{row},{column},{_format_angle(self.azimuth_deg[column])},"
             f"{_format_angle(self.elevation_deg[row])},{level}"
         )
         if delay:
-            duration = self._measurement_duration()
+            duration = self._measurement_duration(settings)
             if duration > 0.0:
                 time.sleep(duration)
         return level
 
-    def _measurement_duration(self) -> float:
-        settings = self.parameter_service.status(self)["settings"]
+    def _measurement_duration(self, settings: dict[str, int]) -> float:
         if settings["measure"] == 1:
             return (settings["guard_us"] + settings["window_us"]) / 1_000_000.0
         return max(self.sector_time_s, settings["settle_us"] / 1_000_000.0)
 
-    def _measurement_level(self, sector: int) -> int:
-        settings = self.parameter_service.status(self)["settings"]
+    def _measurement_level(self, sector: int, settings: dict[str, int] | None = None) -> int:
+        settings = settings or self.parameter_service.settings(self)
         instantaneous = self._level_for_sector(sector)
-        duration = self._measurement_duration()
+        now = self.clock()
         tau = max(1e-6, self.program.level_time_constant_ms / 1000.0)
-        alpha = -math.expm1(-duration / tau)
-        self.detector_level += alpha * (instantaneous - self.detector_level)
+        settle = settings["settle_us"] / 1_000_000.0
+        if self.detector_time is not None:
+            # Until the steer the shared detector kept listening to the previous beam.
+            gap = max(0.0, now - self.detector_time - settle)
+            self.detector_level += -math.expm1(-gap / tau) * (self.detector_target - self.detector_level)
+        self.detector_level += -math.expm1(-settle / tau) * (instantaneous - self.detector_level)
+        self.detector_target = instantaneous
+        self.detector_time = now
         if settings["measure"] == 0:
             return max(0, min(0x7FFFFFFF, round(self.detector_level)))
         if self.level_provider is not None:
@@ -781,6 +799,21 @@ class EmulatorHeimdallTransport(HeimdallTransport, threading.Thread):
         window_s = max(0.001, settings["window_us"] / 1_000_000.0)
         scale = 1.0 + self.random.uniform(-0.002, 0.002) * math.sqrt(0.005 / window_s)
         return max(0, min(0x7FFFFFFF, round(instantaneous * scale)))
+
+    def _report_tones(self) -> None:
+        """Synthetic TONE records for the simulated drone on the steered beam (fast emulator only)."""
+        period_ms = self.parameter_service.settings(self)["tone"]
+        if period_ms <= 0 or self.level_provider is not None or self.current_sector is None:
+            return
+        now = self.clock()
+        if self.last_tone is not None and now - self.last_tone < max(50, period_ms) / 1000.0:
+            return
+        self.last_tone = now
+        level = max(self._level_for_sector(self.current_sector) / 16777216.0, 1e-9)
+        score = max(0.0, 20.0 * math.log10(level / 0.015))
+        harmonics = 6 if score >= 6.0 else 0
+        self.apply_line(f"TONE,0,{EMULATED_DRONE_F0_HZ:.1f},{score:.1f},{harmonics},"
+                        f"{20.0 * math.log10(level):.1f}")
 
     def _emit_steer_ok(self, sector: int) -> None:
         row, column = divmod(sector, self.columns)

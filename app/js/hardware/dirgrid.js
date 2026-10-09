@@ -15,6 +15,13 @@ export function directionGridAngles(minimum, maximum, count) {
 const sameAngles = (actual, expected) => Array.isArray(actual) && actual.length === expected.length &&
   expected.every((angle, i) => Math.abs(actual[i] - angle) < 1e-3);
 
+/** The firmware's reason if it refused the direction set sent after `beforeSequence`, else null. */
+export function directionGridFailure(frame, beforeSequence) {
+  const record = frame?.last_record;
+  if (Number(frame?.sequence || 0) <= beforeSequence || record?.type !== 'error' || record.reason !== 'DG') return null;
+  return (record.details || []).join(' ') || 'refused';
+}
+
 /** True once `frame` shows the requested direction set loaded, angles included. */
 export function directionGridReady(frame, spec, beforeSequence) {
   const set = frame?.direction_set;

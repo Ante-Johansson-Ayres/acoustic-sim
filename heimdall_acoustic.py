@@ -234,9 +234,10 @@ def load_beam_contract(path=None, firmware_header_path=None) -> BeamContract:
     # Per-microphone gains the firmware writes at boot (compiled gain x taper).
     # Contracts from before the taper have none and mean unity.
     gain_words = data.get("gain_fixpt_8_24") or []
-    gains = (np.asarray([_signed_8_24(int(value)) for value in gain_words], dtype=np.float64)
+    # A negative word corrects a reversed microphone; the simulated ones are wired correctly.
+    gains = (np.abs([_signed_8_24(int(value)) for value in gain_words]).astype(np.float64)
              if gain_words else np.ones(microphones))
-    if gains.shape != (microphones,) or not np.all(np.isfinite(gains)) or np.any(gains < 0.0):
+    if gains.shape != (microphones,) or not np.all(np.isfinite(gains)):
         raise ValueError("beam contract microphone gains are invalid")
 
     return BeamContract(

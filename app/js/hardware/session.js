@@ -11,7 +11,7 @@
 import { API_BASE, WS_BASE, apiJson } from '../shared/api.js';
 import { download } from '../shared/dom.js';
 import { fileStamp } from '../shared/format.js';
-import { directionGridCommand, directionGridReady } from './dirgrid.js';
+import { directionGridCommand, directionGridFailure, directionGridReady } from './dirgrid.js';
 
 export const STALE_MS = 5000;
 export const HISTORY_WINDOW_S = 30;
@@ -289,6 +289,9 @@ export class HardwareSession extends EventTarget {
     const deadline = performance.now() + 5000;
     while (performance.now() < deadline) {
       if (directionGridReady(this.latest, spec, beforeSequence)) return this.latest.direction_set;
+      const failure = directionGridFailure(this.latest, beforeSequence);
+      if (failure === 'UNSUPPORTED') throw new Error('Direction sets need hardware or the fast emulator; the acoustic emulator only has its prepared grid.');
+      if (failure) throw new Error(`The device refused the direction set (${failure}).`);
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw new Error('Timed out waiting for the direction set.');

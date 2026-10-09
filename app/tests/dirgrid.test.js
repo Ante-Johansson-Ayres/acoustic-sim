@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { directionGridCommand, directionGridReady } from '../js/hardware/dirgrid.js';
+import { directionGridCommand, directionGridFailure, directionGridReady } from '../js/hardware/dirgrid.js';
 
 const spec = {azimuthMin: -30, azimuthMax: 30, columns: 3, elevationMin: 0, elevationMax: 0, rows: 1};
 const loaded = (azimuth, elevation, sequence = 12) => ({
@@ -27,4 +27,11 @@ test('not ready between READY and the new AZIMUTH line', () => {
 test('ready once the requested angles arrive; one row sits at the midpoint', () => {
   assert.equal(directionGridReady(loaded([-30, 0, 30], [0]), spec, 10), true);
   assert.equal(directionGridReady(loaded([-30, 0, 30], [0], 10), spec, 10), false);
+});
+
+test('a DG error after the request is reported, an older one is not', () => {
+  const refused = {sequence: 12, last_record: {type: 'error', reason: 'DG', details: ['UNSUPPORTED']}};
+  assert.equal(directionGridFailure(refused, 10), 'UNSUPPORTED');
+  assert.equal(directionGridFailure(refused, 12), null);
+  assert.equal(directionGridFailure({sequence: 12, last_record: {type: 'dirset'}}, 10), null);
 });

@@ -377,32 +377,64 @@ def test_emulator_study_commands_round_trip_through_protocol():
         emulator.join(timeout=1.0)
 
 
-def test_emulator_shared_detector_smears_but_mcu_window_does_not():
-    class Provider:
-        def level_for_sector(self, sector):
-            return (1000, 0)[sector]
+def _quiet_registry_service():
+    return DspParameterService(loader=lambda: {"export": {"sha256": "0" * 64},
+                                               "map_hash": None, "parameters": []})
 
-        def metadata(self):
-            return {}
 
-    registry = {"export": {"sha256": "0" * 64}, "map_hash": None, "parameters": []}
-    service = DspParameterService(loader=lambda: registry)
+class _TwoLevelProvider:
+    def level_for_sector(self, sector):
+        return (1000, 0)[sector]
+
+    def metadata(self):
+        return {}
+
+
+def test_emulator_detector_decays_only_for_the_settle_time_after_a_steer():
+    now = [0.0]
+    service = _quiet_registry_service()
     emulator = EmulatorHeimdallTransport(
-        rows=1,
-        columns=2,
-        sector_time_s=0.01,
-        level_provider=Provider(),
-        parameter_service=service,
-        program=DeployedProgram(level_time_constant_ms=10.0),
+        rows=1, columns=2, sector_time_s=0.0, level_provider=_TwoLevelProvider(),
+        parameter_service=service, program=DeployedProgram(level_time_constant_ms=10.0),
+        clock=lambda: now[0],
     )
-    first = emulator._measurement_level(0)
-    smeared_quiet = emulator._measurement_level(1)
-    assert 600 <= first <= 650
-    assert 200 <= smeared_quiet <= 250
+    service.set(emulator, "settle_us", 5000)
+    emulator._measurement_level(0)
+    now[0] = 1.0
+    assert emulator._measurement_level(0) == 1000
+    # A long host round trip keeps the detector on the loud beam until the steer.
+    now[0] = 1.2
+    assert emulator._measurement_level(1) == pytest.approx(1000 * math.exp(-0.5), abs=1)
 
     service.set(emulator, "measure", 1)
     assert emulator._measurement_level(0) == 1000
     assert emulator._measurement_level(1) == 0
+
+
+def test_acoustic_emulator_refuses_direction_sets():
+    emulator = EmulatorHeimdallTransport(rows=1, columns=2, sector_time_s=0.0,
+                                         level_provider=_TwoLevelProvider(),
+                                         parameter_service=_quiet_registry_service())
+    emulator.start()
+    try:
+        with pytest.raises(RuntimeError, match="DG: UNSUPPORTED"):
+            emulator.request("DG,-1000,1000,2,0,0,1", {"dirset"})
+    finally:
+        emulator.stop()
+        emulator.join(timeout=1.0)
+
+
+def test_emulator_reports_tones_once_enabled():
+    service = _quiet_registry_service()
+    emulator = EmulatorHeimdallTransport(rows=1, columns=1, sector_time_s=0.0,
+                                         parameter_service=service)
+    emulator.current_sector = 0
+    emulator._report_tones()
+    assert emulator.snapshot()["tones"] == {}
+    service.set(emulator, "tone", 100)
+    emulator._report_tones()
+    tone = emulator.snapshot()["tones"]["0"]
+    assert tone["f0_hz"] > 0 and tone["harmonics"] >= 0
 
 
 def test_acoustic_level_provider_uses_the_same_emulator_policy():
