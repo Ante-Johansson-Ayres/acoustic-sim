@@ -285,6 +285,8 @@ def test_dsp_api_against_the_emulator():
         assert written.status_code == 200, written.text
         assert client.post("/dsp/read", json={"address": gain["address"]}).json()["words"] == [_word(0.5)]
         assert client.get("/dsp/status").json()["modified_words"] == 1
-        delay = next(p for p in registry["parameters"] if p["block"] == "Delay_DSP00" and p["name"] == "DelayPercentage")
-        assert client.post("/dsp/write", json={"writes": [{"address": delay["address"], "word": 0}]}).status_code == 400
+        # Steering belongs to the firmware in every program (delay words or lookup tables).
+        steering = next(p for p in registry["parameters"] if p["group"] in {"steering", "delays"})
+        assert not steering["writable"]
+        assert client.post("/dsp/write", json={"writes": [{"address": steering["address"], "word": 0}]}).status_code == 400
         client.post("/hw_disconnect")

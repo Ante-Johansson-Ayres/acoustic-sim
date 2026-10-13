@@ -202,9 +202,16 @@ export function createView(container, {session}) {
     ];
     const program = frame?.dsp;
     if (program) {
-      parts.push(program.matches
-        ? `${program.program}, ${program.style === 'lut' ? 'lookup-table steering' : 'per-microphone steering'}`
-        : `DSP program mismatch: the EEPROM is not ${program.program} (${program.matched}/${program.read} signature words, code ${program.code}); steering is locked`);
+      const load = program.load;
+      if (program.matches) {
+        parts.push(`${program.program}, ${program.style === 'lut' ? 'lookup-table steering' : 'per-microphone steering'}` +
+          (load ? `, loaded by the MCU in ${(load.elapsed_us / 1e6).toFixed(2)} s` : ''));
+      } else if (load) {
+        parts.push(`DSP program mismatch after the MCU loaded ${program.program} (load code ${load.code}, ` +
+          `${program.matched}/${program.read} signature words); steering is locked`);
+      } else {
+        parts.push(`DSP program mismatch: the EEPROM is not ${program.program} (${program.matched}/${program.read} signature words, code ${program.code}); steering is locked`);
+      }
     }
     const tables = frame?.tables;
     if (tables && tables.words > 0 && !tables.loaded) {

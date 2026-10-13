@@ -130,7 +130,8 @@ def test_dsp_check_and_table_load_records():
     state.apply_line("TABLES,2156,2156,2156,0")
     snapshot = state.snapshot()
     assert snapshot["dsp"] == {"program": "MICCANVAS_SS+_BEAMFORM_Golden_Image_LUT", "style": "lut",
-                                "steer_words": 1, "read": 44, "matched": 44, "code": 0, "matches": True}
+                                "steer_words": 1, "read": 44, "matched": 44, "code": 0, "matches": True,
+                                "load": None}
     assert snapshot["tables"] == {"words": 2156, "written": 2156, "verified": 2156, "code": 0, "loaded": True}
     # On a mismatch the firmware writes nothing, so the previous taper and tables no longer hold.
     state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Golden_Image_LUT,lut,1,44,3,0")
@@ -142,6 +143,27 @@ def test_dsp_check_and_table_load_records():
     state.apply_line("TABLES,2156,2156,2100,0")
     assert not state.snapshot()["tables"]["loaded"]
     for line in ("DSP,,lut,1,44,44,0", "DSP,x,beam,1,44,44,0", "DSP,x,lut,0,44,44,0", "TABLES,1,1,1"):
+        with pytest.raises(ProtocolError):
+            parse_line(line)
+
+
+def test_mcu_program_load_belongs_to_the_following_check():
+    state = HeimdallState()
+    state.apply_line("READY,2D,7,7,49,44")
+    state.apply_line("DSP_LOAD,72,1348,77570,812345,0")
+    state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Bank,lut,1,64,64,0")
+    dsp = state.snapshot()["dsp"]
+    assert dsp["matches"]
+    assert dsp["load"] == {"steps": 72, "writes": 1348, "bytes": 77570, "elapsed_us": 812345, "code": 0}
+    # A later check without a load (I with the program still running) carries none.
+    state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Bank,lut,1,64,64,0")
+    assert state.snapshot()["dsp"]["load"] is None
+    # A failed load is reported with the mismatch that follows it.
+    state.apply_line("DSP_LOAD,3,5,4,1200,-5")
+    state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Bank,lut,1,64,0,0")
+    dsp = state.snapshot()["dsp"]
+    assert not dsp["matches"] and dsp["load"]["code"] == -5
+    for line in ("DSP_LOAD,72,1348,77570,812345", "DSP_LOAD,x,1,1,1,0", "DSP_LOAD,72,-1,1,1,0"):
         with pytest.raises(ProtocolError):
             parse_line(line)
 
@@ -463,7 +485,8 @@ def test_acoustic_level_provider_uses_the_same_emulator_policy():
     emulator.start()
     try:
         emulator.send_command("G")
-        deadline = time.monotonic() + 1.0
+        # Generous: the loop ends as soon as the target appears, and the full suite runs in parallel threads.
+        deadline = time.monotonic() + 5.0
         while emulator.snapshot()["target"] is None and time.monotonic() < deadline:
             time.sleep(0.005)
         snapshot = emulator.snapshot()

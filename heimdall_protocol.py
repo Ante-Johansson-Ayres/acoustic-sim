@@ -108,6 +108,16 @@ def parse_line(line: str) -> dict[str, Any]:
             "code": _signed_integer(parts[6], "error code"),
         }
 
+    if record_type == "DSP_LOAD" and len(parts) == 6:
+        return {
+            "type": "dsp_load",
+            "steps": _integer(parts[1], "load steps", 0, 65535),
+            "writes": _integer(parts[2], "load writes", 0, 65535),
+            "bytes": _integer(parts[3], "load bytes", 0, 0xFFFFFFFF),
+            "elapsed_us": _integer(parts[4], "load time", 0, 0xFFFFFFFF),
+            "code": _signed_integer(parts[5], "error code"),
+        }
+
     if record_type == "TABLES" and len(parts) == 5:
         return {
             "type": "tables",
@@ -400,6 +410,7 @@ class HeimdallState:
         self.audio_transfer: dict[str, Any] | None = None
         self.taper: dict[str, Any] | None = None
         self.dsp: dict[str, Any] | None = None
+        self.pending_dsp_load: dict[str, Any] | None = None
         self.tables: dict[str, Any] | None = None
         self.bank: dict[str, Any] | None = None
         self.bank_levels_raw: list[int] | None = None
@@ -513,12 +524,17 @@ class HeimdallState:
             self._learn_angles(record)
         elif record_type == "timing":
             self.last_timing = record
+        elif record_type == "dsp_load":
+            # The MCU loaded the program; the DSP check that follows reports the result.
+            self.pending_dsp_load = {key: record[key] for key in ("steps", "writes", "bytes", "elapsed_us", "code")}
         elif record_type == "dsp":
             # Every program check starts afresh: on a mismatch the firmware writes nothing.
             self.dsp = {
                 **{key: record[key] for key in ("program", "style", "steer_words", "read", "matched", "code")},
                 "matches": record["code"] == 0 and 0 < record["read"] == record["matched"],
+                "load": self.pending_dsp_load,
             }
+            self.pending_dsp_load = None
             self.taper = None
             self.tables = None
         elif record_type == "tables":
