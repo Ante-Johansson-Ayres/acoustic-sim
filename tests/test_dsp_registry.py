@@ -192,6 +192,29 @@ def test_bank_detectors_never_count_as_the_scan_detector(tmp_path):
     assert registry["level_readback_address"] == 43
 
 
+def test_fir_stages_after_the_beam_sum_are_writable(tmp_path):
+    registry = dsp_registry.load_registry(_export(tmp_path, {
+        "FIR_Stage1_Beam": [("fircoeff", 300, 11, "FixPoint8d24", [_word(0.1)] * 11)],
+        "FIR_Stage2_Beam": [("fircoeff", 311, 11, "FixPoint8d24", [_word(0.1)] * 11)],
+    }))
+    stages = {p["group"]: p for p in registry["parameters"]}
+    assert stages["fir1"]["mic"] is None and stages["fir1"]["writable"]
+    assert stages["fir2"]["address"] == 311 and stages["fir2"]["writable"]
+
+
+@pytest.mark.parametrize("folder", ["SigmaStudioBank", "SigmaStudioCharacterisation",
+                                    "SigmaStudioExperimental", "SigmaStudioExport"])
+def test_study_writes_exactly_what_the_firmware_accepts(monkeypatch, folder):
+    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", folder)
+    contract = json.loads(
+        (dsp_registry.selected_export_dir() / "beam_table_2d.json").read_text(encoding="utf-8"))
+    firmware = {address for start, words in contract["study"]["writable_ranges"]
+                for address in range(start, start + words)}
+    registry = dsp_registry.load_registry()
+    study = {p["address"] + k for p in registry["parameters"] if p["writable"] for k in range(p["words"])}
+    assert study == firmware
+
+
 def test_setting_limits_and_defaults_match_firmware():
     config = (dsp_registry.FIRMWARE_DIR / "heimdall_config.h").read_text(encoding="utf-8")
     names = {name: int(value) for name, value in

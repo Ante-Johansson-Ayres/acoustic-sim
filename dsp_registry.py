@@ -97,11 +97,12 @@ def _scan_detector(labels: list[str], contract_choice: str | None = None) -> str
 
 
 def _classify(algo: str, param: str, scan_detector: str | None) -> tuple[str, int | None, int | None]:
-    """(group, microphone, beam). Beam 1 delays are Delay_DSPxx; beams 2-4 add _1.._3."""
-    match = re.fullmatch(r"(Gain|FIR_Stage1|FIR_Stage2)_DSP(\d+)", algo)
+    """(group, microphone, beam). Beam 1 delays are Delay_DSPxx; beams 2-4 add _1.._3.
+    A *_Beam gain or FIR stage sits once after the beam sum and has no microphone."""
+    match = re.fullmatch(r"(Gain|FIR_Stage1|FIR_Stage2)_(?:DSP(\d+)|Beam)", algo)
     if match:
         kind = {"Gain": "gains", "FIR_Stage1": "fir1", "FIR_Stage2": "fir2"}[match.group(1)]
-        return kind, int(match.group(2)), None
+        return kind, int(match.group(2)) if match.group(2) else None, None
     match = re.fullmatch(r"Delay_DSP(\d+)(?:_(\d))?", algo)
     if match:
         return "delays", int(match.group(1)), 1 + int(match.group(2) or 0)

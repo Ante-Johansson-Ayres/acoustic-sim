@@ -258,11 +258,14 @@ export function parametersScreen({canWrite}) {
     const response = s('svg', {viewBox: '0 0 520 250', class: 'chart', role: 'img'});
     const readouts = h('div', {class: 'readouts'});
     const taps = h('div', {class: 'taps'});
+    const lede = h('p', {class: 'lede'});
+    const caption = h('figcaption', {class: 'figure-caption'});
+    const missing = h('p', {class: 'field__error', role: 'alert'});
     const el = h('div', {class: 'st-panel', role: 'tabpanel'},
-      h('div', {class: 'st-panel__head'}, h('h2', {class: 'page-title'}, 'FIR filters'),
-        h('p', {class: 'lede'}, 'Every microphone has two FIR stages. Presets apply to all 44 microphones.')),
+      h('div', {class: 'st-panel__head'}, h('h2', {class: 'page-title'}, 'FIR filters'), lede),
       h('div', {class: 'toolbar'}, presets.el, stages.el),
-      h('figure', {class: 'st-figure'}, h('figcaption', {class: 'figure-caption'}, 'Response of both stages together (DSP00)'), response,
+      missing,
+      h('figure', {class: 'st-figure'}, caption, response,
         h('div', {class: 'chart-legend'}, h('span', {class: 'lg-line lg-line--device'}), 'On the device now', h('span', {class: 'lg-line lg-line--proposed'}), 'Proposed')),
       readouts, taps,
       h('p', {class: 'note'}, 'Assumes coefficient k sits at the block address + k; the flashed taps are symmetric, so confirm the order with the DSP owner before writing asymmetric taps. Eleven taps at 48 kHz cannot make a sharp edge.'),
@@ -291,9 +294,16 @@ export function parametersScreen({canWrite}) {
     function render() {
       presets.set(state.firPreset);
       stages.set(state.firStages);
-      const p1 = dsp.param('fir1', 0);
-      const p2 = dsp.param('fir2', 0);
-      if (!p1 || !p2) { response.replaceChildren(); return; }
+      // One block per microphone, or one after the beam sum (mic null).
+      const p1 = dsp.param('fir1', 0) ?? dsp.param('fir1', null);
+      const p2 = dsp.param('fir2', 0) ?? dsp.param('fir2', null);
+      const afterSum = p1?.mic === null;
+      setText(lede, afterSum
+        ? 'The steered beam passes through two FIR stages after the sum: they shape Continuous, Track and the beam audio. Stare reads the bank, which has its own band-pass and is not changed here.'
+        : 'Every microphone has two FIR stages. Presets apply to all 44 microphones.');
+      setText(caption, `Response of both stages together (${afterSum ? 'after the beam sum' : 'DSP00'})`);
+      setText(missing, p1 && p2 ? '' : 'The register map has no FIR_Stage1/FIR_Stage2 blocks, so there is nothing to edit.');
+      if (!p1 || !p2) { response.replaceChildren(); readouts.replaceChildren(); taps.replaceChildren(); return; }
       const words = (param, fn) => Array.from({length: param.words}, (_, k) => fn(param.address + k) / ONE);
       const dev = [words(p1, (a) => dsp.deviceWord(a)), words(p2, (a) => dsp.deviceWord(a))];
       const pro = [words(p1, (a) => dsp.proposedWord(a)), words(p2, (a) => dsp.proposedWord(a))];
