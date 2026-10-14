@@ -1049,11 +1049,11 @@ def build_freq_bin_mask(fs, n_fft, fmin_hz, fmax_hz,
     return combed
 
 
-# ── Phase 3A: MAX78000 fixed-point ML-path preview ────────────────────────────
+# ── Phase 3A: MAX78002 fixed-point ML-path preview ────────────────────────────
 #
 # These helpers simulate what the beamformed signal looks like after an
 # int8/int16 capture and a log-mel feature-extraction stage, so the user
-# can preview the audio stream the CNN on the MAX78000 will actually see.
+# can preview the audio stream the CNN on the MAX78002 will actually see.
 #
 # The ML audio quantization is symmetric about 0 and uses the joint peak
 # as the full-scale reference (matching the `apply_codec_quantization`
@@ -1073,7 +1073,7 @@ def ml_path_quantize_audio(signal, bit_depth=ML_DEFAULT_BIT_DEPTH,
     """Quantize a beamformed audio signal to `bit_depth`-bit integers.
 
     Returns a float array holding the dequantized values. With
-    ``bit_depth=8`` this mirrors what a MAX78000 ML front-end would see
+    ``bit_depth=8`` this mirrors what a MAX78002 ML front-end would see
     if it captured the beamformer output at int8 resolution.
     """
     signal = np.asarray(signal, dtype=np.float64).reshape(-1)

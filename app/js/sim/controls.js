@@ -181,7 +181,7 @@ export function buildControls({onChange}) {
           range('simHumidity', 'Humidity', 10, 90, 5, 50, fixed(0, ' %')),
           range('simTempGrad', 'Temperature gradient', -5, 5, 0.1, 0, fixed(1, ' °C/m')),
         ),
-        section('ML input preview (MAX78000)',
+        section('ML input preview (MAX78002)',
           check('simMlPreview', 'Render the ML input'),
           group(
             select('simMlBitDepth', 'Audio bit depth', [['16', '16 bit'], ['8', '8 bit']], '8'),
@@ -370,24 +370,15 @@ export function buildControls({onChange}) {
     return state;
   }
 
-  /** Accepts presets from this and the old app (old files used "live*" ids). */
   function applyState(state) {
     if (!state) return;
-    const legacy = (bag) => {
-      const out = {...(bag || {})};
-      for (const [id, value] of Object.entries(bag || {})) {
-        if (id.startsWith('live') && out['sim' + id.slice(4)] === undefined) out['sim' + id.slice(4)] = value;
-      }
-      return out;
-    };
-    for (const [id, value] of Object.entries(legacy(state.sliders))) setValue(id, value);
-    for (const [id, value] of Object.entries(legacy(state.selects))) {
+    for (const [id, value] of Object.entries(state.sliders || {})) setValue(id, value);
+    for (const [id, value] of Object.entries(state.selects || {})) {
       const input = get(id);
-      if (input) input.value = id === 'simGeo' && value === 'MICCANVAS' ? 'CUSTOM' : value;
+      if (input) input.value = value;
     }
     for (const [id, value] of Object.entries(state.checks || {})) setValue(id, value);
     if (typeof state.simScanAngles === 'string') scanAngles.value = state.simScanAngles;
-    else if (typeof state.liveScanAngles === 'string') scanAngles.value = state.liveScanAngles;
     if (state.absMode === 'materials') absMaterials.checked = true; else absRt60.checked = true;
     customArray.set(Array.isArray(state.customMicPositions) ? state.customMicPositions : []);
     sync();

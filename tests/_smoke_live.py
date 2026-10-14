@@ -9,7 +9,7 @@ Checks:
       and zero-speed collapses to the static DOA.
   (h) Phase 2b atmosphere: non-zero temp_gradient_c_per_m produces a
       non-zero atmospheric_bias_deg in the response.
-  (i) Phase 3A MAX78000 ML preview: ml_audio_b64 decodes to a valid WAV,
+  (i) Phase 3A MAX78002 ML preview: ml_audio_b64 decodes to a valid WAV,
       ml_path_snr_db + feature_snr_db are finite, spectrogram PNG decodes.
   (j) Phase 3B plane-wave crowd mode: returns a valid DOA response.
   (k) Phase 3C FIR capacitive crosstalk: returns a valid DOA response and
@@ -227,7 +227,7 @@ def main() -> int:
         print(f"    FAIL: atm bias should be non-zero with grad=2.0 C/m")
         ok = False
 
-    print("[i] Phase 3A MAX78000 ML-path preview ...")
+    print("[i] Phase 3A MAX78002 ML-path preview ...")
     body_ml = base_payload()
     body_ml["ml_preview"] = True
     body_ml["ml_bit_depth"] = 8

@@ -61,11 +61,6 @@ from acoustic_utils import (
 FS = 16_000
 NFFT = 1024
 HOP = 512
-# Legacy module-level defaults retained for any caller that imports them
-# directly; the batch path now reads FMIN_HZ / FMAX_HZ globals (set via CLI)
-# through build_freq_bin_mask.
-FMIN = DEFAULT_FMIN
-FMAX = DEFAULT_FMAX
 C = 343.0
 
 SIGNAL_SECONDS = 1.0
@@ -436,7 +431,7 @@ def run_single_trial(array_R, true_az_deg, true_el_deg, rt60, drone_spl_db,
     grid_colat = np.array(doa.grid.colatitude, copy=True)
     grid_vals = np.array(doa.grid.values, copy=True)
 
-    # Phase 3A: optional MAX78000 ML-path preview metrics. We beamform
+    # Phase 3A: optional MAX78002 ML-path preview metrics. We beamform
     # toward the estimated DOA, quantize to int8/int16, and report the
     # SNR hit on audio + log-mel features. Cheap enough to enable for a
     # single-environment sweep (<5% overhead per trial).
@@ -1234,7 +1229,7 @@ def main():
                              "(.json or .npz). When set, overrides the analytic "
                              "HPF model.")
     parser.add_argument("--ml-preview", action="store_true",
-                        help="Enable MAX78000 ML-path preview per trial (Phase 3). "
+                        help="Enable MAX78002 ML-path preview per trial (Phase 3). "
                              "Adds ml_path_snr_db and feature_snr_db columns to "
                              "the output CSV. Adds a few % overhead per trial.")
     parser.add_argument("--ml-bit-depth", type=int, default=None,

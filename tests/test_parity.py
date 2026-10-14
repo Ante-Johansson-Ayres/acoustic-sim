@@ -415,7 +415,7 @@ def test_crosstalk_fir_limit_matches_simple():
 
 
 def test_ml_preview_int8_worse_than_int16():
-    """Phase 3A: the MAX78000 preview at 8-bit resolution must report a
+    """Phase 3A: the MAX78002 preview at 8-bit resolution must report a
     lower ``ml_path_snr_db`` than the 16-bit preview. Theoretical
     quantization SNR difference is 6.02 * (16-8) = ~48 dB; we accept
     anything >= 30 dB to leave room for audio-dependent peak jitter.

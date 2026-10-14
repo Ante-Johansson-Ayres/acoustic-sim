@@ -86,10 +86,6 @@ from acoustic_utils import (
 FS = 16_000
 NFFT = 1024
 HOP = 512
-# FMIN / FMAX are retained as legacy defaults for any caller that imports
-# them directly; the live path now reads req.fmin_hz / req.fmax_hz instead.
-FMIN = DEFAULT_FMIN
-FMAX = DEFAULT_FMAX
 C = 343.0
 MARGIN = 0.3
 
@@ -394,7 +390,7 @@ class SimRequest(BaseModel):
     heading_deg: float = 0.0
     n_trajectory_chunks: int = 8
 
-    # Phase 3A: MAX78000 fixed-point ML-path preview.
+    # Phase 3A: MAX78002 fixed-point ML-path preview.
     ml_preview: bool = False
     ml_bit_depth: int = ML_DEFAULT_BIT_DEPTH          # 8 or 16
     ml_feature_bit_depth: int = ML_DEFAULT_FEATURE_BIT_DEPTH  # 8 or 16
@@ -701,7 +697,7 @@ def run_live_trial(req: SimRequest) -> dict:
         normalize=req.normalize_audio,
     )
 
-    # Phase 3A: MAX78000 ML-path preview -- quantize the beamformed audio
+    # Phase 3A: MAX78002 ML-path preview -- quantize the beamformed audio
     # post-beamforming, run a proxy log-mel feature extractor, and report
     # the SNR hit at each stage. The preview is expensive enough that we
     # only compute it on request.
@@ -1556,7 +1552,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--serial-port", type=str, default=None,
-                        help="COM port for MAX78000 hardware (e.g. COM3). Enables /realtime_hw.")
+                        help="COM port for MAX78002 hardware (e.g. COM3). Enables /realtime_hw.")
     parser.add_argument("--serial-baud", type=int, default=921600)
     parser.add_argument("--emulator", action="store_true",
                         help="Start the Heimdall firmware emulator")
