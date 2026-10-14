@@ -1,6 +1,6 @@
 # Acoustic Beamformer Simulation -- Technical Reference
 
-> **Phase 1 audio model update.** This guide describes the pre-Phase-1 simulation. As of the SPL overhaul:
+> **Phase 1 audio model update.** The numbered sections below were written before Phase 1; these notes record what changed since. As of the SPL overhaul:
 >
 > - Source levels are specified in **dB SPL at 1 m** (drone 78, crowd 67, PA 80 defaults) via `acoustic_utils.spl_to_amplitude()`; the old `snr_db` knob is gone.
 > - The mic noise floor is a **dB SPL** slider (default 30) that maps to `sigma2_awgn`.
@@ -10,7 +10,7 @@
 > - The live server emits **three audio clips** (raw mic / unsteered average / beamformed) with a single joint peak scale so relative loudness is preserved.
 > - `run_comparison.py` renamed its `snr_db` CSV column to `drone_spl_db`.
 >
-> See **[LIMITATIONS.md](LIMITATIONS.md)** for what the simulation still *cannot* capture and how to calibrate results against reality. A full rewrite of this guide is deferred to Phase 2.
+> See **[LIMITATIONS.md](LIMITATIONS.md)** for what the simulation still *cannot* capture and how to calibrate results against reality.
 
 > **Phase 2a realism + QoL update.** On top of the Phase 1 audio model:
 >
@@ -34,25 +34,25 @@
 
 > **Phase 3 realism update.** On top of Phase 2b, the simulator adds three optional models that default to the Phase 2b baseline so existing sweeps and tests stay byte-compatible:
 >
-> - **MAX78000 fixed-point ML-path preview.** New Live Sim checkbox "MAX78000 ML preview (Phase 3)" and `run_comparison.py --ml-preview` flag. Re-quantizes the beamformed audio to **int8 or int16**, runs a proxy **log-mel-dB feature extractor** (configurable `n_mels`, defaults to 64 over the 200-2000 Hz band), optionally re-quantizes the feature tensor, and reports `ml_path_snr_db` (audio quantization SNR) + `feature_snr_db` (feature quantization SNR) in the response. The live UI additionally shows an inline spectrogram PNG and a fourth "ML .wav" download next to Raw / Unsteered / Beam. The batch script writes both SNRs as new CSV columns when `--ml-preview` is active. See [LIMITATIONS.md §2c](LIMITATIONS.md) for the log-mel-proxy caveats.
+> - **MAX78002 fixed-point ML-path preview.** Simulator option **Render the ML input** (section "ML input preview (MAX78002)") and `run_comparison.py --ml-preview` flag. Re-quantizes the beamformed audio to **int8 or int16**, runs a proxy **log-mel-dB feature extractor** (configurable `n_mels`, defaults to 64 over the 200-2000 Hz band), optionally re-quantizes the feature tensor, and reports `ml_path_snr_db` (audio quantization SNR) + `feature_snr_db` (feature quantization SNR) in the response. The live UI additionally shows an inline spectrogram PNG and a fourth "ML .wav" download next to Raw / Unsteered / Beam. The batch script writes both SNRs as new CSV columns when `--ml-preview` is active. See [LIMITATIONS.md §2c](LIMITATIONS.md) for the log-mel-proxy caveats.
 > - **Isotropic-diffuse plane-wave crowd model.** `crowd_model="plane_wave"` (dropdown in the Live Sim diffuse block, or `--crowd-model plane_wave` in batch) replaces the old discrete-point-source crowd with a sum of `n_plane_waves` uncorrelated plane waves (default 64) applied directly to the mic signals via frequency-domain fractional delays. PA speakers stay as localised point sources. This reproduces the textbook `sinc(k·d)` isotropic-diffuse inter-mic coherence curve.
 > - **FIR capacitive-coupling crosstalk.** `crosstalk_model="fir_capacitive"` (new dropdown inside the Crosstalk details panel, or `--crosstalk-model fir_capacitive`) swaps the Phase 2a flat neighbour-leakage model for a **1-pole high-pass** leakage path (corner Hz configurable). Setting the corner frequency to near zero collapses back to the flat model, so the FIR path is a strict superset. A `--crosstalk-fir-path` hook lets future measured-pair FIRs drop in without a code change.
 >
 > `tests/test_parity.py` gains five Phase 3 cases (default-parity, plane-wave coherence, FIR HPF behaviour, FIR-collapses-to-flat, int8-vs-int16 SNR). `tests/_smoke_live.py` gains three HTTP check blocks `[i]/[j]/[k]`. The "Exhibition Hall" preset is unchanged -- it keeps the defaults (`point_source` crowd, `simple` crosstalk, ML preview off) so it remains the known-baseline button.
 >
-> ### How to preview the MAX78000 ML path
+> ### How to preview the MAX78002 ML path
 >
-> - **UI:** on the Live Sim panel, tick "MAX78000 ML preview (Phase 3)" under the codec-quantization row. Pick `Audio bit depth` (8 or 16), `Feature bit depth` (8 or 16), and `Mel bands` (32 / 48 / 64 / 96). Run a simulation -- you'll see an extra "ML .wav" download, an inline log-mel spectrogram PNG, and two new info-panel lines (`ML path SNR` and `ML feature SNR`).
+> - **UI:** on the Simulator screen, open "ML input preview (MAX78002)" and tick **Render the ML input**. Pick `Audio bit depth` (8 or 16), `Feature bit depth` (8 or 16), and `Mel bands` (32-96). Run a simulation -- you'll see an extra "ML .wav" download, an inline log-mel spectrogram PNG, and two new info-panel lines (`ML path SNR` and `ML feature SNR`).
 > - **CLI:** `python run_comparison.py --ml-preview --ml-bit-depth 8 --ml-feature-bit-depth 8 --ml-n-mels 64 --test` -- the sweep CSV (`results/metrics.csv` or `results/metrics_materials.csv`) gains `ml_path_snr_db` and `feature_snr_db` columns.
 >
 > ### How to switch crowd-noise correlation model
 >
-> - **UI:** in the Live Sim diffuse block, change the "Crowd model (Phase 3)" dropdown from "Point sources (2b)" to "Plane-wave diffuse (3B)". A sub-slider appears for the plane-wave count.
+> - **UI:** in the Simulator's "Interference" section, change **Crowd model** from "Point sources" to "Plane-wave diffuse field". A slider appears for the plane-wave count.
 > - **CLI:** `python run_comparison.py --crowd-model plane_wave --n-plane-waves 64 --test`.
 >
 > ### How to switch crosstalk model
 >
-> - **UI:** enable "Crosstalk", then inside the details panel change "Model (Phase 3)" from "Simple (flat)" to "FIR capacitive". The corner-frequency slider appears only in FIR mode.
+> - **UI:** in "Hardware impairments", tick **Channel crosstalk**, then change **Crosstalk model** from "Flat" to "Capacitive (FIR)". The **Corner frequency** slider appears only in FIR mode.
 > - **CLI:** `python run_comparison.py --crosstalk-model fir_capacitive --crosstalk-corner-hz 500 --crosstalk-coupling-db -40 --test`.
 >
 > See **[LIMITATIONS.md §2c](LIMITATIONS.md)** for the remaining simplifications (log-mel is a proxy, finite plane-wave count, analytic 1-pole FIR).
@@ -66,24 +66,14 @@
 >
 > ### How to tune the DOA band
 >
-> - **UI:** on the Live Sim panel, the "DOA band (Phase 3+)" block sits right below Atmosphere. Drag `DOA fmin` and `DOA fmax` to the drone-relevant slice (try 300 / 2500 Hz for small drones). Tick "Harmonic comb weighting" to engage matched-filter mode; the "Drone fundamental f0" slider appears below (80-400 Hz). The info panel reports `DOA band: <fmin>-<fmax> Hz` and, when the comb is on, the active `f0` and final bin count.
+> - **UI:** in the Simulator's "Direction band" section, set **Lowest frequency** and **Highest frequency** to the drone-relevant slice (try 300 / 2500 Hz for small drones). Tick **Weight the drone's harmonics** to engage matched-filter mode; the **Drone fundamental** slider (80-400 Hz) appears below. The response reports `n_freq_bins`, the number of bins actually used.
 > - **CLI:** `python run_comparison.py --fmin 300 --fmax 2500 --harmonic-comb --drone-fundamental 200 --test` for a batch sweep under the tuned band.
 >
 > See **[LIMITATIONS.md §2d](LIMITATIONS.md)** for the remaining simplifications (rectangular +/- 10 Hz weighting, user-supplied f0, no sub-band voting, no MVDR adaptation).
 
-> **Phase 5 Realtime mode.** A fourth tab, **Realtime**, connects to
-> `ws://127.0.0.1:8766/realtime` and streams continuous beam-scan frames.
-> Drag the red drone marker on the top-down floor plan; the K-wedge fan and
-> metrics panel update each integration window. This mode uses **direct-path
-> drone synthesis + cached crowd/PA** (faster, less physics than the
-> one-shot **Simulator** tab). Pause/Resume controls the server loop. There
-> is **no classification panel** — only lock direction, beam powers, and MIPS.
+> **Phase 3++ custom-array update.** The Simulator and Beam pattern screens include a **Custom** geometry. Add microphones as `[x, y, z]` offsets in metres from the array centre, for example `[0.01, 0, 0]` for 10 mm to the right. The editor lists the microphones with per-row remove and supports seeding from a geometry, clearing, and importing a coordinate file. A run needs at least two custom microphones. If a custom mic lies outside the room, the server clips it to the 0.3 m wall margin and reports it in `mic_clip_notes`.
 
-> **Phase 3++ custom-array + Simulator layout update.** The Simulator and Beam Pattern tabs now include a **Custom** geometry. Add microphones as `[x, y, z]` offsets in metres from the array centre, for example `[0.01, 0, 0]` for 10 mm to the right. The editor supports Add/Enter, per-row remove, Clear all, Seed from preset, and JSON/text import of coordinate lists. Clicking a mic row highlights that mic in yellow in the 3D view and in the 2D top-down scatter preview.
->
-> In Live Sim, Custom mode hides Mic Count / Radius / Ring Separation and replaces them with `Mic count (derived): N`. The Run Simulation button is fixed in the lower-right corner and is hard-disabled until `N >= 2`. If a custom mic lies outside the room, the server clips it to the 0.3 m wall margin and returns a sticky inline clipping banner above the mic list. The Live Sim controls are now split into a Basic view plus a closed-by-default **Advanced settings** section so crowd details, hardware impairments, ML preview, atmosphere, DOA band, moving source, seed, and audio-normalization knobs do not crowd the main controls.
-
-> **Phase 4 hardware-faithful beam modes.** Live Sim now supports three beamforming methods in one dropdown: `srp_phat` (benchmark-only), `steered_das` (Mode 1 scan-and-lock like MAX78000 + ADAU1467), and `beam_bank_das` (Mode 2 parallel K-beam bank + MUX-style selection). The `Load MICCANVAS preset` button seeds the exact 1 + 6 + 8 concentric geometry used on hardware. For Mode 1/2 the info panel shows a polar beam-power plot (`beam_scan`) and a MIPS estimate against the ADAU1467 6144-op/sample budget. If requested delays exceed the FracDelay block max, the simulator raises a clamp banner so hardware saturation is visible before deployment.
+> **Phase 4 hardware-faithful beam modes.** The Simulator supports three direction estimates in one dropdown: `srp_phat` (benchmark-only), `steered_das` (Mode 1 scan-and-lock like MAX78002 + ADAU1467), and `beam_bank_das` (Mode 2 parallel K-beam bank + MUX-style selection). The **Heimdall** geometry uses the deployed 44-microphone layout. For Mode 1/2 the info panel shows a polar beam-power plot (`beam_scan`) and a MIPS estimate against the ADAU1467 6144-op/sample budget. If requested delays exceed the FracDelay block max, the simulator raises a clamp banner so hardware saturation is visible before deployment.
 
 This document describes the simulation system used to evaluate microphone array geometries for acoustic direction-of-arrival (DOA) estimation. It covers the physical models, algorithms, design decisions, known limitations, and the scope of valid conclusions.
 
@@ -98,7 +88,7 @@ The primary purpose is to **compare array geometries** (circular, standing cross
 There are two simulation paths:
 
 - **Batch sweep** (`run_comparison.py`): systematically tests all geometries across a matrix of RT60, SNR, azimuth, and elevation values. Produces CSV results and static plots.
-- **Interactive live simulation** (`sim_server.py` + `results/array_explorer.html`): runs a single configurable trial on demand via a browser interface with 3D visualization.
+- **Interactive live simulation** (`sim_server.py` + the browser app in `app/`): runs a single configurable trial on demand via a browser interface with 3D visualization.
 
 ---
 
@@ -109,13 +99,12 @@ The interactive system has two processes:
 | Process | Role | Port |
 |---------|------|------|
 | `sim_server.py` (FastAPI + Uvicorn) | Runs the acoustic simulation on demand | 8766 |
-| Python HTTP server | Serves the static HTML/JS frontend | 8080 |
+| Vite dev server (`npm.cmd run dev` in `app/`) | Serves the browser frontend | 8080 |
 
-The frontend (`array_explorer.html`) has three modes:
+The frontend's simulation screens are:
 
-1. **Beam Pattern** -- computes and displays the theoretical array response in the browser using narrowband delay-and-sum math. No server call required.
-2. **SRP Simulation** -- displays pre-computed batch simulation results embedded as JSON in the HTML file. No server call required.
-3. **Live Sim** -- sends a JSON POST to `http://127.0.0.1:8766/simulate` with all configurable parameters. The server returns a JSON response containing the SRP-PHAT power grid, DOA estimates, mic positions, room geometry, source positions, image source positions, the room impulse response, and base64-encoded beamformed audio.
+1. **Beam pattern** (`#beam`) -- computes and displays the theoretical array response in the browser using narrowband delay-and-sum math. No server call required.
+2. **Simulator** (`#sim`) -- sends a JSON POST to `http://127.0.0.1:8766/simulate` with all configurable parameters. The server returns a JSON response containing the SRP-PHAT power grid, DOA estimates, mic positions, room geometry, source positions, image source positions, the room impulse response, and base64-encoded beamformed audio.
 
 ---
 
@@ -384,7 +373,7 @@ where $d_{\text{adj}}$ is the distance between adjacent microphones. Above this 
 
 ### Power sphere
 
-Both the SRP simulation results and the live sim results are displayed on a deformed sphere in Three.js. The 19 x 72 power grid maps to a spherical mesh where:
+The Simulator's SRP results are displayed on a deformed sphere in Three.js. The 19 x 72 power grid maps to a spherical mesh where:
 
 - **Radius** at each vertex is modulated by power: $r = r_{\text{disp}} \cdot (0.25 + 0.75 \cdot p_{\text{norm}})$, where $p_{\text{norm}}$ is the power value divided by the grid maximum. Low-power regions contract to 25% of the display radius; the peak extends to 100%.
 - **Color** follows a three-stop ramp:
@@ -446,7 +435,7 @@ A 250 x 80 pixel canvas displays the Room Impulse Response for the drone source 
 - Random number generators use **fixed seeds** (0 for the simulation path, 42 for PA positions). Results are deterministic and reproducible, but represent single noise/signal realizations. For statistical confidence, multiple seeds should be tested (the batch script uses seeds 0 and 1).
 - Crowd noise decorrelation has two modes. The default `point_source` model is **approximate** -- real crowd noise has spatial correlation structure that segment-rotation cannot fully reproduce. Phase 3 adds a `plane_wave` mode (`synthesize_diffuse_crowd_plane_waves`) that produces a proper isotropic-diffuse field via an N-plane-wave sum with fractional-sample delays, approaching the ideal `sinc(k·d)` inter-mic coherence as `n_plane_waves` grows.
 - The SNR formula incorporates geometric spreading, so the configured SNR value is **referenced to source power at the source distance**, not a simple receiver-side noise floor.
-- **MAX78000 ML path is previewed, not executed.** Phase 3 optionally re-quantizes the beamformed audio to int8 / int16 and runs a **proxy log-mel feature extractor**, reporting audio-domain and feature-domain quantization SNR. This is a stand-in for what a typical audio-classifier CNN would see; actual MAX78000 network inference (INL, accumulator-width activations, real classifier weights) is out of scope.
+- **MAX78002 ML path is previewed, not executed.** Phase 3 optionally re-quantizes the beamformed audio to int8 / int16 and runs a **proxy log-mel feature extractor**, reporting audio-domain and feature-domain quantization SNR. This is a stand-in for what a typical audio-classifier CNN would see; actual MAX78002 network inference (INL, accumulator-width activations, real classifier weights) is out of scope.
 - **Crosstalk model is either flat or 1-pole.** With the Phase 3 FIR model active, the neighbour-leakage path is a single-pole high-pass (capacitive-coupling physics). Real PCB coupling has multiple poles and layout-dependent non-nearest-neighbour paths; these drop in via `--crosstalk-fir-path` once measured traces are available.
 - **DOA band is user-tunable, but the harmonic-comb weighting is deliberately simple.** Phase 3+ lets the user set `fmin_hz` / `fmax_hz` and optionally enable a harmonic comb that restricts SRP-PHAT integration to +/- 10 Hz around each n*f0 (n = 1..20). No shaped Gaussian lobes, no auto-tracking of f0, no sub-band voting, and no MVDR adaptive null-forming. On real hardware the DSP should recalibrate the band from recorded drone spectra and consider harmonic tracking if the drone's RPM varies significantly.
 
@@ -488,6 +477,6 @@ Because of these differences, a live sim run with default parameters does **not*
 - **Absolute detection range or dB levels**: the simulation does not model source power in physical units. SNR is parametric, not derived from a specific drone at a specific distance with a calibrated microphone.
 - **Venue-specific performance**: the ShoeBox room does not capture the acoustics of a specific venue. For that, measured impulse responses would be needed.
 - **Outdoor / battlefield performance**: no ground reflection, atmospheric absorption, wind noise, or long-range propagation is modeled.
-- **Real-time latency**: the simulation runs offline. Processing latency on embedded hardware (SigmaDSP, MAX78000) is a separate engineering concern.
+- **Real-time latency**: the simulation runs offline. Processing latency on embedded hardware (SigmaDSP, MAX78002) is a separate engineering concern.
 - **Multi-source scenarios**: only single-source DOA is estimated. Tracking multiple simultaneous sources would require a different algorithm (e.g., MUSIC, TOPS) and is not covered here.
 - **Absolute accuracy guarantees**: fixed seeds mean each result is a single realization. Statistical confidence requires sweeping over multiple seeds, which the batch script does (seeds 0 and 1) but the live server does not.

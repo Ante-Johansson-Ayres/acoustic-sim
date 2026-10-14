@@ -29,14 +29,6 @@ drone-detection build.
 > custom geometry changes positions, not per-mic directivity,
 > orientation, housing diffraction, or per-channel calibration.
 
-> **What's new in Phase 5 (Realtime mode).** A fourth top-level tab,
-> **Realtime**, streams continuous DAS scan results over WebSocket while
-> you drag the drone on a top-down floor plan. Physics: **direct-path
-> drone** + **pre-rendered crowd/PA ambient** (ISM for static interferers
-> only). **Not modelled:** ISM reflections for the moving drone,
-> atmospheric bias updates per frame, moving-source crossfade, or any
-> classification / CNN output.
-
 > **What's new in Phase 4 (hardware-faithful beamforming modes).** The
 > one-shot **Simulator** tab now includes `beam_method="steered_das"` (single-beam scan-and-lock)
 > and `beam_method="beam_bank_das"` (parallel K-beam bank + argmax
@@ -45,7 +37,7 @@ drone-detection build.
 > sample delays exceed the configured block max.
 
 > **What's new in Phase 3.** The pipeline now includes a fixed-point
-> **MAX78000 ML-path preview** (beamformed audio is re-quantized to
+> **MAX78002 ML-path preview** (beamformed audio is re-quantized to
 > int8 or int16, passed through a proxy **log-mel feature extractor**
 > that mirrors what a typical audio-classifier CNN would see, and
 > both stages report a quantization SNR in the response); a rigorous
@@ -124,8 +116,8 @@ drone-detection build.
 | Speed of sound | Fixed `c = 343 m/s` baseline, with a first-order analytic **vertical temp gradient** bias applied to source z (see §2b) | Real temperature gradients (stage lights, HVAC plumes) bend rays by a few degrees over 10-20 m. Horizontal gradients and turbulent eddies are not modelled. | Budget an extra ±1-2° systematic elevation error on top of the sim's modelled bias in hardware. |
 | Mic mismatch | Phase-1 FIR-based per-channel gain (0.5 dB σ) + fractional delay (0.2 samples σ) + DC offset | Good first-order model of preamp tolerance + TDM/PDM clock skew. Per-channel crosstalk and ADC quantization are modelled separately in Phase 2a; time-varying jitter is still missing. | Measure your own preamp block with white-noise test; re-inject numbers into `apply_mic_mismatch_v2`. |
 | Crowd audio | Two clips from one YouTube source, 30 s each; by default re-used across discrete point sources with rotation, optionally replaced in Phase 3 with a plane-wave-sum isotropic-diffuse synthesiser (`crowd_model="plane_wave"`; see §2c) | Real crowd is spatially decorrelated at every position, with specific speech tonality. The default point-source model is mildly over-correlated; the plane-wave model approaches the ideal `sinc(k·d)` coherence, with residual error from the finite plane-wave count. | With `crowd_model="plane_wave"`, bump `n_plane_waves` to 64-128 for the closest-to-ideal coherence; still treat "diffuse" results as a *lower bound* on real-world crowd-induced error. |
-| Noise floor | Gaussian AWGN at `sigma2_awgn = P_mic_floor²` | Models MEMS self-noise well but ignores PDM clock noise, 1/f drift, and EMI. | If the MAX78000 eval kit adds detectable EMI pickup, raise the mic-floor slider to compensate. |
-| Numerical precision | Double-precision float throughout until the codec-quantization stage (Phase 2a) and the optional ML-path preview (Phase 3, see §2c) | MAX78000 will run in int16/int8 activations with quantization noise. Codec quantization (8/12/16/24 bit) covers the analog front-end; the Phase 3 ML preview additionally models a post-beamforming int8/16 capture + log-mel quantization. | Use `ml_preview=True` to see the expected quantization SNR hit before hardware; budget an additional few dB beyond that for the real CNN. |
+| Noise floor | Gaussian AWGN at `sigma2_awgn = P_mic_floor²` | Models MEMS self-noise well but ignores PDM clock noise, 1/f drift, and EMI. | If the MAX78002 EV kit adds detectable EMI pickup, raise the mic-floor slider to compensate. |
+| Numerical precision | Double-precision float throughout until the codec-quantization stage (Phase 2a) and the optional ML-path preview (Phase 3, see §2c) | MAX78002 will run in int16/int8 activations with quantization noise. Codec quantization (8/12/16/24 bit) covers the analog front-end; the Phase 3 ML preview additionally models a post-beamforming int8/16 capture + log-mel quantization. | Use `ml_preview=True` to see the expected quantization SNR hit before hardware; budget an additional few dB beyond that for the real CNN. |
 
 ## 2a. Newly modelled in Phase 2a
 
@@ -155,7 +147,7 @@ Where relevant they are still *simplified* models -- see the notes.
   bit_depth)` mid-tread-quantizes each channel to 8 / 12 / 16 / 24
   bits with a joint full-scale so that relative channel levels are
   preserved. This gives a realistic quantization-noise floor
-  (~6 dB/bit) and lets you preview the MAX78000's int-audio path.
+  (~6 dB/bit) and lets you preview the MAX78002's int-audio path.
   **Not modelled:** dithering behaviour, codec pre-filter shape,
   companding.
 - **SRP-PHAT heatmap + top-N candidates.** The live response now
@@ -244,14 +236,14 @@ They are still *simplified* models -- see the per-item notes.
 ## 2c. Newly modelled in Phase 3
 
 These items used to live in §2 (e.g. the "numerical precision" row
-for the MAX78000 and the "crowd audio over-correlation" row) and are
+for the MAX78002 and the "crowd audio over-correlation" row) and are
 now explicit knobs in the simulator. As with §2a and §2b, each model
 is *still simplified* in specific ways; those caveats are called out
 below. All three knobs default to the Phase 2b baseline, so existing
 sweeps and parity tests stay numerically identical when Phase 3 is
 off.
 
-- **MAX78000 fixed-point ML-path preview.** When `ml_preview=True`,
+- **MAX78002 fixed-point ML-path preview.** When `ml_preview=True`,
   the live simulator re-quantizes the beamformed audio to int8 or
   int16 (`ml_bit_depth`), runs a proxy **log-mel-dB feature
   extractor** (64 bands by default, Hann-windowed 512-point STFT with
@@ -262,12 +254,12 @@ off.
   and `feature_snr_db` (log-mel domain quantization SNR). A fourth
   downloadable WAV and an inline log-mel PNG are exposed in the UI,
   and `run_comparison.py --ml-preview` adds two CSV columns so sweeps
-  can compare geometry-ranking under MAX78000-style quantization.
+  can compare geometry-ranking under MAX78002-style quantization.
   **What remains simplified:** this is a **log-mel proxy** for what a
-  MAX78000 audio-classifier CNN sees, not the actual ADI kws20-style
+  MAX78002 audio-classifier CNN sees, not the actual ADI kws20-style
   network, and it cannot tell you classification accuracy. It also
   models quantization only: ADC INL, clocking jitter, and the
-  MAX78000's accumulator-width activations are still out of scope.
+  MAX78002's accumulator-width activations are still out of scope.
 - **Isotropic-diffuse-field plane-wave crowd model.** When
   `crowd_model="plane_wave"` and `diffuse=True`, the crowd-noise
   component of the diffuse bed is replaced with an explicit
@@ -385,15 +377,6 @@ byte-compatible.
   artefacts, and the exact proprietary SigmaStudio FracDelay impulse
   response (the simulator uses a calibrated approximation).
 
-## 2f. Newly modelled in Phase 5 (Realtime mode)
-
-- **Modelled.** WebSocket stream at one frame per integration window;
-  same `scan_directions` / `mips_estimate` as the Simulator tab; bird's-eye
-  K-wedge fan driven by measured `powers_db`; draggable drone; crowd/PA dots
-  from a 30 s pre-rendered ambient buffer; pause/resume.
-- **Not modelled.** Moving-drone ISM; time-varying atmosphere; CNN or any
-  classifier; hardware USB bridge; multi-client fan-out.
-
 ## 3. Expected calibration offsets to reality
 
 Rule-of-thumb numbers based on published literature and the ways the
@@ -465,7 +448,7 @@ gap before venue day:
   --temp-gradient` CLI flags on `run_comparison.py`; three new
   pytest cases guarding atmosphere parity, chunk-sum reconstruction,
   and static-speed-zero equivalence.
-- **Phase 3 (done)** -- MAX78000 fixed-point ML-path preview (int8 /
+- **Phase 3 (done)** -- MAX78002 fixed-point ML-path preview (int8 /
   int16 audio + log-mel feature quantization, with SNR metrics and
   an inline spectrogram PNG in the UI); rigorous isotropic-diffuse
   plane-wave crowd generator as an optional `crowd_model="plane_wave"`
@@ -490,7 +473,7 @@ gap before venue day:
   explicitly resets these to 200-2000 Hz flat so it remains the known
   baseline.
 
-Further realism work (real MAX78000 CNN inference, measured FIR
+Further realism work (real MAX78002 CNN inference, measured FIR
 traces from the actual PCB, non-nearest-neighbour crosstalk
 topologies, measured RIRs replacing ShoeBox ISM, auto-tracking
 fundamental for the harmonic comb, sub-band SRP-PHAT voting,
