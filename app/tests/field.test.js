@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { bankGrid, buildField, cellDirection, fieldKind, gridPosition, median } from '../js/hardware/field.js';
+import { bankGrid, buildField, cellDirection, fieldKind, gridDirection, gridPosition, median, surfaceUnit } from '../js/hardware/field.js';
 import { direction } from '../js/hardware/geometry.js';
 
 const STEP = 2 * Math.sin(40 * Math.PI / 180) / 5;
@@ -84,4 +84,22 @@ test('the sector field marks the target, else the held beam, and ages its cells'
   close(field.axes.x[0], -30);
   const targeted = buildField({...frame, target: {row: 1, column: 2}}, 'sectors');
   assert.deepEqual([targeted.marker.kind, targeted.marker.azimuth, targeted.marker.elevation], ['target', 20, 10]);
+});
+
+test('the smooth surface passes through every cell and stays in range', () => {
+  const field = buildField({bank: bank()}, 'bank');
+  const values = Array(25).fill(0.2);
+  values[18] = 1;
+  for (const cell of field.cells) close(surfaceUnit(field, values, cell.column + 0.5, cell.row + 0.5), values[cell.index]);
+  const between = surfaceUnit(field, values, 3.5, 4);
+  assert.ok(between > 0.2 && between < 1, `${between} is not between its neighbours`);
+  for (let column = 0; column <= 5; column += 0.25) {
+    for (let row = 0; row <= 5; row += 0.25) {
+      const value = surfaceUnit(field, values, column, row);
+      assert.ok(value >= 0 && value <= 1);
+    }
+  }
+  close(surfaceUnit(field, Array(25).fill(0.4), 0.1, 4.9), 0.4);
+  const centre = gridDirection(field, 3.5, 2.5);
+  cellDirection(field.cells[13].bounds, 0.5, 0.5).forEach((value, axis) => close(centre[axis], value, 1e-9));
 });

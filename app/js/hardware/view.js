@@ -23,6 +23,7 @@ const TABS = [['beam', 'Manual beam'], ['measure', 'Measurement'], ['tone', 'Ton
 const CAPTIONS = {
   bank: 'Each tile is a direction the array listens in. Brighter is louder.',
   sectors: 'Each tile is a sector of the diagnostic scan. Faded tiles are older than 5 s.',
+  surface: 'Louder directions bulge toward the array; the ripples elsewhere are the background noise.',
 };
 
 function loadPrefs() {
@@ -41,7 +42,7 @@ function fieldSpan(field) {
 }
 
 export function createView(container, {session}) {
-  const prefs = {view: '3d', camera: 'behind', floor: -40, values: 'strongest', log: 'open', ...loadPrefs()};
+  const prefs = {view: '3d', camera: 'behind', style: 'tiles', floor: -40, values: 'strongest', log: 'open', ...loadPrefs()};
   if (!['3d', 'map'].includes(prefs.view)) prefs.view = '3d';
   const state = {visible: false, kind: null, field: null, hover: null, tab: null};
 
@@ -96,8 +97,12 @@ export function createView(container, {session}) {
     onChange: () => { prefs.values = valuesSelect.value; savePrefs(prefs); render(true); }},
   options([['strongest', 'Strongest'], ['all', 'All']], prefs.values));
   const valuesPick = h('label', {class: 'pick'}, 'Values', valuesSelect);
+  const styleSelect = h('select', {class: 'select select--sm', 'aria-label': 'How the 3D view draws the field',
+    onChange: () => { prefs.style = styleSelect.value; savePrefs(prefs); render(true); }},
+  options([['tiles', 'Tiles'], ['surface', 'Surface']], prefs.style));
+  const stylePick = h('label', {class: 'pick'}, 'Show', styleSelect);
   const fieldHead = h('header', {class: 'panel__head'}, h('h2', {class: 'label'}, 'Field'),
-    h('div', {class: 'tools'}, viewSeg.el, cameraSeg.el, h('label', {class: 'pick'}, 'Floor', floorSelect), valuesPick));
+    h('div', {class: 'tools'}, viewSeg.el, cameraSeg.el, h('label', {class: 'pick'}, 'Floor', floorSelect), stylePick, valuesPick));
 
   const sceneBox = h('div', {class: 'well__scene'});
   const mapBox = h('div', {class: 'well__map'}, map.el);
@@ -198,6 +203,7 @@ export function createView(container, {session}) {
     sceneBox.hidden = view !== '3d';
     mapBox.hidden = view !== 'map';
     cameraSeg.el.hidden = view !== '3d';
+    stylePick.hidden = view !== '3d';
     valuesPick.hidden = view !== 'map';
     if (view === '3d') ensureScene();
   }
@@ -206,7 +212,7 @@ export function createView(container, {session}) {
     const field = state.field;
     const cell = field && state.hover !== null ? field.cells[state.hover] : null;
     if (!cell) {
-      setText(caption, field ? CAPTIONS[field.kind] : '');
+      setText(caption, !field ? '' : prefs.view === '3d' && prefs.style === 'surface' ? CAPTIONS.surface : CAPTIONS[field.kind]);
       return;
     }
     const bank = field.kind === 'bank';
@@ -322,7 +328,7 @@ export function createView(container, {session}) {
       map.render(field, {floor: prefs.floor, values: prefs.values, cellPx: cellSize(field)});
     } else {
       barTicks.replaceChildren(...[0, 0.25, 0.5, 0.75, 1].map((f) => h('li', {}, f === 0 ? '0 dBFS' : num(prefs.floor * f, 0))));
-      scene3d?.render(field, {floor: prefs.floor, session});
+      scene3d?.render(field, {floor: prefs.floor, session, style: prefs.style});
     }
     source.render(sourceAnswer(session, field, mode));
     audio.render(frame);

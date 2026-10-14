@@ -169,3 +169,36 @@ export function gridPosition(field, azimuth, elevation) {
     : [azimuth, elevation];
   return {column: fraction(field.axes.x, x), row: fraction(field.axes.y, y)};
 }
+
+function edgeValue(edges, f) {
+  const i = Math.max(0, Math.min(edges.length - 2, Math.floor(f)));
+  return edges[i] + (f - i) * (edges[i + 1] - edges[i]);
+}
+
+/** Unit direction at a fractional grid position (0 = left / bottom edge). */
+export function gridDirection(field, column, row) {
+  const x = edgeValue(field.axes.x, column);
+  const y = edgeValue(field.axes.y, row);
+  return field.space === 'sine' ? [x, y, Math.sqrt(Math.max(0, 1 - x * x - y * y))] : direction(x, y);
+}
+
+function cubic(p0, p1, p2, p3, t) {
+  return p1 + 0.5 * t * (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)));
+}
+
+/**
+ * Smooth value between cell centres (Catmull-Rom in both directions) at a
+ * fractional grid position; exact at every centre, clamped to [0, 1].
+ * values: one number per cell, row-major from the bottom-left.
+ */
+export function surfaceUnit(field, values, column, row) {
+  const {rows, columns} = field;
+  const x = column - 0.5;
+  const y = row - 0.5;
+  const c = Math.floor(x);
+  const r = Math.floor(y);
+  const at = (rr, cc) => values[Math.min(rows - 1, Math.max(0, rr)) * columns + Math.min(columns - 1, Math.max(0, cc))];
+  const across = (rr) => cubic(at(rr, c - 1), at(rr, c), at(rr, c + 1), at(rr, c + 2), x - c);
+  const value = cubic(across(r - 1), across(r), across(r + 1), across(r + 2), y - r);
+  return Math.max(0, Math.min(1, value));
+}
