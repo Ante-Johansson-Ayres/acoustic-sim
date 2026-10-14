@@ -12,6 +12,7 @@ import { API_BASE, WS_BASE, apiJson } from '../shared/api.js';
 import { download } from '../shared/dom.js';
 import { fileStamp } from '../shared/format.js';
 import { activeGrid, directionGridCommand, directionGridFailure, directionGridReady, gridMatches } from './dirgrid.js';
+import { median } from './field.js';
 import { outputReplyCode } from './replies.js';
 
 export const STALE_MS = 5000;
@@ -19,7 +20,21 @@ export const HISTORY_WINDOW_S = 30;
 const HISTORY_MAX = 600;
 const EVENT_LOG_MAX = 50;
 
-const MODE_NAMES = {F: 'Single sweep', C: 'Continuous scan', G: 'Tracking', B: 'Stare', IDLE: 'Idle'};
+const MODE_NAMES = {F: 'Single sweep', C: 'Continuous scan', G: 'Tracking', B: 'Live', IDLE: 'Idle'};
+
+function side(value, positive, negative) {
+  const rounded = Math.round(Math.abs(value));
+  return rounded === 0 ? '0°' : `${rounded}° ${value > 0 ? positive : negative}`;
+}
+
+/** "at 24° right, 13° up" from the bank in Live, the record or its sector; else the sector number. */
+function where(frame, record) {
+  const bank = frame.firmware_mode === 'B' ? frame.bank?.target : null;
+  const azimuth = bank?.azimuth_deg ?? record?.azimuth_deg ?? frame.azimuth_deg?.[record?.column];
+  const elevation = bank?.elevation_deg ?? record?.elevation_deg ?? frame.elevation_deg?.[record?.row];
+  if (!Number.isFinite(azimuth) || !Number.isFinite(elevation)) return `in sector ${record?.sector}`;
+  return `at ${side(azimuth, 'right', 'left')}, ${side(elevation, 'up', 'down')}`;
+}
 
 export class HardwareSession extends EventTarget {
   constructor() {
@@ -43,6 +58,7 @@ export class HardwareSession extends EventTarget {
     this.downloadStopSent = false;
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
+    this.lockedSince = null;          // Date.now() when the current lock began
     this.pending = null;              // {kind, port, baud} of the last connect request
     this.discovered = false;
   }
@@ -165,7 +181,7 @@ export class HardwareSession extends EventTarget {
   }
 
   async disconnect() {
-    this.addEvent('LINK', 'Disconnected by operator', 'warning');
+    this.addEvent('LINK', 'Disconnected by operator');
     try {
       await fetch(API_BASE + '/hw_disconnect', {method: 'POST'});
     } finally {
@@ -228,6 +244,7 @@ export class HardwareSession extends EventTarget {
     this.frozen = false;
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
+    this.lockedSince = null;
     this.cellTimes = [];
     this.history = [];
     this.downloadRequested = false;
@@ -254,7 +271,7 @@ export class HardwareSession extends EventTarget {
   sweepOnce() { this.modeCommand('F', 'Single sweep requested'); }
   continuous() { this.modeCommand('C', 'Continuous scan requested'); }
   track() { this.modeCommand('G', 'Tracking requested'); }
-  stare() { this.modeCommand('B', 'Stare requested'); }
+  stare() { this.modeCommand('B', 'Live requested'); }
   stop() { this.modeCommand('X', 'Stop requested', 'warning'); }
 
   selectOutput(source, index) {
@@ -423,7 +440,7 @@ export class HardwareSession extends EventTarget {
     if (frame?.firmware_mode !== 'IDLE') {
       if (!this.downloadStopSent && this.command('X')) {
         this.downloadStopSent = true;
-        this.addEvent('AUDIO', 'Stopping the scan before downloading', 'warning');
+        this.addEvent('AUDIO', 'Stopping the scan before downloading');
       }
       return;
     }
@@ -479,15 +496,18 @@ export class HardwareSession extends EventTarget {
       if (advanced) {
         this.logRecord(message);
         this.logTransitions(message, previous);
-        if (message.levels_db && message.configuration &&
+        this.noteLock(message);
+        if (message.firmware_mode !== 'B' && message.levels_db && message.configuration &&
             message.last_measurement?.count !== previous?.last_measurement?.count) {
-          this.history.push({
-            t: message.timestamp_s,
-            azimuth: message.est_az_deg,
-            elevation: message.est_el_deg,
-            level: this.fixedBeamLevel(message) ?? message.argmax_db,
-          });
-          if (this.history.length > HISTORY_MAX) this.history.shift();
+          const level = this.fixedBeamLevel(message) ?? message.argmax_db;
+          this.pushHistory(message.timestamp_s, message.est_az_deg, message.est_el_deg, level, message.levels_db.flat());
+        }
+        const bank = message.bank;
+        if (message.firmware_mode === 'B' && bank?.levels_db && bank.maps !== previous?.bank?.maps) {
+          const levels = bank.levels_db.flat();
+          const target = bank.target;
+          const level = target ? levels[target.beam] : Math.max(...levels.filter(Number.isFinite));
+          this.pushHistory(message.timestamp_s, target?.azimuth_deg ?? null, target?.elevation_deg ?? null, level, levels);
         }
       }
       this.advanceDownload(message);
@@ -508,6 +528,30 @@ export class HardwareSession extends EventTarget {
     if (!steer || !frame.levels_db?.[steer.row]) return null;
     const level = frame.levels_db[steer.row][steer.column];
     return Number.isFinite(level) ? level : null;
+  }
+
+  /** One point of the last 30 s; "margin" is the level above the median of the map it came from. */
+  pushHistory(t, azimuth, elevation, level, levels) {
+    const background = median(levels);
+    const finite = Number.isFinite(level);
+    this.history.push({
+      t,
+      azimuth,
+      elevation,
+      level: finite ? level : null,
+      margin: finite && background !== null ? level - background : null,
+    });
+    if (this.history.length > HISTORY_MAX) this.history.shift();
+  }
+
+  noteLock(frame) {
+    const locked = Boolean(frame.target || (frame.firmware_mode === 'B' && frame.bank?.target));
+    if (!locked) this.lockedSince = null;
+    else if (this.lockedSince === null) this.lockedSince = Date.now();
+  }
+
+  get lockedForMs() {
+    return this.lockedSince === null ? null : Date.now() - this.lockedSince;
   }
 
   // ── Freshness ──────────────────────────────────────────────────────────
@@ -550,14 +594,6 @@ export class HardwareSession extends EventTarget {
   cellAge(row, column) {
     const at = this.cellTimes[row]?.[column];
     return Number.isFinite(at) ? Math.max(0, Date.now() - at) : null;
-  }
-
-  newestSampleAge() {
-    let newest = null;
-    for (const row of this.cellTimes) {
-      for (const at of row) if (Number.isFinite(at) && (newest === null || at > newest)) newest = at;
-    }
-    return newest === null ? null : Math.max(0, Date.now() - newest);
   }
 
   // ── Derived answer ─────────────────────────────────────────────────────
@@ -643,21 +679,21 @@ export class HardwareSession extends EventTarget {
       if (frame.firmware_mode === 'IDLE') this.addEvent('MODE', 'Sweep complete');
       break;
     case 'scan_stopped':
-      this.addEvent('MODE', 'Stopped', 'warning');
+      this.addEvent('MODE', 'Stopped');
       break;
     case 'target_acquired':
       this.lastTargetSector = record.sector;
-      this.addEvent('TARGET', `Target acquired in sector ${record.sector}`, 'target');
+      this.addEvent('TARGET', `Acquired ${where(frame, record)}`, 'target');
       break;
     case 'target_updated':
       if (record.sector !== this.lastTargetSector) {
         this.lastTargetSector = record.sector;
-        this.addEvent('TARGET', `Target moved to sector ${record.sector}`, 'target');
+        this.addEvent('TARGET', `Moved to ${where(frame, record).replace(/^(at|in) /, '')}`, 'target');
       }
       break;
     case 'target_lost':
       this.lastTargetSector = null;
-      this.addEvent('TARGET', `Target lost from sector ${record.sector}`, 'warning');
+      this.addEvent('TARGET', `Lost ${where(frame, record)}`, 'warning');
       break;
     case 'steer_error':
       this.addEvent('ERROR', `Steering failed at microphone ${record.microphone}, code ${record.code}`, 'error');
@@ -679,13 +715,13 @@ export class HardwareSession extends EventTarget {
     const now = frame.target;
     if (!before && now) {
       this.lastTargetSector = now.sector;
-      this.addEvent('TARGET', `Target acquired in sector ${now.sector}`, 'target');
+      this.addEvent('TARGET', `Acquired ${where(frame, now)}`, 'target');
     } else if (before && !now) {
       this.lastTargetSector = null;
-      this.addEvent('TARGET', `Target cleared from sector ${before.sector}`, 'warning');
+      this.addEvent('TARGET', `Cleared ${where(previous, before)}`, 'warning');
     } else if (now && now.sector !== before?.sector && now.sector !== this.lastTargetSector) {
       this.lastTargetSector = now.sector;
-      this.addEvent('TARGET', `Target moved to sector ${now.sector}`, 'target');
+      this.addEvent('TARGET', `Moved to ${where(frame, now).replace(/^(at|in) /, '')}`, 'target');
     }
     if (frame.last_error && JSON.stringify(frame.last_error) !== JSON.stringify(previous.last_error)) {
       this.addEvent('ERROR', frame.last_error.reason || 'Hardware command failed', 'error');
