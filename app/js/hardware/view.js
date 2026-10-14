@@ -207,8 +207,11 @@ export function createView(container, {session}) {
         parts.push(`${program.program}, ${program.style === 'lut' ? 'lookup-table steering' : 'per-microphone steering'}` +
           (load ? `, loaded by the MCU in ${(load.elapsed_us / 1e6).toFixed(2)} s` : ''));
       } else if (load) {
+        const core = program.core;
         parts.push(`DSP program mismatch after the MCU loaded ${program.program} (load code ${load.code}, ` +
-          `${program.matched}/${program.read} signature words); steering is locked`);
+          `${program.matched}/${program.read} signature words` +
+          (core ? `, core status ${core.status}, panic code 0x${core.panic_code.toString(16).padStart(4, '0')}` : '') +
+          '); steering is locked');
       } else {
         parts.push(`DSP program mismatch: the EEPROM is not ${program.program} (${program.matched}/${program.read} signature words, code ${program.code}); steering is locked`);
       }

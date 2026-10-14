@@ -131,7 +131,7 @@ def test_dsp_check_and_table_load_records():
     snapshot = state.snapshot()
     assert snapshot["dsp"] == {"program": "MICCANVAS_SS+_BEAMFORM_Golden_Image_LUT", "style": "lut",
                                 "steer_words": 1, "read": 44, "matched": 44, "code": 0, "matches": True,
-                                "load": None}
+                                "load": None, "core": None}
     assert snapshot["tables"] == {"words": 2156, "written": 2156, "verified": 2156, "code": 0, "loaded": True}
     # On a mismatch the firmware writes nothing, so the previous taper and tables no longer hold.
     state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Golden_Image_LUT,lut,1,44,3,0")
@@ -150,20 +150,33 @@ def test_dsp_check_and_table_load_records():
 def test_mcu_program_load_belongs_to_the_following_check():
     state = HeimdallState()
     state.apply_line("READY,2D,7,7,49,44")
-    state.apply_line("DSP_LOAD,72,1348,77570,812345,0")
+    state.apply_line("DSP_RESET,0,372120")
+    state.apply_line("DSP_LOAD,72,2838,77570,999000,0")
     state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Bank,lut,1,64,64,0")
     dsp = state.snapshot()["dsp"]
-    assert dsp["matches"]
-    assert dsp["load"] == {"steps": 72, "writes": 1348, "bytes": 77570, "elapsed_us": 812345, "code": 0}
+    assert dsp["matches"] and dsp["core"] is None
+    assert dsp["load"] == {"steps": 72, "writes": 2838, "bytes": 77570, "elapsed_us": 999000, "code": 0,
+                           "reset": {"code": 0, "elapsed_us": 372120}, "attempts": 1}
     # A later check without a load (I with the program still running) carries none.
     state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Bank,lut,1,64,64,0")
     assert state.snapshot()["dsp"]["load"] is None
-    # A failed load is reported with the mismatch that follows it.
+    # A failed load is retried; the check reports the last attempt and the stopped core.
+    state.apply_line("DSP_RESET,0,372120")
     state.apply_line("DSP_LOAD,3,5,4,1200,-5")
+    state.apply_line("DSP_RESET,-30,1000000")
+    state.apply_line("DSP_LOAD,0,0,0,10,-30")
     state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Bank,lut,1,64,0,0")
+    state.apply_line("DSP_CORE,0,0004")
     dsp = state.snapshot()["dsp"]
-    assert not dsp["matches"] and dsp["load"]["code"] == -5
-    for line in ("DSP_LOAD,72,1348,77570,812345", "DSP_LOAD,x,1,1,1,0", "DSP_LOAD,72,-1,1,1,0"):
+    assert not dsp["matches"] and dsp["load"]["code"] == -30 and dsp["load"]["attempts"] == 2
+    assert dsp["load"]["reset"] == {"code": -30, "elapsed_us": 1000000}
+    assert dsp["core"] == {"status": 0, "panic_code": 4}
+    # An EEPROM build loads nothing and resets nothing.
+    state.apply_line("DSP,MICCANVAS_SS+_BEAMFORM_Bank,lut,1,64,64,0")
+    assert state.snapshot()["dsp"]["load"] is None
+    for line in ("DSP_LOAD,72,1348,77570,812345", "DSP_LOAD,x,1,1,1,0", "DSP_LOAD,72,-1,1,1,0",
+                 "DSP_RESET,0", "DSP_RESET,x,1", "DSP_RESET,0,-1",
+                 "DSP_CORE,0,4", "DSP_CORE,0,00G4", "DSP_CORE,256,0004"):
         with pytest.raises(ProtocolError):
             parse_line(line)
 

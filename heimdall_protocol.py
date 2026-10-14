@@ -118,6 +118,26 @@ def parse_line(line: str) -> dict[str, Any]:
             "code": _signed_integer(parts[5], "error code"),
         }
 
+    if record_type == "DSP_RESET" and len(parts) == 3:
+        return {
+            "type": "dsp_reset",
+            "code": _signed_integer(parts[1], "error code"),
+            "elapsed_us": _integer(parts[2], "reset time", 0, 0xFFFFFFFF),
+        }
+
+    if record_type == "DSP_CORE" and len(parts) == 3:
+        if len(parts[2]) != 4:
+            raise ProtocolError("DSP panic code is 4 hex digits")
+        try:
+            panic_code = int(parts[2], 16)
+        except ValueError as error:
+            raise ProtocolError("DSP panic code is 4 hex digits") from error
+        return {
+            "type": "dsp_core",
+            "status": _integer(parts[1], "core status", 0, 255),
+            "panic_code": panic_code,
+        }
+
     if record_type == "TABLES" and len(parts) == 5:
         return {
             "type": "tables",
@@ -411,6 +431,7 @@ class HeimdallState:
         self.taper: dict[str, Any] | None = None
         self.dsp: dict[str, Any] | None = None
         self.pending_dsp_load: dict[str, Any] | None = None
+        self.pending_dsp_reset: dict[str, Any] | None = None
         self.tables: dict[str, Any] | None = None
         self.bank: dict[str, Any] | None = None
         self.bank_levels_raw: list[int] | None = None
@@ -524,19 +545,34 @@ class HeimdallState:
             self._learn_angles(record)
         elif record_type == "timing":
             self.last_timing = record
+        elif record_type == "dsp_reset":
+            self.pending_dsp_reset = {key: record[key] for key in ("code", "elapsed_us")}
         elif record_type == "dsp_load":
-            # The MCU loaded the program; the DSP check that follows reports the result.
-            self.pending_dsp_load = {key: record[key] for key in ("steps", "writes", "bytes", "elapsed_us", "code")}
+            # The MCU loaded the program; the DSP check that follows reports the result. A failed
+            # check is retried, so a later load replaces this one and counts as another attempt.
+            attempts = self.pending_dsp_load["attempts"] + 1 if self.pending_dsp_load else 1
+            self.pending_dsp_load = {
+                **{key: record[key] for key in ("steps", "writes", "bytes", "elapsed_us", "code")},
+                "reset": self.pending_dsp_reset,
+                "attempts": attempts,
+            }
+            self.pending_dsp_reset = None
         elif record_type == "dsp":
             # Every program check starts afresh: on a mismatch the firmware writes nothing.
             self.dsp = {
                 **{key: record[key] for key in ("program", "style", "steer_words", "read", "matched", "code")},
                 "matches": record["code"] == 0 and 0 < record["read"] == record["matched"],
                 "load": self.pending_dsp_load,
+                "core": None,
             }
             self.pending_dsp_load = None
+            self.pending_dsp_reset = None
             self.taper = None
             self.tables = None
+        elif record_type == "dsp_core":
+            # Follows a failed check: status 0 with a panic code means the DSP core stopped.
+            if self.dsp is not None:
+                self.dsp["core"] = {key: record[key] for key in ("status", "panic_code")}
         elif record_type == "tables":
             self.tables = {
                 **{key: record[key] for key in ("words", "written", "verified", "code")},
