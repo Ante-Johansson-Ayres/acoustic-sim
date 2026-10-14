@@ -86,9 +86,12 @@ function renderLink() {
   setText($('#linkText'), text);
   $('#linkState').title = session.linkDetail || '';
   const grid = $('#linkGrid');
+  const bank = session.frame?.bank;
   grid.hidden = !(state === 'online' && cfg);
-  if (cfg) setText(grid, `${cfg.rows} × ${cfg.columns} grid · ${cfg.microphones} microphones`);
+  if (cfg) setText(grid, bank ? `Beam bank ${bank.rows} × ${bank.columns} · ${cfg.microphones} microphones`
+    : `${cfg.rows} × ${cfg.columns} grid · ${cfg.microphones} microphones`);
   $('#btnDisconnect').hidden = !(session.open || state === 'online');
+  $('#btnPresent').hidden = $('#btnDisconnect').hidden;
 }
 
 session.addEventListener('link', renderLink);

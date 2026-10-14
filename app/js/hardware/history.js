@@ -1,12 +1,12 @@
 /**
- * history.js — the last 30 seconds: direction of the answer and its level.
- * Both charts fill the box the layout gives them and redraw when it changes.
+ * history.js — the last 30 seconds: the direction of the answer and how far
+ * it stands above the background (the median of its map). Both charts fill
+ * the box the layout gives them and redraw when it changes.
  */
 
 import { h } from '../shared/dom.js';
 import { LineChart } from '../shared/linechart.js';
 import { deg, num } from '../shared/format.js';
-import { angularEdges } from './geometry.js';
 import { HISTORY_WINDOW_S } from './session.js';
 
 const X_TICKS = [
@@ -15,73 +15,70 @@ const X_TICKS = [
   {value: -10, label: '−10 s'},
   {value: 0, label: 'now'},
 ];
+const PAD = {l: 40, r: 10, t: 8, b: 22};
+
+function figure(title, legend, chart) {
+  const box = h('div', {class: 'chart-box'}, chart.el);
+  const el = h('figure', {class: 'hw-chart'},
+    h('figcaption', {class: 'hw-chart__head'}, h('span', {class: 'label'}, title), legend || null), box);
+  return {el, box};
+}
 
 export class HistoryCharts {
   constructor() {
-    this.direction = new LineChart({label: 'Azimuth and elevation of the answer over the last 30 seconds'});
-    this.level = new LineChart({label: 'Level of the answer over the last 30 seconds'});
-    this.directionCaption = h('figcaption', {class: 'figure-caption'}, 'Direction over the last 30 s (degrees)');
-    this.levelCaption = h('figcaption', {class: 'figure-caption'}, 'Level over the last 30 s (dBFS)');
-    this.directionBox = h('div', {class: 'chart-box'}, this.direction.el);
-    this.levelBox = h('div', {class: 'chart-box'}, this.level.el);
-    this.el = h('section', {class: 'hw-history', 'aria-label': 'Last 30 seconds'},
-      h('figure', {class: 'hw-figure'}, this.directionCaption, this.directionBox),
-      h('figure', {class: 'hw-figure'}, this.levelCaption, this.levelBox),
-    );
+    this.direction = new LineChart({pad: PAD, label: 'Azimuth and elevation of the source over the last 30 seconds'});
+    this.margin = new LineChart({pad: PAD, label: 'How far the source stands above the background over the last 30 seconds'});
+    const legend = h('span', {class: 'legend'},
+      h('span', {style: {color: 'var(--accent)'}}, h('i'), 'Azimuth'),
+      h('span', {style: {color: 'var(--muted)'}}, h('i'), 'Elevation'));
+    const direction = figure('Direction', legend, this.direction);
+    const margin = figure('Above background', null, this.margin);
+    this.directionBox = direction.box;
+    this.marginBox = margin.box;
+    this.el = h('section', {class: 'panel timeline', 'aria-label': 'Last 30 seconds'},
+      h('header', {class: 'panel__head'}, h('h2', {class: 'label'}, 'Last 30 s')),
+      h('div', {class: 'hw-charts'}, direction.el, margin.el));
     this.lastRender = 0;
     this.pending = false;
     this.observer = new ResizeObserver(() => { this.pending = true; });
     this.observer.observe(this.directionBox);
-    this.observer.observe(this.levelBox);
+    this.observer.observe(this.marginBox);
   }
 
   fit() {
     const a = this.direction.setSize(this.directionBox.clientWidth, this.directionBox.clientHeight);
-    const b = this.level.setSize(this.levelBox.clientWidth, this.levelBox.clientHeight);
+    const b = this.margin.setSize(this.marginBox.clientWidth, this.marginBox.clientHeight);
     return a || b;
   }
 
-  render(session, {floor, force = false} = {}) {
+  /** span: the field's half-width in degrees, so the direction chart covers the whole field. */
+  render(session, {span = 40, force = false} = {}) {
     const resized = this.fit() || this.pending;
     this.pending = false;
     const now = performance.now();
     if (!force && !resized && now - this.lastRender < 200) return;
     this.lastRender = now;
     const frame = session.frame;
-    const history = session.history;
     const latest = Number.isFinite(frame?.timestamp_s) ? frame.timestamp_s : Date.now() / 1000;
-    const recent = history.filter((item) => latest - item.t <= HISTORY_WINDOW_S);
+    const recent = session.history.filter((item) => latest - item.t <= HISTORY_WINDOW_S);
+    const points = (key) => recent.map((item) => [item.t - latest, item[key]]);
 
-    const az = angularEdges(frame?.azimuth_deg || []);
-    const el = angularEdges(frame?.elevation_deg || []);
-    const top = Math.ceil(Math.max(az.at(-1) ?? 40, el.at(-1) ?? 40));
-    const bottom = Math.floor(Math.min(az[0] ?? -40, el[0] ?? -40));
+    const top = Math.ceil(span);
     this.direction.setAxes({
       x: {min: -HISTORY_WINDOW_S, max: 0, ticks: X_TICKS},
-      y: {min: bottom, max: top, ticks: [top, 0, bottom].filter((v, i, all) => all.indexOf(v) === i)
-        .map((value) => ({value, label: deg(value, 0)}))},
+      y: {min: -top, max: top, ticks: [top, 0, -top].map((value) => ({value, label: deg(value, 0)}))},
     });
-    const azPoints = recent.map((item) => [item.t - latest, item.azimuth]);
-    const elPoints = recent.map((item) => [item.t - latest, item.elevation]);
-    const lastAz = [...recent].reverse().find((item) => Number.isFinite(item.azimuth))?.azimuth;
-    const lastEl = [...recent].reverse().find((item) => Number.isFinite(item.elevation))?.elevation;
     this.direction.render([
-      {points: elPoints, stroke: 'var(--muted)', width: 1.5, gap: 2, end: Number.isFinite(lastEl) ? `el ${deg(lastEl)}` : ''},
-      {points: azPoints, stroke: 'var(--accent)', width: 2, gap: 2, end: Number.isFinite(lastAz) ? `az ${deg(lastAz)}` : '', endBold: true},
+      {points: points('elevation'), stroke: 'var(--muted)', width: 1.5, gap: 2},
+      {points: points('azimuth'), stroke: 'var(--accent)', width: 2, gap: 2},
     ]);
 
-    const f = Number.isFinite(floor) ? floor : -40;
-    this.level.setAxes({
+    const highest = Math.max(30, ...recent.map((item) => item.margin).filter(Number.isFinite));
+    const ceiling = Math.ceil(highest / 10) * 10;
+    this.margin.setAxes({
       x: {min: -HISTORY_WINDOW_S, max: 0, ticks: X_TICKS},
-      y: {min: f, max: 0, ticks: [0, f / 2, f].map((value) => ({value, label: num(value, 0)}))},
+      y: {min: 0, max: ceiling, ticks: [ceiling, ceiling / 2, 0].map((value) => ({value, label: `${num(value, 0)} dB`}))},
     });
-    const levelPoints = recent.map((item) => [item.t - latest, item.level]);
-    const lastLevel = [...recent].reverse().find((item) => Number.isFinite(item.level))?.level;
-    this.level.render([
-      {points: levelPoints, stroke: 'var(--accent)', width: session.monitoring ? 2.5 : 2, gap: 2,
-        end: Number.isFinite(lastLevel) ? num(lastLevel, 1) : '', endBold: true},
-    ]);
-    this.levelCaption.textContent = session.monitoring
-      ? 'Level of the held beam over the last 30 s (dBFS)' : 'Level over the last 30 s (dBFS)';
+    this.margin.render([{points: points('margin'), stroke: 'var(--ok)', width: 2, gap: 2}]);
   }
 }

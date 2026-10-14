@@ -1,10 +1,11 @@
 /**
- * status.js — the right-hand column: the answer (direction), how fast it
- * refreshes, scenario truth for emulators, recording, and the event log.
+ * status.js — the console's panels around the Field: Source (the answer),
+ * Audio (Ch1 and recording), the log rail, and the drawer pages (manual
+ * beam, measurement, tonal detector, diagnostics).
  */
 
 import { h, options, segmented, setText } from '../shared/dom.js';
-import { clockTime, deg, formatAge, hz, num } from '../shared/format.js';
+import { clockTime, deg, hz, num, signed } from '../shared/format.js';
 
 export function operatingMode(session) {
   const frame = session.frame;
@@ -18,287 +19,123 @@ export function operatingMode(session) {
   return 'idle';
 }
 
-function side(value, positive, negative) {
-  if (!Number.isFinite(value) || Math.abs(value) < 0.05) return 'centre';
-  return value > 0 ? positive : negative;
+const RATES = [['10', '10 Hz'], ['20', '20 Hz'], ['50', '50 Hz']];
+
+function arrow(value, positive, negative) {
+  return !Number.isFinite(value) || Math.abs(value) < 0.5 ? '' : value > 0 ? positive : negative;
 }
 
-export class StatusColumn {
-  constructor(session, {extra} = {}) {
-    this.session = session;
+function stat(name, unit) {
+  const value = h('span', {}, '—');
+  const el = h('div', {class: 'stat'},
+    h('div', {class: 'stat__v mono'}, value, h('small', {}, unit)),
+    h('div', {class: 'stat__k'}, name));
+  return {el, value};
+}
 
-    this.title = h('h2', {class: 'section__title', id: 'hw-answer-title'}, 'Source direction');
-    this.chip = h('span', {class: 'chip'}, 'Idle');
-    this.az = h('span', {class: 'answer__value'}, '—');
-    this.elValue = h('span', {class: 'answer__value'}, '—');
-    this.azSub = h('span', {class: 'answer__sub'}, 'Azimuth');
-    this.elSub = h('span', {class: 'answer__sub'}, 'Elevation');
-    this.detail = h('p', {class: 'answer__detail', 'aria-live': 'polite'});
-    const answer = h('section', {class: 'section', 'aria-labelledby': 'hw-answer-title'},
-      h('div', {class: 'section__row'}, this.title, this.chip),
-      h('div', {class: 'answer'},
-        h('div', {class: 'answer__figure'}, this.az, this.azSub),
-        h('div', {class: 'answer__figure'}, this.elValue, this.elSub),
-      ),
-      this.detail,
-      h('p', {class: 'note'}, 'Left and right as seen from behind the array.'),
-    );
+/** What the Source panel shows: the lock in Live, else the scan's answer. */
+export function sourceAnswer(session, field, mode) {
+  const background = field?.background ?? null;
+  const above = (level) => (Number.isFinite(level) && background !== null ? level - background : null);
+  if (field?.kind === 'bank') {
+    const marker = field.marker;
+    if (!marker) return {tag: mode === 'stare' ? 'SEARCHING' : 'IDLE', tone: ''};
+    const level = marker.cell?.level ?? null;
+    return {tag: 'LOCKED', tone: 'accent', azimuth: marker.azimuth, elevation: marker.elevation,
+      level, margin: above(level), lockedMs: session.lockedForMs};
+  }
+  const answer = session.solution(session.frame);
+  if (!answer) return {tag: mode === 'track' ? 'SEARCHING' : mode === 'idle' ? 'IDLE' : 'SCANNING', tone: ''};
+  const tag = {target: 'LOCKED', beam: 'HOLDING'}[answer.kind] || 'STRONGEST';
+  return {tag, tone: answer.kind === 'strongest' ? '' : 'accent', azimuth: answer.azimuth, elevation: answer.elevation,
+    level: answer.level, margin: above(answer.level), lockedMs: answer.kind === 'target' ? session.lockedForMs : null};
+}
 
-    this.rateValues = [h('span', {class: 'figure-value'}, '—'), h('span', {class: 'figure-value'}, '—')];
-    this.rateLabels = [h('span', {class: 'figure-label'}, 'Direction updates'), h('span', {class: 'figure-label'}, 'Full scans')];
-    this.rateNote = h('p', {class: 'note note--body'});
-    const refresh = h('section', {class: 'section', 'aria-labelledby': 'hw-rate-title'},
-      h('h2', {class: 'section__title', id: 'hw-rate-title'}, 'Refresh'),
-      h('div', {class: 'rates'},
-        h('div', {class: 'rate'}, this.rateValues[0], this.rateLabels[0]),
-        h('div', {class: 'rate'}, this.rateValues[1], this.rateLabels[1]),
-      ),
-      this.rateNote,
-    );
-
-    this.truthChip = h('span', {class: 'chip chip--plain'}, 'Source active');
-    this.truthValue = h('span', {class: 'truth__value'});
-    this.truthMeta = h('p', {class: 'note note--body'});
-    this.truth = h('section', {class: 'section', 'aria-labelledby': 'hw-truth-title', hidden: true},
-      h('div', {class: 'section__row'}, h('h2', {class: 'section__title', id: 'hw-truth-title'}, 'Scenario truth'), this.truthChip),
-      this.truthValue,
-      this.truthMeta,
-    );
-
-    this.measureMode = segmented([['0', 'DSP detector'], ['1', 'MCU window']], {
-      label: 'Measurement source',
-      onPick: async (key) => {
-        this.measureMode.setDisabled(true);
-        try { await session.setSetting('measure', Number(key), 'measurement source'); }
-        finally { this.renderMeasurement(session.frame); }
-      },
-    });
-    const timingInput = (key, minimum, maximum, step) => {
-      const input = h('input', {class: 'input input--mono', type: 'number', min: minimum,
-        max: maximum, step, style: {width: '96px'}});
-      this.measureInputs ||= {};
-      this.measureInputs[key] = input;
-      return input;
+export class SourcePanel {
+  constructor() {
+    const readout = (name) => {
+      const value = h('span', {class: 'ro__num'}, '—');
+      const dir = h('span', {class: 'ro__dir'});
+      return {value, dir, el: h('div', {class: 'ro'}, h('span', {class: 'label'}, name), value, dir)};
     };
-    this.measureInputs = {};
-    this.measureApply = h('button', {type: 'button', class: 'btn', onClick: async () => {
-      this.measureApply.disabled = true;
-      try {
-        await session.setMeasurementSettings({
-          settle_us: Number(this.measureInputs.settle_us.value),
-          guard_us: Number(this.measureInputs.guard_us.value),
-          window_us: Number(this.measureInputs.window_us.value),
-        });
-      } finally { this.renderMeasurement(session.frame); }
-    }}, 'Apply');
-    const measurement = h('section', {class: 'section', 'aria-labelledby': 'hw-measure-title'},
-      h('h2', {class: 'section__title', id: 'hw-measure-title'}, 'Measurement'),
-      this.measureMode.el,
-      h('div', {class: 'advanced', style: {marginTop: '12px'}},
-        h('label', {class: 'inline-field'}, 'Settle (µs)', timingInput('settle_us', 50, 20000, 50)),
-        h('label', {class: 'inline-field'}, 'Guard (µs)', timingInput('guard_us', 0, 20000, 50)),
-        h('label', {class: 'inline-field'}, 'Window (µs)', timingInput('window_us', 1000, 100000, 500)),
-        this.measureApply,
-      ),
-    );
+    this.tag = h('span', {class: 'tag'}, 'IDLE');
+    this.az = readout('AZ');
+    this.elev = readout('EL');
+    this.level = stat('Level', 'dBFS');
+    this.margin = stat('Above background', 'dB');
+    this.locked = stat('Locked for', 's');
+    this.el = h('section', {class: 'panel source', 'aria-labelledby': 'hw-source-title'},
+      h('header', {class: 'panel__head'}, h('h2', {class: 'label', id: 'hw-source-title'}, 'Source'), this.tag),
+      h('div', {class: 'src-answer', 'aria-live': 'polite'}, this.az.el, this.elev.el),
+      h('div', {class: 'stats'}, this.level.el, this.margin.el, this.locked.el));
+  }
 
-    this.toneList = h('div', {class: 'advanced'});
-    this.toneSelect = h('select', {class: 'select select--sm', 'aria-label': 'Tone report period',
-      onChange: async () => {
-        this.toneSelect.disabled = true;
-        try { await session.setSetting('tone', Number(this.toneSelect.value), 'tone reports'); }
-        catch (_) { /* logged by the session */ }
-        finally { this.renderTones(session.frame); }
-      }},
-    options([['0', 'Off'], ['100', 'Every 100 ms'], ['250', 'Every 250 ms'], ['500', 'Every 500 ms'], ['1000', 'Every 1 s']], '0'));
-    const tones = h('section', {class: 'section', 'aria-labelledby': 'hw-tones-title'},
-      h('div', {class: 'section__row'},
-        h('h2', {class: 'section__title', id: 'hw-tones-title'}, 'Tonal detector'), this.toneSelect),
-      this.toneList,
-    );
+  render(answer) {
+    setText(this.tag, answer.tag);
+    this.tag.className = `tag${answer.tone ? ' tag--' + answer.tone : ''}`;
+    const angle = (value) => (Number.isFinite(value) ? `${Math.round(Math.abs(value))}°` : '—');
+    setText(this.az.value, angle(answer.azimuth));
+    setText(this.az.dir, arrow(answer.azimuth, '▶', '◀'));
+    setText(this.elev.value, angle(answer.elevation));
+    setText(this.elev.dir, arrow(answer.elevation, '▲', '▼'));
+    setText(this.level.value, num(answer.level, 1));
+    setText(this.margin.value, signed(answer.margin, 1));
+    setText(this.locked.value, Number.isFinite(answer.lockedMs) ? (answer.lockedMs / 1000).toFixed(1) : '—');
+  }
+}
 
-    this.recText = h('p', {class: 'recording__text'}, 'No recording yet.');
+export class AudioPanel {
+  constructor(session) {
+    this.session = session;
+    this.key = '';
+    this.output = h('select', {class: 'select select--sm', 'aria-label': 'Ch1 listens to',
+      onChange: () => {
+        const [source, index] = this.output.value.split(':').map(Number);
+        session.selectOutput(source, index);
+      }});
+    this.listen = h('div', {class: 'line', hidden: true}, h('span', {class: 'line__k'}, 'Listen'), this.output);
     this.recIcon = h('span', {class: 'btn__rec', 'aria-hidden': 'true'});
     this.recLabel = h('span', {}, 'Record');
-    this.recButton = h('button', {type: 'button', class: 'btn btn--lg', onClick: () => session.toggleRecording()}, this.recIcon, this.recLabel);
-    this.saveButton = h('button', {type: 'button', class: 'btn btn--lg', onClick: () => session.requestDownload()}, 'Save WAV');
+    this.recButton = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => session.toggleRecording()}, this.recIcon, this.recLabel);
+    this.saveButton = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => session.requestDownload()}, 'Save WAV');
+    this.recText = h('p', {class: 'note'});
     this.recProgress = h('progress', {max: 1, value: 0, hidden: true});
-    const recording = h('section', {class: 'section', 'aria-labelledby': 'hw-rec-title'},
-      h('h2', {class: 'section__title', id: 'hw-rec-title'}, 'Recording'),
-      this.recText,
-      this.recProgress,
-      h('div', {class: 'toolbar toolbar--tight'}, this.recButton, this.saveButton),
-      h('p', {class: 'note'}, 'For clean audio, record on a fixed beam. Tracking switches beams, and the switches are audible.'),
-    );
-
-    this.eventList = h('ol', {class: 'events'});
-    const events = h('section', {class: 'section section--events', 'aria-labelledby': 'hw-events-title'},
-      h('div', {class: 'section__row'},
-        h('h2', {class: 'section__title', id: 'hw-events-title'}, 'Events'),
-        h('button', {type: 'button', class: 'btn btn--sm btn--quiet', onClick: () => session.clearEvents()}, 'Clear'),
-      ),
-      this.eventList,
-    );
-
-    this.freezeButton = h('button', {type: 'button', class: 'btn', onClick: () => session.toggleFreeze()}, 'Freeze display');
-    const advanced = h('section', {class: 'section'},
-      h('details', {class: 'disclosure'},
-        h('summary', {}, 'Advanced'),
-        h('div', {class: 'advanced'},
-          this.freezeButton,
-          h('p', {class: 'note'}, 'Freezing pauses this display only. The device keeps scanning, and commands still work.'),
-        ),
-      ),
-    );
-
-    this.el = h('aside', {class: 'hw-aside scroll-y', 'aria-label': 'Status'},
-      answer, refresh, this.truth, extra || null, measurement, tones, recording, events, advanced);
-    session.addEventListener('events', () => this.renderEvents());
-    this.renderEvents();
+    this.el = h('section', {class: 'panel audio', 'aria-labelledby': 'hw-audio-title'},
+      h('header', {class: 'panel__head'}, h('h2', {class: 'label', id: 'hw-audio-title'}, 'Audio')),
+      h('div', {class: 'audio__body'},
+        this.listen,
+        h('div', {class: 'line'}, h('span', {class: 'line__k'}, 'Record'), this.recButton, this.saveButton),
+        this.recProgress,
+        this.recText));
   }
 
-  render() {
-    const session = this.session;
-    const frame = session.frame;
-    const mode = operatingMode(session);
-    const answer = session.solution(frame);
+  build(frame) {
+    const outputs = frame.outputs;
+    const bank = frame.bank;
+    const key = `${outputs.microphones}|${outputs.bank_beams}|${bank?.azimuth_deg?.join(',')}`;
+    if (key === this.key) return;
+    this.key = key;
+    const choices = [['0:0', 'Steered beam, follows the source']];
+    for (let beam = 0; beam < (outputs.bank_beams || 0); beam++) {
+      const az = bank?.azimuth_deg?.[beam];
+      const el = bank?.elevation_deg?.[beam];
+      choices.push([`2:${beam}`, `Bank beam ${beam}${Number.isFinite(az) ? ` (${deg(az, 0)}, ${deg(el, 0)})` : ''}`]);
+    }
+    for (let mic = 0; mic < (outputs.microphones || 0); mic++) choices.push([`1:${mic}`, `Microphone ${mic}`]);
+    this.output.replaceChildren(...choices.map(([value, text]) => h('option', {value}, text)));
+  }
 
-    let title = 'Source direction';
-    let chip = 'Idle';
-    let tone = '';
-    let detail = 'Nothing is being measured. Start a sweep or tracking to locate a source.';
-    if (answer) {
-      const where = `Sector ${answer.sector}`;
-      const level = `${num(answer.level, 1)} dBFS`;
-      const margin = Number.isFinite(frame.margin_db) ? `${num(frame.margin_db, 1)} dB` : null;
-      if (answer.kind === 'target') {
-        chip = 'Tracking'; tone = 'accent';
-        detail = `${where} at ${level}${margin ? `, ${margin} above the next-strongest sector` : ''}. Updated ${formatAge(answer.ageMs)} ago.`;
-      } else if (answer.kind === 'beam') {
-        title = 'Beam direction';
-        chip = session.monitoring ? 'Monitoring' : 'Fixed beam'; tone = 'accent';
-        detail = `Beam held on sector ${answer.sector}, reading ${level}. Other sectors keep their last measurement.`;
-      } else {
-        title = 'Strongest sector';
-        tone = 'plain';
-        if (mode === 'continuous') {
-          chip = 'Scanning';
-          const period = Number.isFinite(frame.scan_rate_hz) && frame.scan_rate_hz > 0 ? ` The whole map refreshes every ${(1 / frame.scan_rate_hz).toFixed(2)} s.` : '';
-          detail = `${where} at ${level}${margin ? `, ${margin} above the next` : ''}.${period}`;
-        } else if (mode === 'track') {
-          chip = 'Searching';
-          detail = `Searching the field for a source. ${where} is strongest so far at ${level}.`;
-        } else if (mode === 'stare') {
-          chip = 'Watching';
-          detail = 'The beam bank listens in every direction at once. No direction stands out yet.';
-        } else {
-          chip = mode === 'once' ? 'Single sweep' : 'Last sweep';
-          detail = `${where} at ${level}, from the last full pass ${formatAge(answer.ageMs)} ago.`;
-        }
+  render(frame) {
+    this.listen.hidden = !frame?.outputs;
+    if (frame?.outputs) {
+      this.build(frame);
+      const ch1 = frame.ch1;
+      if (ch1 && ch1.code === 0 && document.activeElement !== this.output) {
+        this.output.value = `${ch1.source}:${ch1.source === 0 ? 0 : ch1.index}`;
       }
-    } else if (mode === 'track') {
-      chip = 'Searching'; tone = 'plain';
-      detail = 'Searching the field for a source.';
-    } else if (mode === 'stare') {
-      chip = 'Watching'; tone = 'plain';
-      detail = 'The beam bank listens in every direction at once. No direction stands out yet.';
+      this.output.disabled = !this.session.ready;
     }
-    setText(this.title, title);
-    setText(this.chip, chip);
-    this.chip.className = `chip ${tone ? 'chip--' + tone : ''}`.trim();
-    setText(this.az, answer ? deg(answer.azimuth) : '—');
-    setText(this.elValue, answer ? deg(answer.elevation) : '—');
-    setText(this.azSub, answer ? `Azimuth, ${side(answer.azimuth, 'right', 'left')}` : 'Azimuth');
-    setText(this.elSub, answer ? `Elevation, ${side(answer.elevation, 'up', 'down')}` : 'Elevation');
-    setText(this.detail, detail);
-
-    this.renderRates(mode, frame);
-    this.renderTruth(frame);
-    this.renderMeasurement(frame);
-    this.renderTones(frame);
     this.renderRecording(frame);
-    setText(this.freezeButton, session.frozen ? 'Resume display' : 'Freeze display');
-    this.freezeButton.setAttribute('aria-pressed', String(session.frozen));
-    this.freezeButton.disabled = !session.open;
-  }
-
-  renderRates(mode, frame) {
-    const session = this.session;
-    const cfg = frame?.configuration;
-    const scan = frame?.scan_rate_hz;
-    const track = frame?.target_update_rate_hz;
-    const trackCurrent = Number.isFinite(track) && Number.isFinite(frame?.target_update_age_s) && frame.target_update_age_s < 2;
-    let values = ['—', '—'];
-    let labels = ['Direction updates', 'Full scans'];
-    let note = 'Nothing is being measured.';
-    if (mode === 'track') {
-      values = [trackCurrent ? hz(track, 0) : '—', hz(scan, 1)];
-      note = trackCurrent && Number.isFinite(scan) && scan > 0
-        ? `Tracking re-measures the sectors around the target, so the direction refreshes ${(track / scan).toFixed(1)}× faster than a full scan.`
-        : 'Waiting for a lock. Tracking starts with a full search.';
-    } else if (mode === 'continuous') {
-      values = [hz(scan, 1), hz(scan, 1)];
-      note = cfg ? `Every pass re-measures all ${cfg.sectors} sectors.` : '';
-    } else if (mode === 'stare') {
-      labels = ['Direction updates', 'Bank directions'];
-      values = [trackCurrent ? hz(track, 0) : '—', frame?.bank ? String(frame.bank.rows * frame.bank.columns) : '—'];
-      note = 'The bank measures all its directions together every 50 ms; the steered beam follows the strongest.';
-    } else if (mode === 'once') {
-      values = ['—', '1 pass'];
-      note = 'The map holds the result of one pass until you start another.';
-    } else if (mode === 'fixed') {
-      labels = ['Level reads', 'Full scans'];
-      values = [session.monitoring ? `${session.monitorRate} Hz` : 'On demand', '—'];
-      note = 'Only the held sector updates while the beam is fixed.';
-    }
-    values.forEach((value, i) => setText(this.rateValues[i], value));
-    labels.forEach((label, i) => setText(this.rateLabels[i], label));
-    setText(this.rateNote, note);
-  }
-
-  renderTruth(frame) {
-    const truth = frame?.emulator_truth;
-    this.truth.hidden = !truth;
-    if (!truth) return;
-    const active = truth.source_active !== false;
-    setText(this.truthChip, active ? 'Source active' : 'Acoustic dropout');
-    this.truthChip.className = `chip ${active ? 'chip--plain' : 'chip--warn'}`;
-    setText(this.truthValue, `${deg(truth.azimuth_deg)}, ${deg(truth.elevation_deg)}`);
-    const error = Number.isFinite(frame.est_az_deg) && Number.isFinite(frame.est_el_deg)
-      ? ` · answer off by ${num(Math.hypot(frame.est_az_deg - truth.azimuth_deg, frame.est_el_deg - truth.elevation_deg), 1)}°`
-      : '';
-    setText(this.truthMeta, `Range ${num(truth.range_m, 1)} m${error}. Shown on the map as a green cross.`);
-  }
-
-  renderMeasurement(frame) {
-    const settings = frame?.settings || {};
-    const idle = this.session.ready && this.session.firmwareMode === 'IDLE';
-    this.measureMode.set(String(settings.measure ?? 0));
-    this.measureMode.setDisabled(!idle);
-    for (const [key, input] of Object.entries(this.measureInputs)) {
-      if (document.activeElement !== input && Number.isFinite(settings[key])) input.value = settings[key];
-      input.disabled = !idle;
-    }
-    this.measureApply.disabled = !idle;
-  }
-
-  renderTones(frame) {
-    const period = Number(frame?.settings?.tone || 0);
-    const idle = this.session.ready && this.session.firmwareMode === 'IDLE';
-    if (document.activeElement !== this.toneSelect) this.toneSelect.value = String(period);
-    this.toneSelect.disabled = !idle;
-    this.toneSelect.title = idle ? '' : 'Stop the scan to change settings.';
-    const tones = Object.values(frame?.tones || {}).sort((a, b) => a.channel - b.channel);
-    if (!tones.length) {
-      this.toneList.replaceChildren(h('p', {class: 'note note--body'},
-        period > 0 ? 'No tonal estimate yet.' : 'Tone reports are off.'));
-      return;
-    }
-    this.toneList.replaceChildren(...tones.map((tone) =>
-      h('div', {class: 'section__row'},
-        h('span', {class: 'figure-label'}, `Channel ${tone.channel}`),
-        h('span', {class: 'readout'}, `${num(tone.f0_hz, 1)} Hz · ${num(tone.score_db, 1)} dB · ${tone.harmonics} harmonics · ${num(tone.level_db, 1)} dBFS`),
-      )));
   }
 
   renderRecording(frame) {
@@ -307,35 +144,240 @@ export class StatusColumn {
     const capable = session.recordingCapable;
     const recording = frame?.last_recording;
     const progress = Number(frame?.audio_download_progress || 0);
-    let text = capable ? 'No recording yet.' : 'Recording needs the serial connection to the MAX78002.';
-    if (state === 'recording') text = 'Recording the beam output…';
+    let text = capable ? '' : 'Recording needs the serial link to the MAX78002.';
+    if (state === 'recording') text = 'Recording…';
     else if (state === 'ready' && recording) {
       const channels = Number(frame?.audio_format?.channels || 1);
       text = `Ready to save · ${(Number(recording.samples || 0) / 48000).toFixed(1)} s, 48 kHz ${channels === 2 ? 'stereo' : 'mono'}, ${recording.overruns || 0} overruns`;
     } else if (state === 'downloading') text = `Downloading · ${Math.round(progress * 100)}%`;
-    else if (state === 'downloaded') text = 'Downloaded and checksum-verified.';
+    else if (state === 'downloaded') text = 'Saved and checksum-verified.';
     else if (state === 'error') text = frame?.audio_download_error || 'Recording error';
     if (session.downloadRequested && !session.downloadCommandSent && session.downloadStopSent) text = 'Stopping the scan before downloading…';
     setText(this.recText, text);
+    this.recText.hidden = !text;
     this.recProgress.hidden = state !== 'downloading';
     this.recProgress.value = progress;
     const isRecording = state === 'recording';
-    setText(this.recLabel, isRecording ? 'Stop recording' : 'Record');
+    setText(this.recLabel, isRecording ? 'Stop' : 'Record');
     this.recIcon.classList.toggle('btn__rec--square', isRecording);
     this.recButton.disabled = !capable || state === 'downloading';
     this.saveButton.disabled = !capable || !['ready', 'downloaded'].includes(state);
   }
+}
 
-  renderEvents() {
-    const items = [...this.session.events].reverse().slice(0, 30);
-    if (items.length === 0) {
-      this.eventList.replaceChildren(h('li', {class: 'events__empty'}, 'No events yet.'));
+export class EventLog {
+  constructor(session, {onFold}) {
+    this.session = session;
+    this.count = h('span', {class: 'rail__count'}, '0');
+    this.stripCount = h('span', {class: 'rail__count'}, '0');
+    this.list = h('ol', {class: 'events'});
+    this.el = h('aside', {class: 'rail', 'aria-label': 'Log'},
+      h('header', {class: 'panel__head'},
+        h('h2', {class: 'label'}, 'Log'), this.count,
+        h('button', {type: 'button', class: 'btn btn--sm btn--quiet rail__clear', onClick: () => session.clearEvents()}, 'Clear'),
+        h('button', {type: 'button', class: 'btn btn--sm btn--ghost', title: 'Hide the log', 'aria-label': 'Hide the log', onClick: () => onFold(true)}, '«')),
+      this.list,
+      h('button', {type: 'button', class: 'rail__strip', title: 'Show the log', 'aria-label': 'Show the log', onClick: () => onFold(false)},
+        this.stripCount, h('span', {class: 'rail__vlabel'}, 'LOG')));
+    session.addEventListener('events', () => this.render());
+    this.render();
+  }
+
+  render() {
+    const events = this.session.events;
+    setText(this.count, String(events.length));
+    setText(this.stripCount, String(events.length));
+    if (!events.length) {
+      this.list.replaceChildren(h('li', {class: 'events__empty'}, 'No events yet.'));
       return;
     }
-    this.eventList.replaceChildren(...items.map((event) =>
-      h('li', {class: `events__item ${event.tone ? 'events__item--' + event.tone : ''}`.trim()},
-        h('span', {class: 'events__time'}, clockTime(event.time)),
-        h('span', {}, event.text),
-      )));
+    this.list.replaceChildren(...[...events].reverse().map((event) =>
+      h('li', {class: `events__item${event.tone ? ' is-' + event.tone : ''}`},
+        h('div', {class: 'events__meta'}, h('b', {}, event.kind), h('time', {}, clockTime(event.time))),
+        h('p', {}, event.text))));
+  }
+}
+
+export class ManualBeamPanel {
+  constructor(session) {
+    this.session = session;
+    this.touched = false;
+    this.sector = h('input', {class: 'input input--mono input--sm', type: 'number', min: 0, value: 24,
+      style: {width: '84px'}, onInput: () => { this.touched = true; }});
+    this.hold = h('button', {type: 'button', class: 'btn btn--sm',
+      onClick: () => session.startMonitor(parseInt(this.sector.value, 10))}, 'Hold beam');
+    this.release = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => session.stopMonitor()}, 'Release');
+    this.rate = h('select', {class: 'select select--sm', 'aria-label': 'Re-read rate',
+      onChange: () => session.setMonitorRate(parseInt(this.rate.value, 10))}, options(RATES, String(session.monitorRate)));
+    this.el = h('div', {class: 'drawer-page'},
+      h('div', {class: 'form'},
+        h('label', {}, 'Sector', this.sector), this.hold, this.release,
+        h('label', {}, 'Re-read', this.rate)),
+      h('p', {class: 'note'}, 'The beam stays on the sector and its level is re-read at this rate. During a diagnostic scan, clicking a tile points the beam there once.'));
+  }
+
+  setSector(sector) {
+    this.sector.value = sector;
+    this.touched = true;
+  }
+
+  render() {
+    const session = this.session;
+    const cfg = session.configuration;
+    this.sector.disabled = !session.ready;
+    this.hold.disabled = !session.ready;
+    this.release.disabled = !session.monitoring;
+    this.hold.setAttribute('aria-pressed', String(session.monitoring));
+    if (cfg) {
+      this.sector.max = cfg.sectors - 1;
+      if (!this.touched) this.sector.value = Math.floor(cfg.rows / 2) * cfg.columns + Math.floor(cfg.columns / 2);
+    }
+  }
+}
+
+export class MeasurementPanel {
+  constructor(session) {
+    this.session = session;
+    this.mode = segmented([['0', 'DSP detector'], ['1', 'MCU window']], {
+      label: 'Measurement source',
+      onPick: async (key) => {
+        this.mode.setDisabled(true);
+        try { await session.setSetting('measure', Number(key), 'measurement source'); }
+        finally { this.render(); }
+      },
+    });
+    const input = (key, minimum, maximum, step) => {
+      this.inputs[key] = h('input', {class: 'input input--mono input--sm', type: 'number', min: minimum, max: maximum, step, style: {width: '96px'}});
+      return this.inputs[key];
+    };
+    this.inputs = {};
+    this.apply = h('button', {type: 'button', class: 'btn btn--sm', onClick: async () => {
+      this.apply.disabled = true;
+      try {
+        await session.setMeasurementSettings({
+          settle_us: Number(this.inputs.settle_us.value),
+          guard_us: Number(this.inputs.guard_us.value),
+          window_us: Number(this.inputs.window_us.value),
+        });
+      } finally { this.render(); }
+    }}, 'Apply');
+    this.el = h('div', {class: 'drawer-page'},
+      h('div', {class: 'form'},
+        this.mode.el,
+        h('label', {}, 'Settle', input('settle_us', 50, 20000, 50), 'µs'),
+        h('label', {}, 'Guard', input('guard_us', 0, 20000, 50), 'µs'),
+        h('label', {}, 'Window', input('window_us', 1000, 100000, 500), 'µs'),
+        this.apply),
+      h('p', {class: 'note'}, 'Settings change only while the device is stopped.'));
+  }
+
+  render() {
+    const settings = this.session.frame?.settings || {};
+    const idle = this.session.ready && this.session.firmwareMode === 'IDLE';
+    this.mode.set(String(settings.measure ?? 0));
+    this.mode.setDisabled(!idle);
+    for (const [key, input] of Object.entries(this.inputs)) {
+      if (document.activeElement !== input && Number.isFinite(settings[key])) input.value = settings[key];
+      input.disabled = !idle;
+    }
+    this.apply.disabled = !idle;
+  }
+}
+
+export class TonePanel {
+  constructor(session) {
+    this.session = session;
+    this.list = h('div', {class: 'kv'});
+    this.period = h('select', {class: 'select select--sm', 'aria-label': 'Tone report period',
+      onChange: async () => {
+        this.period.disabled = true;
+        try { await session.setSetting('tone', Number(this.period.value), 'tone reports'); }
+        catch (_) { /* logged by the session */ }
+        finally { this.render(); }
+      }},
+    options([['0', 'Off'], ['100', 'Every 100 ms'], ['250', 'Every 250 ms'], ['500', 'Every 500 ms'], ['1000', 'Every 1 s']], '0'));
+    this.el = h('div', {class: 'drawer-page'},
+      h('div', {class: 'form'}, h('label', {}, 'Reports', this.period)),
+      this.list);
+  }
+
+  render() {
+    const frame = this.session.frame;
+    const period = Number(frame?.settings?.tone || 0);
+    const idle = this.session.ready && this.session.firmwareMode === 'IDLE';
+    if (document.activeElement !== this.period) this.period.value = String(period);
+    this.period.disabled = !idle;
+    this.period.title = idle ? '' : 'Stop the device to change settings.';
+    const tones = Object.values(frame?.tones || {}).sort((a, b) => a.channel - b.channel);
+    if (!tones.length) {
+      this.list.replaceChildren(h('p', {class: 'note'}, period > 0 ? 'No tonal estimate yet.' : 'Tone reports are off.'));
+      return;
+    }
+    this.list.replaceChildren(...tones.flatMap((tone) => [
+      h('div', {}, `Ch${tone.channel} fundamental`, h('b', {}, `${num(tone.f0_hz, 1)} Hz`)),
+      h('div', {}, 'Score', h('b', {}, `${num(tone.score_db, 1)} dB`)),
+      h('div', {}, 'Harmonics', h('b', {}, String(tone.harmonics))),
+    ]));
+  }
+}
+
+const RATE_NOTES = {
+  stare: 'The bank measures all its directions together every 50 ms; the steered beam follows the strongest.',
+  track: 'Waiting for a lock. Tracking starts with a full search.',
+  continuous: 'Every pass re-measures all sectors.',
+  once: 'The map holds the result of one pass until you start another.',
+  fixed: 'Only the held sector updates while the beam is fixed.',
+  idle: 'Nothing is being measured.',
+};
+
+export class DiagnosticsPanel {
+  constructor(session, {extra} = {}) {
+    this.session = session;
+    this.kv = h('div', {class: 'kv'});
+    this.note = h('p', {class: 'note'});
+    this.freeze = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => session.toggleFreeze()}, 'Freeze display');
+    this.el = h('div', {class: 'drawer-page'},
+      this.kv,
+      this.note,
+      h('div', {class: 'form'}, this.freeze, h('span', {class: 'note'}, 'Freezing pauses this display only; the device keeps running.')),
+      extra || null);
+  }
+
+  render(mode) {
+    const session = this.session;
+    const frame = session.frame;
+    const program = frame?.dsp;
+    const tables = frame?.tables;
+    const taper = frame?.taper;
+    const truth = frame?.emulator_truth;
+    const track = frame?.target_update_rate_hz;
+    const trackCurrent = Number.isFinite(track) && Number.isFinite(frame?.target_update_age_s) && frame.target_update_age_s < 2;
+    const rows = [
+      ['Program', program ? `${program.program} · ${program.style === 'lut' ? 'LUT' : 'per mic'}` : '—'],
+      ['Signature', program ? `${program.matched} / ${program.read}` : '—'],
+      ['DSP load', program?.load ? `${(program.load.elapsed_us / 1e6).toFixed(2)} s · code ${program.load.code}` : '—'],
+      ['Tables', tables ? `${tables.verified} / ${tables.words}` : '—'],
+      ['Taper', taper ? `${taper.verified} / ${taper.written} · σ ${num(taper.sigma, 2)}` : '—'],
+      ['Direction updates', trackCurrent ? hz(track, 0) : '—'],
+      ['Full scans', hz(frame?.scan_rate_hz, 1)],
+      ['Passes', String(frame?.scan_count ?? 0)],
+      ['Ignored lines', String(frame?.protocol_errors ?? 0)],
+    ];
+    if (program?.core) {
+      rows.push(['DSP core', `status ${program.core.status} · panic 0x${program.core.panic_code.toString(16).padStart(4, '0')}`]);
+    }
+    if (truth) {
+      rows.push(['Emulator source', `${deg(truth.azimuth_deg)}, ${deg(truth.elevation_deg)}${truth.source_active === false ? ' · dropout' : ''}`]);
+      if (Number.isFinite(frame.est_az_deg) && Number.isFinite(frame.est_el_deg)) {
+        rows.push(['Answer error', deg(Math.hypot(frame.est_az_deg - truth.azimuth_deg, frame.est_el_deg - truth.elevation_deg))]);
+      }
+    }
+    this.kv.replaceChildren(...rows.map(([key, value]) => h('div', {}, key, h('b', {}, value))));
+    setText(this.note, mode === 'track' && trackCurrent && frame?.scan_rate_hz > 0
+      ? `Tracking re-measures the sectors around the target, so the direction refreshes ${(track / frame.scan_rate_hz).toFixed(1)}× faster than a full scan.`
+      : RATE_NOTES[mode] || '');
+    setText(this.freeze, session.frozen ? 'Resume display' : 'Freeze display');
+    this.freeze.setAttribute('aria-pressed', String(session.frozen));
+    this.freeze.disabled = !session.open;
   }
 }
