@@ -325,3 +325,22 @@ def test_init_payload_carries_the_deployed_array_layout():
             frame = websocket.receive_json()
             assert "array_layout" not in frame
         client.post("/hw_disconnect")
+
+
+def test_bank_frames_carry_the_contract_beam_directions():
+    bank = json.loads(sim_server.default_contract_path().read_text(encoding="ascii")).get("bank")
+    if not bank:
+        return
+    with TestClient(sim_server.app) as client:
+        assert client.post("/hw_connect", json={"transport": "emulator", "rows": 7, "columns": 7,
+                                                "azimuth_min_deg": -40, "azimuth_max_deg": 40,
+                                                "elevation_min_deg": -40, "elevation_max_deg": 40}).status_code == 200
+        with client.websocket_connect("/realtime_hw") as websocket:
+            payload = websocket.receive_json()
+            for _ in range(20):
+                if payload.get("bank"):
+                    break
+                payload = websocket.receive_json()
+            assert payload["bank"]["azimuth_deg"] == [float(value) for value in bank["azimuth_deg"]]
+            assert payload["bank"]["elevation_deg"] == [float(value) for value in bank["elevation_deg"]]
+        client.post("/hw_disconnect")

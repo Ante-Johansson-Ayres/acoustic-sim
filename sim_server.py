@@ -1429,6 +1429,17 @@ async def realtime_hw_ws(ws: WebSocket):
             pass
 
 
+def _bank_with_directions(bank):
+    """The firmware reports bank levels only; the beam directions come from the deployed contract."""
+    if bank is None:
+        return None
+    program = _deployed_program()
+    if len(program.bank_azimuth_deg) != bank["rows"] * bank["columns"]:
+        return bank
+    return {**bank, "azimuth_deg": list(program.bank_azimuth_deg),
+            "elevation_deg": list(program.bank_elevation_deg)}
+
+
 def _hardware_payload(payload_type, snapshot):
     configuration = snapshot["configuration"]
     candidates = []
@@ -1507,7 +1518,7 @@ def _hardware_payload(payload_type, snapshot):
         "classes": snapshot.get("classes") or {},
         "direction_set": snapshot.get("direction_set"),
         "recording_meta": snapshot.get("recording_meta"),
-        "bank": snapshot.get("bank"),
+        "bank": _bank_with_directions(snapshot.get("bank")),
         "outputs": snapshot.get("outputs"),
         "ch1": snapshot.get("ch1"),
         "level_time_constant_ms": _deployed_program().level_time_constant_ms,
