@@ -23,8 +23,8 @@ const TABS = [['beam', 'Manual beam'], ['measure', 'Measurement'], ['tone', 'Ton
 const CAPTIONS = {
   bank: 'Each tile is a direction the array listens in. Brighter is louder.',
   sectors: 'Each tile is a sector of the diagnostic scan. Faded tiles are older than 5 s.',
-  surface: 'The surface bulges toward the array where the sound is louder; height and colour show the same level.',
-  points: 'Each point moves toward the array where the sound is louder; height and colour show the same level.',
+  surface: 'The surface bulges toward the array where the sound stands above the background; colour shows the level.',
+  points: 'Each point moves toward the array where the sound stands above the background; colour shows the level.',
 };
 const STYLES = [['tiles', 'Tiles'], ['surface', 'Surface'], ['points', 'Point cloud']];
 

@@ -15,8 +15,8 @@ import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { levelToUnit, rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
 import { direction } from './geometry.js';
-import { cellDirection, gridPosition, surfaceUnit } from './field.js';
-import { DEPTH, PointStyle, SurfaceStyle } from './fieldstyles.js';
+import { cellDirection, gridPosition, median, surfaceUnit } from './field.js';
+import { DEPTH, PointStyle, SurfaceStyle, pinAt } from './fieldstyles.js';
 
 const RADIUS = 2.0;
 const FLOOR_Y = -1.45;
@@ -24,6 +24,7 @@ const TARGET = new THREE.Vector3(0, -0.1, 1.1);
 const DISTANCE = 6.2;
 const EASE = 0.3;
 const PEAK_SPREAD = 2 * 0.8 * 0.8;     // 2σ² of the hill at the source, in cells
+const REST = 0.1;                      // relief of the background, so quieter directions can still dip below it
 
 export const CAMERA_VIEWS = {
   behind: {yaw: -14, pitch: 15},
@@ -104,7 +105,10 @@ export class FieldScene {
     this.wanted = null;               // the same from the latest frame
     this.peak = {column: 0, row: 0, level: 0};      // eased source peak at its interpolated direction
     this.peakWanted = {column: 0, row: 0, level: 0};
-    this.heightAt = (column, row) => this.height(column, row);
+    this.base = 0;                    // eased background (median cell level)
+    this.baseWanted = 0;
+    this.levelAt = (column, row) => this.level(column, row);
+    this.reliefOf = (value) => this.relief(value);
     this.arrayKey = '';
     this.tileMeshes = [];
     this.field = null;
@@ -210,10 +214,10 @@ export class FieldScene {
   }
 
   /**
-   * Height 0..1 at a fractional grid position: the levels interpolated between
+   * Level 0..1 at a fractional grid position: the levels interpolated between
    * the beams, blended into a smooth hill topped at the source's interpolated direction.
    */
-  height(column, row) {
+  level(column, row) {
     const value = surfaceUnit(this.field, this.shown, column, row);
     const peak = this.peak;
     if (peak.level <= 0) return value;
@@ -222,9 +226,14 @@ export class FieldScene {
     return value + (peak.level - value) * Math.exp(-(dc * dc + dr * dr) / PEAK_SPREAD);
   }
 
+  /** How far a level lifts the field: measured from the background, so the sheet does not heave with it. */
+  relief(value) {
+    return Math.max(0, Math.min(1, value - this.base + REST));
+  }
+
   updateStyle() {
     const style = this.styles[this.style];
-    if (style && this.shown && this.field) style.update(this.heightAt);
+    if (style && this.shown && this.field) style.update(this.levelAt, this.reliefOf);
   }
 
   /** Glide the height field toward the latest levels, one step per rendered frame. */
@@ -238,6 +247,7 @@ export class FieldScene {
     };
     for (let i = 0; i < this.shown.length; i++) this.shown[i] = glide(this.shown[i], this.wanted[i]);
     for (const key of ['column', 'row', 'level']) this.peak[key] = glide(this.peak[key], this.peakWanted[key]);
+    this.base = glide(this.base, this.baseWanted);
     if (moving) {
       this.updateStyle();
       this.viewport.requestRender();
@@ -277,6 +287,7 @@ export class FieldScene {
     } else {
       this.styles[this.style].build(field);
       this.wanted = Float32Array.from(field.cells, (cell) => levelToUnit(cell.level, floor) ?? 0);
+      this.baseWanted = median(Array.from(this.wanted)) ?? 0;
       const source = field.marker;
       const at = source ? gridPosition(field, source.azimuth, source.elevation) : null;
       this.peakWanted = at
@@ -285,6 +296,7 @@ export class FieldScene {
       if (this.shown?.length !== this.wanted.length) {
         this.shown = Float32Array.from(this.wanted);
         this.peak = {...this.peakWanted};
+        this.base = this.baseWanted;
         this.updateStyle();
       } else if (changed) {
         this.updateStyle();
@@ -309,7 +321,7 @@ export class FieldScene {
       let reach = RADIUS * 0.985;
       if (!tiles && this.shown) {
         const at = gridPosition(field, marker.azimuth, marker.elevation);
-        const lift = at ? this.height(at.column, at.row) : 0;
+        const lift = at ? pinAt(field, at.column, at.row) * this.relief(this.level(at.column, at.row)) : 0;
         reach = RADIUS * (1 - DEPTH * lift) - 0.04;
       }
       const tip = toScene(direction(marker.azimuth, marker.elevation), reach);

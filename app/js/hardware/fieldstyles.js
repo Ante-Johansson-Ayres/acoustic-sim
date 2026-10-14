@@ -1,8 +1,9 @@
 /**
  * fieldstyles.js — the 3D field as a height field instead of tiles: a smooth
  * surface in colour bands, or a point cloud. Both bulge toward the array by
- * the same smooth height (0..1), sampled at fractional grid positions
- * (0 = left / bottom edge of the field).
+ * the relief of the level (how far it stands above the background), with the
+ * rim held on the dome, and take their colour from the level itself. Both are
+ * sampled at fractional grid positions (0 = left / bottom edge of the field).
  */
 
 import * as THREE from 'three';
@@ -32,25 +33,33 @@ function bandTexture() {
   return texture;
 }
 
-/** Scene directions (x = left) for fractional grid positions [column, row, ...]. */
+/** 1 inside the field, easing to 0 over the outer half cell so the rim stays on the dome. */
+export function pinAt(field, column, row) {
+  const t = Math.max(0, Math.min(1, Math.min(column, field.columns - column, row, field.rows - row) / 0.5));
+  return t * t * (3 - 2 * t);
+}
+
+/** Rim weights and scene directions (x = left) for fractional grid positions [column, row, ...]. */
 function samplePoints(field, positions) {
   const n = positions.length / 2;
+  const pins = new Float32Array(n);
   const directions = new Float32Array(n * 3);
   for (let k = 0; k < n; k++) {
+    pins[k] = pinAt(field, positions[2 * k], positions[2 * k + 1]);
     const [right, up, forward] = gridDirection(field, positions[2 * k], positions[2 * k + 1]);
     directions[3 * k] = -right;
     directions[3 * k + 1] = up;
     directions[3 * k + 2] = forward;
   }
-  return {n, positions, directions, values: new Float32Array(n)};
+  return {n, positions, pins, directions, values: new Float32Array(n)};
 }
 
-/** Moves each sample toward the array by its height, keeping the heights in `samples.values`. */
-function displace(samples, height, radius, out) {
-  const {n, positions, directions, values} = samples;
+/** Moves each sample toward the array by its relief, keeping the levels (for colour) in `samples.values`. */
+function displace(samples, level, relief, radius, out) {
+  const {n, positions, pins, directions, values} = samples;
   for (let k = 0; k < n; k++) {
-    values[k] = height(positions[2 * k], positions[2 * k + 1]);
-    const r = radius * (1 - DEPTH * values[k]);
+    values[k] = level(positions[2 * k], positions[2 * k + 1]);
+    const r = radius * (1 - DEPTH * pins[k] * relief(values[k]));
     out[3 * k] = directions[3 * k] * r;
     out[3 * k + 1] = directions[3 * k + 1] * r;
     out[3 * k + 2] = directions[3 * k + 2] * r;
@@ -103,8 +112,8 @@ export class SurfaceStyle {
       new THREE.LineSegments(this.outline, new THREE.LineBasicMaterial({color: '#000000'})));
   }
 
-  update(height) {
-    displace(this.samples, height, this.radius, this.position.array);
+  update(level, relief) {
+    displace(this.samples, level, relief, this.radius, this.position.array);
     const {n, values} = this.samples;
     for (let k = 0; k < n; k++) this.uv.array[2 * k] = values[k];
     this.position.needsUpdate = true;
@@ -115,7 +124,7 @@ export class SurfaceStyle {
   }
 }
 
-/** Points on a fixed grid, each pushed toward the array by its height. */
+/** Points on a fixed grid, each pushed toward the array by its relief. */
 export class PointStyle {
   constructor(radius) {
     this.radius = radius;
@@ -146,8 +155,8 @@ export class PointStyle {
     this.group.add(this.points);
   }
 
-  update(height) {
-    displace(this.samples, height, this.radius, this.placed);
+  update(level, relief) {
+    displace(this.samples, level, relief, this.radius, this.placed);
     const {n, values} = this.samples;
     const p = this.placed;
     for (let k = 0; k < n; k++) {
