@@ -18,10 +18,10 @@ import { direction } from './geometry.js';
 import { cellDirection, gridDirection, gridPosition, median, surfaceUnit } from './field.js';
 import { DEPTH, PointStyle, SurfaceStyle, pinAt } from './fieldstyles.js';
 
-const RADIUS = 2.0;
-const FLOOR_Y = -1.45;
-const TARGET = new THREE.Vector3(0, -0.1, 1.1);
-const DISTANCE = 6.2;
+const RADIUS = 3.5;                    // far-field beams: the dome's distance is arbitrary, only its angles are real
+const FLOOR_Y = -2.45;
+const TARGET = new THREE.Vector3(0, -0.2, 1.9);
+const DISTANCE = 9.5;
 const EASE = 0.15;
 const PEAK_SPREAD = 2 * 0.8 * 0.8;     // 2σ² of the hill at the source, in cells
 const REST = 0.1;                      // relief of the background, so quieter directions can still dip below it
@@ -31,7 +31,7 @@ const FOCUS = 2;                       // the field lifts toward a point this ma
 export const CAMERA_VIEWS = {
   behind: {yaw: -14, pitch: 15},
   above: {yaw: 0, pitch: 62},
-  side: {yaw: 78, pitch: 8},
+  side: {yaw: 78, pitch: 8, distance: 11.5},
 };
 const COLORS = {
   background: '#1d2025', line: '#2c3036', strong: '#3a3f47', subtle: '#80868e', text: '#eceef1',
@@ -89,7 +89,7 @@ export class FieldScene {
     this.onPick = onPick;
     this.onHover = onHover;
     this.viewport = new Viewport3D(container, {background: COLORS.background, fov: 34});
-    Object.assign(this.viewport.controls, {enablePan: false, minDistance: 2.5, maxDistance: 9});
+    Object.assign(this.viewport.controls, {enablePan: false, minDistance: 3, maxDistance: 12});
     this.labels = h('div', {class: 'scene-labels', 'aria-hidden': 'true'});
     container.append(this.labels);
 
@@ -136,17 +136,17 @@ export class FieldScene {
 
   setView(name) {
     this.viewName = CAMERA_VIEWS[name] ? name : 'behind';
-    this.viewport.orbitTo(TARGET, {...CAMERA_VIEWS[this.viewName], distance: DISTANCE});
+    this.viewport.orbitTo(TARGET, {distance: DISTANCE, ...CAMERA_VIEWS[this.viewName]});
     this.labels.classList.toggle('no-axes', this.viewName !== 'behind');
   }
 
   buildRoom() {
     const points = [];
-    for (let i = 0; i <= 14; i++) {
-      const x = -2.1 + i * 0.3;
-      const z = -0.6 + i * 0.2;
-      points.push(new THREE.Vector3(x, FLOOR_Y, -0.6), new THREE.Vector3(x, FLOOR_Y, 2.2),
-        new THREE.Vector3(-2.1, FLOOR_Y, z), new THREE.Vector3(2.1, FLOOR_Y, z));
+    for (let i = 0; i <= 16; i++) {
+      const x = -3.2 + i * 0.4;
+      const z = -0.8 + i * 0.3;
+      points.push(new THREE.Vector3(x, FLOOR_Y, -0.8), new THREE.Vector3(x, FLOOR_Y, 4.0),
+        new THREE.Vector3(-3.2, FLOOR_Y, z), new THREE.Vector3(3.2, FLOOR_Y, z));
     }
     this.room.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),
       new THREE.LineBasicMaterial({color: COLORS.line})));
@@ -336,7 +336,7 @@ export class FieldScene {
       const up = new THREE.Vector3(0, 1, 0);
       const along = tip.clone().normalize();
       const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, tip.length(), 12), flat(COLORS.accent));
-      const cone = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.03, tip.length(), 48, 1, true),
+      const cone = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.03, tip.length(), 48, 1, true),
         flat(COLORS.accent, {transparent: true, opacity: 0.16, depthWrite: false}));
       for (const mesh of [beam, cone]) {
         mesh.position.copy(tip).multiplyScalar(0.5);

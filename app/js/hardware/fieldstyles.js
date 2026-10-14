@@ -159,7 +159,7 @@ export class PointStyle {
     }
     this.samples = samplePoints(field, positions);
     this.placed = new Float32Array(this.samples.n * 3);
-    this.points = new THREE.InstancedMesh(new THREE.SphereGeometry(0.03, 10, 8), new THREE.MeshLambertMaterial(), this.samples.n);
+    this.points = new THREE.InstancedMesh(new THREE.SphereGeometry(0.05, 10, 8), new THREE.MeshLambertMaterial(), this.samples.n);
     for (let k = 0; k < this.samples.n; k++) this.points.setColorAt(k, LUT[0]);
     this.points.frustumCulled = false;
     this.group.add(this.points);
