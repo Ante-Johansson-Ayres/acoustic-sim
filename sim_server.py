@@ -15,6 +15,7 @@ import json
 import pathlib
 import time
 import wave
+from contextlib import asynccontextmanager
 
 import numpy as np
 import pyroomacoustics as pra
@@ -328,7 +329,15 @@ def encode_three_wavs_joint(clips, fs, normalize=True):
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Acoustic Beamformer Simulation")
+@asynccontextmanager
+async def _lifespan(_app):
+    load_audio()
+    yield
+    _acoustic_preparation.cancel()
+    _replace_heimdall_transport(None)
+
+
+app = FastAPI(title="Acoustic Beamformer Simulation", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -825,13 +834,6 @@ def list_materials():
             "exhibition_hall": dict(EXHIBITION_HALL_MATERIALS)}
 
 
-# ── Startup ────────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-def on_startup():
-    load_audio()
-
-
 # ── Hardware Serial Reader ─────────────────────────────────────────────────────
 
 import threading
@@ -1094,12 +1096,6 @@ def hw_acoustic_audition(request: AcousticAuditionRequest):
 def hw_disconnect():
     _replace_heimdall_transport(None)
     return {"status": "disconnected"}
-
-
-@app.on_event("shutdown")
-def stop_hardware_transport():
-    _acoustic_preparation.cancel()
-    _replace_heimdall_transport(None)
 
 
 @app.get("/hw_status")
