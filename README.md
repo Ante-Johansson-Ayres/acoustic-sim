@@ -63,8 +63,11 @@ WebSocket path as serial hardware:
 .\.venv\Scripts\python.exe sim_server.py --emulator
 ```
 
-Open the Hardware tab and use `Sweep once`, `Continuous`, `Track`, `Stop`,
-`Sector` + `Steer`, or `Monitor`. Without `--emulator`, pick `Emulator` in the
+Open the Hardware tab and press `Live` to listen in every bank direction at
+once, or pick a sector scan under `Diagnostic scans` (`Sweep once`,
+`Continuous`, `Track`); `Stop` ends either. The Field shows the array and one
+tile per beam in 3D, with a beam to the source, or the same tiles as a flat
+`Map`. A fixed beam is in the `Manual beam` drawer. Without `--emulator`, pick `Emulator` in the
 connection panel and click `Start emulator`; its grid defaults to the deployed
 7x7 table over ±40°. The emulator supplies a moving target and is suitable for
 GUI, protocol, reconnect, and command testing.
@@ -75,7 +78,7 @@ three failed passes before a local 3x3 reacquisition, and a periodic global
 search after 50 tracking passes. The source trajectory only generates detector
 levels; it is not used directly to choose the tracked sector.
 
-The `Refresh` section compares `Direction updates` with `Full scans`. Direction
+The `Diagnostics` drawer compares `Direction updates` with `Full scans`. Direction
 updates are the host-observed cadence of `TARGET_UPDATED` records; full scans
 come from the most recent firmware `TIMING` record. The displayed multiplier shows the practical
 solution-refresh advantage of local tracking. Full-scan rate is expected to
@@ -155,8 +158,8 @@ In browser acceptance, 12 consecutive adaptive Track samples stayed within one
 grid cell for both variants, with median center-angle errors of 7.0 degrees
 drone-only and 8.6 degrees mixed.
 
-After the scene is ready, click `Start acoustic emulator`, then use the normal
-`Sweep once`, `Continuous`, `Track`, `Stop`, `Steer`, and `Monitor` controls.
+After the scene is ready, click `Start acoustic emulator`, then use `Live`, the
+diagnostic scans, `Stop` and the `Manual beam` drawer as usual.
 
 The Hardware view keeps grid ownership explicit. The fast kinematic emulator
 can use an arbitrary 1-20 row/column grid and FOV. Acoustic mode fixes the grid
@@ -165,14 +168,13 @@ generated deployment contract. Serial mode is also read-only because the
 connected firmware reports the grid compiled into its beam table; changing it
 requires regenerating the table and reflashing the device.
 
-Emulators also show a `Scenario truth` section in the status column and a green
+Emulators also list the true source direction in the `Diagnostics` drawer and show a green
 cross on the map (a green marker in 3D). It follows the same cache clock and interpolated room-response
-waypoints as the detector levels, and reports true azimuth/elevation, range,
-room position, loop time, acoustic dropout state, and angular error from the
+waypoints as the detector levels, together with the angular error of the
 current measured solution. This truth is emulator-only and is never fed to the
 firmware-equivalent tracker.
 
-`Listen` (status column, acoustic emulator only) renders a jointly normalized 3-second comparison at the
+`Listen` (Diagnostics drawer, acoustic emulator only) renders a jointly normalized 3-second comparison at the
 current scene time. Available outputs are the generated filtered mix, one room
 microphone, the unsteered 44-microphone sum, a truth-steered beam, and the
 currently selected/tracked beam. Rendering uses the cached complex microphone
@@ -199,23 +201,24 @@ azimuth/elevation limits. These use the same cell-center convention
 as `beamforming_mathematics/hemisphere_scan_visualizer.py`, so they are useful
 for testing candidate table layouts before generating firmware coefficients.
 
-`Monitor` steers once and repeatedly issues `M` at 10, 20, or 50 Hz (the rate
-selector next to it). Only the selected sector updates because the beam remains
-fixed; the level chart under "Last 30 seconds" shows it as the source moves. Starting a sweep, tracking,
-manual steering, or disconnecting stops monitoring automatically.
+`Hold beam` (`Manual beam` drawer) steers once and repeatedly issues `M` at 10,
+20, or 50 Hz (`Re-read`). Only the held sector updates because the beam remains
+fixed. `Release` ends it; starting Live, a scan, clicking a sector tile, or
+disconnecting also stops it.
 
-The Hardware console distinguishes a tracked target, fixed beam, and strongest
-cached observation. Hatched cells are more than five seconds old; an old cell is
-not a current detection. `Peak-to-next` is the difference between the two
-strongest cached cells, not a statistical confidence value. The system estimates
-direction only and does not estimate range.
+The Source panel tags the answer `LOCKED` (a tracked or Live target), `HOLDING`
+(a fixed beam) or `STRONGEST` (the strongest cell of a scan). Faded, hatched
+sector cells are more than five seconds old; an old cell is not a current
+detection. `Above background` is the level above the median of the map it came
+from, not a statistical confidence value. The system estimates direction only
+and does not estimate range.
 
-The `Colour floor` control is an absolute dBFS colour floor with 0 dBFS as the hot
+The `Floor` control is an absolute dBFS colour floor with 0 dBFS as the hot
 end of the scale. The display does not normalize every frame to its own peak;
 uniformly weak measurements and evasive-profile dropouts therefore remain dark
 instead of appearing as a false full-grid detection.
 
-`Freeze display` (status column, Advanced) pauses WebSocket presentation only. Firmware or emulator work
+`Freeze display` (Diagnostics drawer) pauses WebSocket presentation only. Firmware or emulator work
 continues; use `Stop` to send the firmware `X` command. Disconnect and transport
 replacement also attempt a best-effort `X` before closing the link.
 
@@ -251,7 +254,7 @@ print the same records for the selected program.
 The UI supports generated grids up to 20x20 and forwards `S/F/C/G/X/I/M/R/D` firmware
 commands over the existing `/realtime_hw` WebSocket.
 
-The Hardware status column also provides `Record` / `Stop recording` and
+The Hardware Audio panel provides `Record` / `Stop` and
 `Save WAV` for serial hardware. `Save WAV` stops a running scan first, then
 downloads. Firmware captures 48 kHz stereo PCM16 through the onboard MAX9867,
 buffers up to 30 seconds in APS6404, and transfers finalized audio with exact
