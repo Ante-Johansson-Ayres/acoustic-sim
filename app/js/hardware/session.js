@@ -19,6 +19,7 @@ export const STALE_MS = 5000;
 export const HISTORY_WINDOW_S = 30;
 const HISTORY_MAX = 600;
 const EVENT_LOG_MAX = 50;
+const MOVE_LOG_MS = 5000;
 
 const MODE_NAMES = {F: 'Single sweep', C: 'Continuous scan', G: 'Tracking', B: 'Live', IDLE: 'Idle'};
 
@@ -58,6 +59,7 @@ export class HardwareSession extends EventTarget {
     this.downloadStopSent = false;
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
+    this.lastMoveLogged = 0;
     this.lockedSince = null;          // Date.now() when the current lock began
     this.pending = null;              // {kind, port, baud} of the last connect request
     this.discovered = false;
@@ -666,6 +668,13 @@ export class HardwareSession extends EventTarget {
     this.emit('events');
   }
 
+  logMove(frame, record) {
+    const now = Date.now();
+    if (now - this.lastMoveLogged < MOVE_LOG_MS) return;
+    this.lastMoveLogged = now;
+    this.addEvent('TARGET', `Moved to ${where(frame, record).replace(/^(at|in) /, '')}`, 'target');
+  }
+
   logRecord(frame) {
     if (!Number.isFinite(frame.sequence) || frame.sequence === this.lastLoggedSequence) return;
     this.lastLoggedSequence = frame.sequence;
@@ -683,12 +692,13 @@ export class HardwareSession extends EventTarget {
       break;
     case 'target_acquired':
       this.lastTargetSector = record.sector;
+      this.lastMoveLogged = Date.now();
       this.addEvent('TARGET', `Acquired ${where(frame, record)}`, 'target');
       break;
     case 'target_updated':
       if (record.sector !== this.lastTargetSector) {
         this.lastTargetSector = record.sector;
-        this.addEvent('TARGET', `Moved to ${where(frame, record).replace(/^(at|in) /, '')}`, 'target');
+        this.logMove(frame, record);
       }
       break;
     case 'target_lost':
@@ -715,13 +725,14 @@ export class HardwareSession extends EventTarget {
     const now = frame.target;
     if (!before && now) {
       this.lastTargetSector = now.sector;
+      this.lastMoveLogged = Date.now();
       this.addEvent('TARGET', `Acquired ${where(frame, now)}`, 'target');
     } else if (before && !now) {
       this.lastTargetSector = null;
       this.addEvent('TARGET', `Cleared ${where(previous, before)}`, 'warning');
     } else if (now && now.sector !== before?.sector && now.sector !== this.lastTargetSector) {
       this.lastTargetSector = now.sector;
-      this.addEvent('TARGET', `Moved to ${where(frame, now).replace(/^(at|in) /, '')}`, 'target');
+      this.logMove(frame, now);
     }
     if (frame.last_error && JSON.stringify(frame.last_error) !== JSON.stringify(previous.last_error)) {
       this.addEvent('ERROR', frame.last_error.reason || 'Hardware command failed', 'error');
