@@ -253,9 +253,10 @@ commands over the existing `/realtime_hw` WebSocket.
 
 The Hardware status column also provides `Record` / `Stop recording` and
 `Save WAV` for serial hardware. `Save WAV` stops a running scan first, then
-downloads. Firmware captures 48 kHz mono PCM16 through the onboard MAX9867,
+downloads. Firmware captures 48 kHz stereo PCM16 through the onboard MAX9867,
 buffers up to 30 seconds in APS6404, and transfers finalized audio with exact
-byte framing and CRC32. The backend packages verified PCM as a downloadable WAV.
+byte framing and CRC32. The backend packages verified PCM as a stereo WAV with
+a JSON sidecar.
 
 ### Selected DSP program
 
