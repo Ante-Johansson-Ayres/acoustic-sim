@@ -16,14 +16,14 @@ import { levelToUnit, rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
 import { direction } from './geometry.js';
 import { cellDirection, gridPosition, surfaceUnit } from './field.js';
-import { DEPTH, PinStyle, RidgeStyle, SurfaceStyle, pinAt } from './fieldstyles.js';
+import { DEPTH, PointStyle, SurfaceStyle } from './fieldstyles.js';
 
 const RADIUS = 2.0;
 const FLOOR_Y = -1.45;
 const TARGET = new THREE.Vector3(0, -0.1, 1.1);
 const DISTANCE = 6.2;
 const EASE = 0.3;
-const PEAK_SPREAD = 2 * 0.45 * 0.45;   // 2σ² of the source peak, in cells
+const PEAK_SPREAD = 2 * 0.8 * 0.8;     // 2σ² of the hill at the source, in cells
 
 export const CAMERA_VIEWS = {
   behind: {yaw: -14, pitch: 15},
@@ -94,7 +94,7 @@ export class FieldScene {
     this.array = new THREE.Group();
     this.tiles = new THREE.Group();
     this.marks = new THREE.Group();
-    this.styles = {surface: new SurfaceStyle(RADIUS), ridges: new RidgeStyle(RADIUS), pins: new PinStyle(RADIUS)};
+    this.styles = {surface: new SurfaceStyle(RADIUS), points: new PointStyle(RADIUS)};
     this.viewport.scene.add(this.room, this.array, this.tiles, this.marks, ...Object.values(this.styles).map((s) => s.group));
     this.buildRoom();
 
@@ -211,17 +211,15 @@ export class FieldScene {
 
   /**
    * Height 0..1 at a fractional grid position: the levels interpolated between
-   * the beams, with a sharper peak at the source's interpolated direction.
+   * the beams, blended into a smooth hill topped at the source's interpolated direction.
    */
   height(column, row) {
-    let value = surfaceUnit(this.field, this.shown, column, row);
+    const value = surfaceUnit(this.field, this.shown, column, row);
     const peak = this.peak;
-    if (peak.level > 0) {
-      const dc = column - peak.column;
-      const dr = row - peak.row;
-      value = Math.max(value, peak.level * Math.exp(-(dc * dc + dr * dr) / PEAK_SPREAD));
-    }
-    return value;
+    if (peak.level <= 0) return value;
+    const dc = column - peak.column;
+    const dr = row - peak.row;
+    return value + (peak.level - value) * Math.exp(-(dc * dc + dr * dr) / PEAK_SPREAD);
   }
 
   updateStyle() {
@@ -258,7 +256,7 @@ export class FieldScene {
     if (this.markerPoint) place(this.markerLabel, this.markerPoint, 16, 0);
   }
 
-  /** state: {floor, session, style: 'tiles' | 'surface' | 'ridges' | 'pins'} */
+  /** state: {floor, session, style: 'tiles' | 'surface' | 'points'} */
   render(field, {floor, session, style = 'tiles'}) {
     if (!field) return;
     const changed = this.field?.key !== field.key || this.style !== style;
@@ -311,7 +309,7 @@ export class FieldScene {
       let reach = RADIUS * 0.985;
       if (!tiles && this.shown) {
         const at = gridPosition(field, marker.azimuth, marker.elevation);
-        const lift = at ? pinAt(field, at.column, at.row) * this.height(at.column, at.row) : 0;
+        const lift = at ? this.height(at.column, at.row) : 0;
         reach = RADIUS * (1 - DEPTH * lift) - 0.04;
       }
       const tip = toScene(direction(marker.azimuth, marker.elevation), reach);

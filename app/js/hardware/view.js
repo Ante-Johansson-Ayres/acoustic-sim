@@ -23,10 +23,10 @@ const TABS = [['beam', 'Manual beam'], ['measure', 'Measurement'], ['tone', 'Ton
 const CAPTIONS = {
   bank: 'Each tile is a direction the array listens in. Brighter is louder.',
   sectors: 'Each tile is a sector of the diagnostic scan. Faded tiles are older than 5 s.',
-  surface: 'The sheet bulges toward the array where the sound is louder; height and colour show the same level.',
-  ridges: 'Each line crosses the field at one elevation and bulges toward the array where the sound is louder.',
-  pins: 'Each pin pushes toward the array by the level in its direction.',
+  surface: 'The surface bulges toward the array where the sound is louder; height and colour show the same level.',
+  points: 'Each point moves toward the array where the sound is louder; height and colour show the same level.',
 };
+const STYLES = [['tiles', 'Tiles'], ['surface', 'Surface'], ['points', 'Point cloud']];
 
 function loadPrefs() {
   try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch (_) { return {}; }
@@ -46,6 +46,7 @@ function fieldSpan(field) {
 export function createView(container, {session}) {
   const prefs = {view: '3d', camera: 'behind', style: 'tiles', floor: -40, values: 'strongest', log: 'open', ...loadPrefs()};
   if (!['3d', 'map'].includes(prefs.view)) prefs.view = '3d';
+  if (!STYLES.some(([key]) => key === prefs.style)) prefs.style = 'tiles';
   const state = {visible: false, kind: null, field: null, hover: null, tab: null};
 
   const acoustic = new AcousticScene();
@@ -101,7 +102,7 @@ export function createView(container, {session}) {
   const valuesPick = h('label', {class: 'pick'}, 'Values', valuesSelect);
   const styleSelect = h('select', {class: 'select select--sm', 'aria-label': 'How the 3D view draws the field',
     onChange: () => { prefs.style = styleSelect.value; savePrefs(prefs); render(true); }},
-  options([['tiles', 'Tiles'], ['surface', 'Surface'], ['ridges', 'Ridgelines'], ['pins', 'Pin art']], prefs.style));
+  options(STYLES, prefs.style));
   const stylePick = h('label', {class: 'pick'}, 'Show', styleSelect);
   const fieldHead = h('header', {class: 'panel__head'}, h('h2', {class: 'label'}, 'Field'),
     h('div', {class: 'tools'}, viewSeg.el, cameraSeg.el, h('label', {class: 'pick'}, 'Floor', floorSelect), stylePick, valuesPick));
