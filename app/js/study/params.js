@@ -70,6 +70,7 @@ function firResponseDb(t1, t2, f) {
 
 const tauFromAlpha = (alpha) => (alpha > 0 && alpha < 1 ? -1000 / (FS * Math.log(1 - alpha)) : NaN);
 const alphaFromTau = (ms) => 1 - Math.exp(-1 / (ms * FS / 1000));
+const NO_DETECTOR = 'The register map has no scan level detector, so this cannot be written. Check level_detector in the export\'s beam_table_2d.json.';
 
 export function parametersScreen({canWrite}) {
   const state = {editor: 'taper', group: 'gains', showAll: false, query: '', taper: null, norm: 'level', freq: 2000, sel: 17,
@@ -359,7 +360,7 @@ export function parametersScreen({canWrite}) {
         return;
       }
       const param = detectorParam({tau: 'TCONST', hold: 'hold', decay: 'decay'}[key]);
-      if (!param) return;
+      if (!param) { setText(error, NO_DETECTOR); return; }
       let word;
       if (key === 'tau') {
         if (!(value >= 0.1 && value <= 500)) { setText(error, 'Enter a time from 0.1 to 500 ms.'); return; }
@@ -378,7 +379,7 @@ export function parametersScreen({canWrite}) {
       const tc = detectorParam('TCONST');
       const hold = detectorParam('hold');
       const decay = detectorParam('decay');
-      if (!tc) return;
+      if (!tc) { setText(fields.tau.note, NO_DETECTOR); return; }
       const tauDev = tauFromAlpha(dsp.deviceWord(tc.address) / ONE);
       const tauNew = tauFromAlpha(dsp.proposedWord(tc.address) / ONE);
       const settleDev = (dsp.status?.settings?.settle_us ?? 1250) / 1000;

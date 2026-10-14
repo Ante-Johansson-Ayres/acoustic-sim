@@ -30,6 +30,7 @@ MAX_WORDS_PER_COMMAND = 5
 FIRMWARE_DIR = Path(__file__).resolve().parent.parent / "MAX78002"
 DEFAULT_EXPORT_FOLDER = "SigmaStudioExport"
 EXPORT_SUFFIX = "_ADAU1467_0.json"
+BANK_PREFIX = "Bank_"
 
 # First microphone (DSP index) behind channel 0 of each mute block, from the
 # Golden Image schematic. Confirm with the DSP owner when the project changes.
@@ -83,8 +84,12 @@ def export_path() -> Path:
     return exports[0]
 
 
-def _scan_detector(labels: list[str]) -> str | None:
-    """The detector the firmware reads during a scan, chosen as the table generator does."""
+def _scan_detector(labels: list[str], contract_choice: str | None = None) -> str | None:
+    """The detector the firmware reads during a scan: the generator's choice from the contract,
+    else its rule (*_Beam1, or the only detector besides the bank's)."""
+    if contract_choice in labels:
+        return contract_choice
+    labels = [label for label in labels if not label.startswith(BANK_PREFIX)]
     beam1 = [label for label in labels if label.endswith("_Beam1")]
     if len(beam1) == 1:
         return beam1[0]
@@ -152,6 +157,14 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
     except (KeyError, IndexError, TypeError) as error:
         raise ValueError("not a SigmaStudio ADAU146x export") from error
 
+    contract = {}
+    contract_path = path.parent / "beam_table_2d.json"
+    if contract_path.exists():
+        try:
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        except ValueError:
+            contract = {}
+
     # AddressMap is keyed by the block's internal name, not its label; a
     # detector's TCONST address links the two (as in the beam table generator).
     address_map = schematic.get("AddressMap") or {}
@@ -166,7 +179,7 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
             rms = rms_by_tconst.get(str(param.get("Address")))
             if param.get("Name") == "TCONST" and rms is not None:
                 detectors[str(module.get("AlgoName", ""))] = int(rms["Address"])
-    scan_detector = _scan_detector(sorted(detectors))
+    scan_detector = _scan_detector(sorted(detectors), contract.get("level_detector"))
 
     parameters = []
     for module in modules:
@@ -223,12 +236,10 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
         })
 
     map_hash = None
-    contract_path = path.parent / "beam_table_2d.json"
-    if contract_path.exists():
-        try:
-            map_hash = json.loads(contract_path.read_text(encoding="utf-8"))["study"]["map_hash"]
-        except (KeyError, TypeError, ValueError):
-            pass
+    try:
+        map_hash = contract["study"]["map_hash"]
+    except (KeyError, TypeError):
+        pass
 
     return {
         "schema": SCHEMA,

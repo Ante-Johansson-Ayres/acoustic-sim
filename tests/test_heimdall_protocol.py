@@ -492,8 +492,9 @@ def test_acoustic_level_provider_uses_the_same_emulator_policy():
         def metadata(self):
             return {"acoustic_cache_id": "test-cache", "acoustic_calibrated": False}
 
+    # A frozen clock: wall-clock sleep jitter would otherwise vary the detector carry-over between sectors.
     emulator = EmulatorHeimdallTransport(
-        rows=2, columns=3, sector_time_s=0.0, level_provider=Provider()
+        rows=2, columns=3, sector_time_s=0.0, level_provider=Provider(), clock=lambda: 0.0
     )
     emulator.start()
     try:

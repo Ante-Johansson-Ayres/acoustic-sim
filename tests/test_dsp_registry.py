@@ -162,6 +162,36 @@ def test_registry_reads_the_contract_map_hash(monkeypatch):
     assert dsp_registry.load_registry()["map_hash"] == contract["study"]["map_hash"]
 
 
+def test_bank_program_scan_detector_is_the_contracts(monkeypatch):
+    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", "SigmaStudioBank")
+    contract = json.loads(
+        (dsp_registry.selected_export_dir() / "beam_table_2d.json").read_text(encoding="utf-8"))
+    registry = dsp_registry.load_registry()
+    detector = [p for p in registry["parameters"] if p["group"] == "detector"]
+    assert {p["block"] for p in detector} == {contract["level_detector"]}
+    assert {p["name"] for p in detector} >= {"TCONST", "hold", "decay"}
+    assert all(p["writable"] for p in detector)
+    assert registry["level_readback_address"] == contract["level_readback_address"]
+
+
+def test_bank_detectors_never_count_as_the_scan_detector(tmp_path):
+    detectors = {"SingleBandwNumericalDisplay_3": 20, "Bank_Beam_0_0": 30, "Bank_Beam_0_1": 40}
+    parameters = {label: [("TCONST", address, 1, "FixPoint8d24", [0])] for label, address in detectors.items()}
+    address_map = {}
+    for index, address in enumerate(detectors.values()):
+        address_map[f"Det{index}TCONST"] = {"Address": address}
+        address_map[f"Det{index}rms"] = {"Address": address + 3}
+    registry = dsp_registry.load_registry(_export(tmp_path, parameters, address_map))
+    by_block = {p["block"]: p for p in registry["parameters"]}
+    assert by_block["SingleBandwNumericalDisplay_3"]["group"] == "detector"
+    assert by_block["Bank_Beam_0_0"]["group"] == "other"
+    assert registry["level_readback_address"] == 23
+
+    (tmp_path / "beam_table_2d.json").write_text(json.dumps({"level_detector": "Bank_Beam_0_1"}))
+    registry = dsp_registry.load_registry(tmp_path / "export.json")
+    assert registry["level_readback_address"] == 43
+
+
 def test_setting_limits_and_defaults_match_firmware():
     config = (dsp_registry.FIRMWARE_DIR / "heimdall_config.h").read_text(encoding="utf-8")
     names = {name: int(value) for name, value in
