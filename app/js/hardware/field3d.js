@@ -1,10 +1,10 @@
 /**
  * field3d.js — the console's 3D view: the array on its stand, the field on a
  * dome in front of it, and a beam from the array to the source. The field is
- * drawn as one tile per beam (bank) or sector, or as a smooth surface that
- * bulges toward the array where the sound is louder. Both come from field.js,
- * so the bank's even sine grid and the sector grid draw the same way. Drag to
- * orbit; click the field to pick a beam or sector.
+ * drawn as one tile per beam (bank) or sector, or as a height field that
+ * bulges toward the array where the sound is louder (fieldstyles.js). All of
+ * it comes from field.js, so the bank's even sine grid and the sector grid
+ * draw the same way. Drag to orbit; click the field to pick a beam or sector.
  *
  * Scene axes: x = LEFT, y = up, z = forward, so a direction to the right
  * lands on the right of the screen when the camera is behind the array.
@@ -15,22 +15,16 @@ import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { levelToUnit, rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
 import { direction } from './geometry.js';
-import { cellDirection, gridDirection, gridPosition, surfaceUnit } from './field.js';
+import { cellDirection, gridPosition, surfaceUnit } from './field.js';
+import { DEPTH, PinStyle, RidgeStyle, SurfaceStyle, pinAt } from './fieldstyles.js';
 
 const RADIUS = 2.0;
 const FLOOR_Y = -1.45;
 const TARGET = new THREE.Vector3(0, -0.1, 1.1);
 const DISTANCE = 6.2;
-const SURFACE_DEPTH = 0.5;          // a full-scale lift pulls the sheet halfway to the array
-const SURFACE_STEPS = 12;           // vertices per cell along each axis
-const SURFACE_EASE = 0.3;
-const LIFT_DEADBAND = 0.05;         // levels this close to the background (2 dB at a −40 dBFS floor) stay flat
+const EASE = 0.3;
+const PEAK_SPREAD = 2 * 0.45 * 0.45;   // 2σ² of the source peak, in cells
 
-/** 1 inside the field, easing to 0 over the outer half cell so the sheet's rim stays on the dome. */
-function pinAt(field, column, row) {
-  const t = Math.max(0, Math.min(1, Math.min(column, field.columns - column, row, field.rows - row) / 0.5));
-  return t * t * (3 - 2 * t);
-}
 export const CAMERA_VIEWS = {
   behind: {yaw: -14, pitch: 15},
   above: {yaw: 0, pitch: 62},
@@ -44,7 +38,6 @@ const COLORS = {
 const toScene = ([right, up, forward], radius = 1) => new THREE.Vector3(-right * radius, up * radius, forward * radius);
 const flat = (color, extra = {}) => new THREE.MeshBasicMaterial({color, side: THREE.DoubleSide, ...extra});
 const srgb = (rgb) => new THREE.Color().setRGB(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255, THREE.SRGBColorSpace);
-const RAMP_LUT = Array.from({length: 256}, (_, i) => srgb(rampColor(i / 255)));
 
 function arrow(value, positive, negative) {
   return !Number.isFinite(value) || Math.abs(value) < 0.5 ? '' : ` ${value > 0 ? positive : negative}`;
@@ -100,16 +93,18 @@ export class FieldScene {
     this.room = new THREE.Group();
     this.array = new THREE.Group();
     this.tiles = new THREE.Group();
-    this.surface = new THREE.Group();
     this.marks = new THREE.Group();
-    this.viewport.scene.add(this.room, this.array, this.tiles, this.surface, this.marks);
+    this.styles = {surface: new SurfaceStyle(RADIUS), ridges: new RidgeStyle(RADIUS), pins: new PinStyle(RADIUS)};
+    this.viewport.scene.add(this.room, this.array, this.tiles, this.marks, ...Object.values(this.styles).map((s) => s.group));
     this.buildRoom();
 
     this.key = '';
-    this.surfaceKey = '';
     this.style = 'tiles';
-    this.shown = null;                // eased per-cell colour levels, then per-cell lifts
-    this.wanted = null;               // the same from the latest frame, 0..1
+    this.shown = null;                // eased per-cell levels, 0..1 above the floor
+    this.wanted = null;               // the same from the latest frame
+    this.peak = {column: 0, row: 0, level: 0};      // eased source peak at its interpolated direction
+    this.peakWanted = {column: 0, row: 0, level: 0};
+    this.heightAt = (column, row) => this.height(column, row);
     this.arrayKey = '';
     this.tileMeshes = [];
     this.field = null;
@@ -124,7 +119,7 @@ export class FieldScene {
 
     this.viewport.onFrame = () => {
       this.placeLabels();
-      this.easeSurface();
+      this.easeField();
     };
     this.bindPointer();
     this.setView('behind');
@@ -214,99 +209,39 @@ export class FieldScene {
     ];
   }
 
-  /** One vertex grid over the whole field; positions and colours are rewritten as the levels change. */
-  buildSurface(field) {
-    if (field.key === this.surfaceKey) return;
-    this.surfaceKey = field.key;
-    clearGroup(this.surface);
-    const nx = field.columns * SURFACE_STEPS;
-    const ny = field.rows * SURFACE_STEPS;
-    const count = (nx + 1) * (ny + 1);
-    const grid = new Float32Array(count * 2);
-    const pins = new Float32Array(count);
-    const directions = new Float32Array(count * 3);
-    for (let j = 0; j <= ny; j++) {
-      for (let i = 0; i <= nx; i++) {
-        const k = j * (nx + 1) + i;
-        grid[2 * k] = i / SURFACE_STEPS;
-        grid[2 * k + 1] = j / SURFACE_STEPS;
-        pins[k] = pinAt(field, i / SURFACE_STEPS, j / SURFACE_STEPS);
-        const [right, up, forward] = gridDirection(field, i / SURFACE_STEPS, j / SURFACE_STEPS);
-        directions.set([-right, up, forward], 3 * k);
-      }
+  /**
+   * Height 0..1 at a fractional grid position: the levels interpolated between
+   * the beams, with a sharper peak at the source's interpolated direction.
+   */
+  height(column, row) {
+    let value = surfaceUnit(this.field, this.shown, column, row);
+    const peak = this.peak;
+    if (peak.level > 0) {
+      const dc = column - peak.column;
+      const dr = row - peak.row;
+      value = Math.max(value, peak.level * Math.exp(-(dc * dc + dr * dr) / PEAK_SPREAD));
     }
-    const faces = [];
-    const lines = [];
-    const every = SURFACE_STEPS;
-    for (let j = 0; j <= ny; j++) {
-      for (let i = 0; i <= nx; i++) {
-        const k = j * (nx + 1) + i;
-        if (i < nx && j < ny) faces.push(k, k + 1, k + nx + 1, k + 1, k + nx + 2, k + nx + 1);
-        if (i < nx && j % every === 0) lines.push(k, k + 1);
-        if (j < ny && i % every === 0) lines.push(k, k + nx + 1);
-      }
-    }
-    const position = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
-    const color = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
-    const skin = new THREE.BufferGeometry();
-    skin.setAttribute('position', position);
-    skin.setAttribute('color', color);
-    skin.setIndex(faces);
-    const wire = new THREE.BufferGeometry();
-    wire.setAttribute('position', position);
-    wire.setIndex(lines);
-    // Faces sit slightly behind the grid lines so the lines do not flicker.
-    const shade = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide,
-      color: new THREE.Color().setRGB(0.78, 0.78, 0.78), polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1});
-    this.surface.add(new THREE.Mesh(skin, shade),
-      new THREE.LineSegments(wire, new THREE.LineBasicMaterial({color: '#ffffff', transparent: true, opacity: 0.22})));
-    this.surfaceMesh = {skin, wire, position, color, grid, pins, directions};
-    this.shown = null;
+    return value;
   }
 
-  updateSurface() {
-    const surface = this.surfaceMesh;
-    if (!surface || !this.shown || !this.field) return;
-    const {position, color, grid, pins, directions} = surface;
-    const cells = this.field.cells.length;
-    const levels = this.shown.subarray(0, cells);
-    const lifts = this.shown.subarray(cells);
-    const p = position.array;
-    const c = color.array;
-    for (let k = 0; k < grid.length / 2; k++) {
-      const level = surfaceUnit(this.field, levels, grid[2 * k], grid[2 * k + 1]);
-      const lift = pins[k] > 0 ? pins[k] * surfaceUnit(this.field, lifts, grid[2 * k], grid[2 * k + 1]) : 0;
-      const r = RADIUS * (1 - SURFACE_DEPTH * lift);
-      const rgb = RAMP_LUT[Math.round(level * 255)];
-      p[3 * k] = directions[3 * k] * r;
-      p[3 * k + 1] = directions[3 * k + 1] * r;
-      p[3 * k + 2] = directions[3 * k + 2] * r;
-      c[3 * k] = rgb.r;
-      c[3 * k + 1] = rgb.g;
-      c[3 * k + 2] = rgb.b;
-    }
-    position.needsUpdate = true;
-    color.needsUpdate = true;
-    surface.skin.computeVertexNormals();
-    surface.skin.computeBoundingSphere();
-    surface.wire.computeBoundingSphere();
+  updateStyle() {
+    const style = this.styles[this.style];
+    if (style && this.shown && this.field) style.update(this.heightAt);
   }
 
-  /** Glide the surface toward the latest levels, one step per rendered frame. */
-  easeSurface() {
-    if (this.style !== 'surface' || !this.shown || this.wanted?.length !== this.shown.length) return;
+  /** Glide the height field toward the latest levels, one step per rendered frame. */
+  easeField() {
+    if (!this.styles[this.style] || !this.shown || this.wanted?.length !== this.shown.length) return;
     let moving = false;
-    for (let i = 0; i < this.shown.length; i++) {
-      const step = this.wanted[i] - this.shown[i];
-      if (Math.abs(step) > 0.002) {
-        this.shown[i] += step * SURFACE_EASE;
-        moving = true;
-      } else {
-        this.shown[i] = this.wanted[i];
-      }
-    }
+    const glide = (from, to) => {
+      if (Math.abs(to - from) <= 0.002) return to;
+      moving = true;
+      return from + (to - from) * EASE;
+    };
+    for (let i = 0; i < this.shown.length; i++) this.shown[i] = glide(this.shown[i], this.wanted[i]);
+    for (const key of ['column', 'row', 'level']) this.peak[key] = glide(this.peak[key], this.peakWanted[key]);
     if (moving) {
-      this.updateSurface();
+      this.updateStyle();
       this.viewport.requestRender();
     }
   }
@@ -323,16 +258,17 @@ export class FieldScene {
     if (this.markerPoint) place(this.markerLabel, this.markerPoint, 16, 0);
   }
 
-  /** state: {floor, session, style: 'tiles' | 'surface'} */
+  /** state: {floor, session, style: 'tiles' | 'surface' | 'ridges' | 'pins'} */
   render(field, {floor, session, style = 'tiles'}) {
     if (!field) return;
+    const changed = this.field?.key !== field.key || this.style !== style;
     this.field = field;
-    this.style = style;
+    this.style = this.styles[style] ? style : 'tiles';
     this.build(field);
     this.setArray(session.arrayLayout);
-    const tiles = style !== 'surface';
+    const tiles = this.style === 'tiles';
     this.tiles.visible = tiles;
-    this.surface.visible = !tiles;
+    for (const [name, entry] of Object.entries(this.styles)) entry.group.visible = name === this.style;
     if (tiles) {
       for (const mesh of this.tileMeshes) {
         const cell = field.cells[mesh.userData.index];
@@ -341,14 +277,19 @@ export class FieldScene {
         mesh.material.opacity = measured ? (cell.fresh ? 0.96 : 0.38) : 0.35;
       }
     } else {
-      this.buildSurface(field);
-      // Colour shows every level; only what stands above the background (the map's median) lifts the sheet.
-      const levels = field.cells.map((cell) => levelToUnit(cell.level, floor) ?? 0);
-      const background = levelToUnit(field.background, floor) ?? 0;
-      this.wanted = Float32Array.from([...levels, ...levels.map((level) => Math.max(0, level - background - LIFT_DEADBAND))]);
+      this.styles[this.style].build(field);
+      this.wanted = Float32Array.from(field.cells, (cell) => levelToUnit(cell.level, floor) ?? 0);
+      const source = field.marker;
+      const at = source ? gridPosition(field, source.azimuth, source.elevation) : null;
+      this.peakWanted = at
+        ? {column: at.column, row: at.row, level: levelToUnit(source.cell?.level, floor) ?? 0}
+        : {...this.peak, level: 0};
       if (this.shown?.length !== this.wanted.length) {
         this.shown = Float32Array.from(this.wanted);
-        this.updateSurface();
+        this.peak = {...this.peakWanted};
+        this.updateStyle();
+      } else if (changed) {
+        this.updateStyle();
       }
     }
 
@@ -370,9 +311,8 @@ export class FieldScene {
       let reach = RADIUS * 0.985;
       if (!tiles && this.shown) {
         const at = gridPosition(field, marker.azimuth, marker.elevation);
-        const lifts = this.shown.subarray(field.cells.length);
-        const lift = at ? pinAt(field, at.column, at.row) * surfaceUnit(field, lifts, at.column, at.row) : 0;
-        reach = RADIUS * (1 - SURFACE_DEPTH * lift) - 0.04;
+        const lift = at ? pinAt(field, at.column, at.row) * this.height(at.column, at.row) : 0;
+        reach = RADIUS * (1 - DEPTH * lift) - 0.04;
       }
       const tip = toScene(direction(marker.azimuth, marker.elevation), reach);
       const up = new THREE.Vector3(0, 1, 0);

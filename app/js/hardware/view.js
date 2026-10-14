@@ -23,7 +23,9 @@ const TABS = [['beam', 'Manual beam'], ['measure', 'Measurement'], ['tone', 'Ton
 const CAPTIONS = {
   bank: 'Each tile is a direction the array listens in. Brighter is louder.',
   sectors: 'Each tile is a sector of the diagnostic scan. Faded tiles are older than 5 s.',
-  surface: 'Directions louder than the background lift toward the array. Colour shows every level, the background too.',
+  surface: 'The sheet bulges toward the array where the sound is louder; height and colour show the same level.',
+  ridges: 'Each line crosses the field at one elevation and bulges toward the array where the sound is louder.',
+  pins: 'Each pin pushes toward the array by the level in its direction.',
 };
 
 function loadPrefs() {
@@ -99,7 +101,7 @@ export function createView(container, {session}) {
   const valuesPick = h('label', {class: 'pick'}, 'Values', valuesSelect);
   const styleSelect = h('select', {class: 'select select--sm', 'aria-label': 'How the 3D view draws the field',
     onChange: () => { prefs.style = styleSelect.value; savePrefs(prefs); render(true); }},
-  options([['tiles', 'Tiles'], ['surface', 'Surface']], prefs.style));
+  options([['tiles', 'Tiles'], ['surface', 'Surface'], ['ridges', 'Ridgelines'], ['pins', 'Pin art']], prefs.style));
   const stylePick = h('label', {class: 'pick'}, 'Show', styleSelect);
   const fieldHead = h('header', {class: 'panel__head'}, h('h2', {class: 'label'}, 'Field'),
     h('div', {class: 'tools'}, viewSeg.el, cameraSeg.el, h('label', {class: 'pick'}, 'Floor', floorSelect), stylePick, valuesPick));
@@ -212,7 +214,7 @@ export function createView(container, {session}) {
     const field = state.field;
     const cell = field && state.hover !== null ? field.cells[state.hover] : null;
     if (!cell) {
-      setText(caption, !field ? '' : prefs.view === '3d' && prefs.style === 'surface' ? CAPTIONS.surface : CAPTIONS[field.kind]);
+      setText(caption, !field ? '' : prefs.view === '3d' && CAPTIONS[prefs.style] ? CAPTIONS[prefs.style] : CAPTIONS[field.kind]);
       return;
     }
     const bank = field.kind === 'bank';

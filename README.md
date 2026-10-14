@@ -67,9 +67,10 @@ Open the Hardware tab and press `Live` to listen in every bank direction at
 once, or pick a sector scan under `Diagnostic scans` (`Sweep once`,
 `Continuous`, `Track`); `Stop` ends either. The Field shows the array and one
 tile per beam in 3D, with a beam to the source, or the same tiles as a flat
-`Map`. `Show` next to `Floor` switches the 3D view between tiles and a smooth
-`Surface`: a sheet fixed on the dome that lifts toward the array where the
-sound stands above the background, while its colour still shows the background. A fixed beam is in the `Manual beam` drawer. Without `--emulator`, pick `Emulator` in the
+`Map`. `Show` next to `Floor` draws the 3D field as tiles, or as a height field
+that bulges toward the array where the sound is louder: a continuous `Surface`,
+`Ridgelines` across the field, or `Pin art`. Height and colour show the same
+level, with a sharper peak at the source's interpolated direction. A fixed beam is in the `Manual beam` drawer. Without `--emulator`, pick `Emulator` in the
 connection panel and click `Start emulator`; its grid defaults to the deployed
 7x7 table over ±40°. The emulator supplies a moving target and is suitable for
 GUI, protocol, reconnect, and command testing.
