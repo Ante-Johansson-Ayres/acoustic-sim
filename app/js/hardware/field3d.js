@@ -15,16 +15,18 @@ import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { levelToUnit, rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
 import { direction } from './geometry.js';
-import { cellDirection, gridPosition, median, surfaceUnit } from './field.js';
+import { cellDirection, gridDirection, gridPosition, median, surfaceUnit } from './field.js';
 import { DEPTH, PointStyle, SurfaceStyle, pinAt } from './fieldstyles.js';
 
 const RADIUS = 2.0;
 const FLOOR_Y = -1.45;
 const TARGET = new THREE.Vector3(0, -0.1, 1.1);
 const DISTANCE = 6.2;
-const EASE = 0.3;
+const EASE = 0.15;
 const PEAK_SPREAD = 2 * 0.8 * 0.8;     // 2σ² of the hill at the source, in cells
 const REST = 0.1;                      // relief of the background, so quieter directions can still dip below it
+const KNEE = 0.05;                     // width of the soft floor under the relief
+const FOCUS = 2;                       // the field lifts toward a point this many radii behind the array
 
 export const CAMERA_VIEWS = {
   behind: {yaw: -14, pitch: 15},
@@ -228,12 +230,16 @@ export class FieldScene {
 
   /** How far a level lifts the field: measured from the background, so the sheet does not heave with it. */
   relief(value) {
-    return Math.max(0, Math.min(1, value - this.base + REST));
+    const x = value - this.base + REST;
+    return Math.min(1, (x + Math.sqrt(x * x + KNEE * KNEE)) / 2);
   }
 
   updateStyle() {
     const style = this.styles[this.style];
-    if (style && this.shown && this.field) style.update(this.levelAt, this.reliefOf);
+    if (!style || !this.shown || !this.field) return;
+    const [right, up, forward] = gridDirection(this.field, this.peak.column, this.peak.row);
+    const behind = -FOCUS * RADIUS;
+    style.update(this.levelAt, this.reliefOf, [-right * behind, up * behind, forward * behind]);
   }
 
   /** Glide the height field toward the latest levels, one step per rendered frame. */
@@ -290,10 +296,12 @@ export class FieldScene {
       this.baseWanted = median(Array.from(this.wanted)) ?? 0;
       const source = field.marker;
       const at = source ? gridPosition(field, source.azimuth, source.elevation) : null;
+      const first = this.shown?.length !== this.wanted.length;
+      const rest = first ? {column: field.columns / 2, row: field.rows / 2} : this.peak;
       this.peakWanted = at
         ? {column: at.column, row: at.row, level: levelToUnit(source.cell?.level, floor) ?? 0}
-        : {...this.peak, level: 0};
-      if (this.shown?.length !== this.wanted.length) {
+        : {column: rest.column, row: rest.row, level: 0};
+      if (first) {
         this.shown = Float32Array.from(this.wanted);
         this.peak = {...this.peakWanted};
         this.base = this.baseWanted;

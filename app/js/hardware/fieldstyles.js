@@ -11,7 +11,7 @@ import { clearGroup } from '../shared/viewport3d.js';
 import { rampColor } from '../shared/colormap.js';
 import { gridDirection } from './field.js';
 
-export const DEPTH = 0.65;          // a full-scale level pulls the field this fraction of the radius toward the array
+export const DEPTH = 0.65;          // a full relief pulls the field this fraction of the radius toward the array
 const BANDS = 20;
 
 const LUT = Array.from({length: 256}, (_, i) => {
@@ -33,9 +33,9 @@ function bandTexture() {
   return texture;
 }
 
-/** 1 inside the field, easing to 0 over the outer half cell so the rim stays on the dome. */
+/** 1 inside the field, easing to 0 over the outer cell so the rim stays on the dome without a steep wall. */
 export function pinAt(field, column, row) {
-  const t = Math.max(0, Math.min(1, Math.min(column, field.columns - column, row, field.rows - row) / 0.5));
+  const t = Math.max(0, Math.min(1, Math.min(column, field.columns - column, row, field.rows - row)));
   return t * t * (3 - 2 * t);
 }
 
@@ -54,15 +54,25 @@ function samplePoints(field, positions) {
   return {n, positions, pins, directions, values: new Float32Array(n)};
 }
 
-/** Moves each sample toward the array by its relief, keeping the levels (for colour) in `samples.values`. */
-function displace(samples, level, relief, radius, out) {
+/**
+ * Moves each sample toward `focus` (a point far behind the array, on the source's axis) by its relief,
+ * keeping the levels (for colour) in `samples.values`. Paths from one point never cross, so the sheet
+ * cannot fold; the far focus keeps a hill's width as it rises, and the hilltop stays on the beam.
+ */
+function displace(samples, level, relief, focus, radius, out) {
   const {n, positions, pins, directions, values} = samples;
   for (let k = 0; k < n; k++) {
     values[k] = level(positions[2 * k], positions[2 * k + 1]);
-    const r = radius * (1 - DEPTH * pins[k] * relief(values[k]));
-    out[3 * k] = directions[3 * k] * r;
-    out[3 * k + 1] = directions[3 * k + 1] * r;
-    out[3 * k + 2] = directions[3 * k + 2] * r;
+    const x = directions[3 * k] * radius;
+    const y = directions[3 * k + 1] * radius;
+    const z = directions[3 * k + 2] * radius;
+    const dx = focus[0] - x;
+    const dy = focus[1] - y;
+    const dz = focus[2] - z;
+    const step = DEPTH * radius * pins[k] * relief(values[k]) / Math.hypot(dx, dy, dz);
+    out[3 * k] = x + dx * step;
+    out[3 * k + 1] = y + dy * step;
+    out[3 * k + 2] = z + dz * step;
   }
 }
 
@@ -112,8 +122,8 @@ export class SurfaceStyle {
       new THREE.LineSegments(this.outline, new THREE.LineBasicMaterial({color: '#000000'})));
   }
 
-  update(level, relief) {
-    displace(this.samples, level, relief, this.radius, this.position.array);
+  update(level, relief, focus) {
+    displace(this.samples, level, relief, focus, this.radius, this.position.array);
     const {n, values} = this.samples;
     for (let k = 0; k < n; k++) this.uv.array[2 * k] = values[k];
     this.position.needsUpdate = true;
@@ -155,8 +165,8 @@ export class PointStyle {
     this.group.add(this.points);
   }
 
-  update(level, relief) {
-    displace(this.samples, level, relief, this.radius, this.placed);
+  update(level, relief, focus) {
+    displace(this.samples, level, relief, focus, this.radius, this.placed);
     const {n, values} = this.samples;
     const p = this.placed;
     for (let k = 0; k < n; k++) {
