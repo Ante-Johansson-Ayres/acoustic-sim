@@ -56,7 +56,10 @@ h1, h2, h3, p { margin: 0; }
 
 .app-header__left { display: flex; align-items: center; gap: 32px; align-self: stretch; }
 
-.app-brand { font-size: 15px; font-weight: 600; }
+.app-brand { display: flex; align-items: center; gap: 14px; font: 800 15px var(--font-display); letter-spacing: 0.22em; white-space: nowrap; }
+.app-brand__logo { height: 20px; filter: brightness(0) invert(1); }
+.app-brand__rule { width: 1px; height: 22px; background: var(--line-strong); }
+.app-brand small { margin-left: 12px; font: 500 12px var(--font-sans); letter-spacing: 0; color: var(--subtle); }
 
 .app-nav { display: flex; gap: 24px; align-self: stretch; }
 
