@@ -23,7 +23,7 @@ const TABS = [['beam', 'Manual beam'], ['measure', 'Measurement'], ['tone', 'Ton
 const CAPTIONS = {
   bank: 'Each tile is a direction the array listens in. Brighter is louder.',
   sectors: 'Each tile is a sector of the diagnostic scan. Faded tiles are older than 5 s.',
-  surface: 'Louder directions bulge toward the array; the ripples elsewhere are the background noise.',
+  surface: 'Directions louder than the background lift toward the array. Colour shows every level, the background too.',
 };
 
 function loadPrefs() {
