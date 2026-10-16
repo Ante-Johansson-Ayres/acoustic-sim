@@ -13,16 +13,22 @@ import { clockTime, deg, fileStamp, num } from '../shared/format.js';
 import { download } from '../shared/dom.js';
 import { apiJson } from '../shared/api.js';
 import { dsp } from './dsp.js';
-import { runCsv } from './runcsv.js';
-import { arrayGainDb, fitDetectorDecay, refinePeak, refinePeak2d, remainingFraction, signalDb, snrDb } from './analysis.js';
+import { captureSettings, runCsv } from './runcsv.js';
+import { MIN_SNR_DB, SCALE_MARGIN_DB, arrayGainDb, detectorScale, dynamicRange, fitDetectorDecay, refinePeak,
+  refinePeak2d, remainingFraction, snrDb, surveyRows } from './analysis.js';
 import { newMeasurementDb } from '../hardware/replies.js';
 
 const RUNS_KEY = 'heimdall.study.runs';
 const put = (el, ...kids) => el.replaceChildren(...kids.flat().filter(Boolean));
 
+// MCU windows on the Ch0 stream, band-passed when band = 1. The steered beam has no high-pass or
+// DC block, so DC and rumble set the DSP detector's floor; only the procedures that study it use it.
+const MCU_BEAM = {measure: 1, channel: 0};
+const DSP_DETECTOR = {measure: 0};
+
 const TEMPLATES = [
   {key: 'microphones', name: 'Microphone survey', ready: true,
-    text: 'Route each microphone to Ch1 under the same broadside source and compare it with a reference. An optional pass with the source off gives each microphone\'s noise and SNR. Needs a program with an output selector.'},
+    text: `Route each microphone to Ch1 under the same broadside source and compare it with a reference, with MCU windows. The pass with the source off gives each microphone's noise; a microphone gets a correction only when it and the reference are at least ${MIN_SNR_DB} dB above their noise. Needs a program with an output selector.`},
   {key: 'beamcut', name: 'Beam-pattern cut', ready: true,
     text: 'Load a fine direction set across a fixed speaker, measure every direction, and overlay the deployed-array theory at the chosen frequency.'},
   {key: 'detectorstep', name: 'Detector time constant', ready: true,
@@ -30,15 +36,15 @@ const TEMPLATES = [
   {key: 'steering', name: 'Steering accuracy', ready: true,
     text: 'Search a fine grid around a marked speaker angle and report the measured peak and angular error.'},
   {key: 'arraygain', name: 'Array gain', ready: true,
-    text: 'Beam SNR minus single-microphone SNR, each from captures with the source on and off. Fixed gains on either path cancel. Needs a program with an output selector.'},
+    text: `Beam SNR minus single-microphone SNR, each from MCU-window captures with the source on and off. Fixed gains on either path cancel. The microphone must be at least ${MIN_SNR_DB} dB above its noise. Needs a program with an output selector.`},
   {key: 'snr', name: 'Signal-to-noise ratio', ready: true,
-    text: 'Hold one beam on the source. Capture the level with the source on, then off. SNR is the on/off power ratio above the floor.'},
+    text: 'Hold one beam on the source and measure it with MCU windows. Capture the level with the source on, then off. SNR is the on/off power ratio above the floor.'},
   {key: 'width', name: 'Main-lobe width, move the source', ready: true,
-    text: 'Hold one beam and move the speaker through a list of angles. Gives the measured −3 dB and −6 dB widths and the pointing error of a fixed beam.'},
+    text: 'Hold one beam, measured with MCU windows, and move the speaker through a list of angles. Gives the measured −3 dB and −6 dB widths and the pointing error of a fixed beam.'},
   {key: 'scale', name: 'Detector scale check', ready: true,
-    text: 'Raise the source by a known step (for example +6 dB). If the reading rises by the same amount the detector reports amplitude dB; twice as much means power is being counted twice.'},
+    text: `Checks the DSP detector, which has no high-pass: DC and rumble set its floor. Capture the floor with the source off, then the source at levels a known step apart (for example 0 and +12 dB), the quietest at least ${SCALE_MARGIN_DB} dB above the floor. A reading that rises by the step means amplitude dB; twice the step means power is counted twice.`},
   {key: 'dynamic', name: 'Dynamic range', ready: true,
-    text: 'Capture the floor with the source off, then step the source level up. The range runs from the floor to where the reading stops following the source.'},
+    text: 'Measured with MCU windows. Capture the floor with the source off, then step the source level up. The range runs from the floor to where the reading stops following the source.'},
   {key: 'range', name: 'Detection range, estimate', ready: true,
     text: 'Extrapolates an SNR measured at a known distance with spherical spreading and air absorption to the distance where SNR falls to your detection threshold.'},
 ];
@@ -61,9 +67,14 @@ function saveRuns(runs) {
   try { localStorage.setItem(RUNS_KEY, JSON.stringify(runs.slice(0, 100))); } catch (_) { /* storage unavailable */ }
 }
 
+function requireLink(session) {
+  if (!session.ready) throw new Error('Connect to the device or an emulator first (Hardware screen).');
+  if (session.frozen) throw new Error('The display is frozen, so no readings arrive. Unfreeze it on the Hardware screen.');
+}
+
 /** Hold `sector`, discard five detector time constants, then collect for `seconds`. */
 async function capture(session, sector, seconds, rate, onProgress) {
-  if (!session.ready) throw new Error('Connect to the device or an emulator first (Hardware screen).');
+  requireLink(session);
   if (!session.validSector(sector)) throw new Error('Sector out of range.');
   if (session.firmwareMode !== 'IDLE') {
     session.command('X');
@@ -97,7 +108,8 @@ async function capture(session, sector, seconds, rate, onProgress) {
   session.stopMonitor();
   if (!levels.length) throw new Error('No level readings arrived. Check that the device answers M.');
   return {n: levels.length, discarded, settle_tau_ms: tauMs, mean_db: powerMean(levels),
-    std_db: stdDb(levels), min_db: Math.min(...levels), max_db: Math.max(...levels)};
+    std_db: stdDb(levels), min_db: Math.min(...levels), max_db: Math.max(...levels),
+    sector, settings: {...(session.latest?.settings || {})}};
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -111,6 +123,7 @@ async function ensureIdle(session) {
 
 /** Send S,<sector> or M and return the one level the firmware reads (it settles after a steer). */
 async function readOnce(session, command, sector) {
+  requireLink(session);
   const before = Number(session.latest?.last_measurement?.count || 0);
   if (!session.command(command)) throw new Error('No active hardware link.');
   const deadline = performance.now() + 2000;
@@ -122,16 +135,29 @@ async function readOnce(session, command, sector) {
   throw new Error(`No level reading arrived for ${command}.`);
 }
 
-/** Apply settings for one procedure and put the user's values back afterwards. */
+/** Stop any scan (the firmware takes settings only while idle), apply settings, put the user's values back afterwards. */
 async function withSettings(session, changes, action) {
+  requireLink(session);
+  await ensureIdle(session);
   const before = session.latest?.settings || {};
   const restore = Object.fromEntries(Object.keys(changes)
     .filter((key) => Number.isFinite(before[key])).map((key) => [key, before[key]]));
-  await session.setMeasurementSettings(changes);
+  try {
+    await session.setMeasurementSettings(changes);
+    return await action({...before, ...changes});
+  } finally {
+    await session.setMeasurementSettings(restore).catch(() => {});
+  }
+}
+
+/** Run an action that reroutes Ch1, then put back the routing it found (the firmware boots on the steered beam). */
+async function withCh1(session, action) {
+  const ch1 = session.latest?.ch1;
+  const previous = ch1 && ch1.code === 0 ? ch1 : {source: 0, index: 0};
   try {
     return await action();
   } finally {
-    await session.setMeasurementSettings(restore).catch(() => {});
+    await session.selectOutputChecked(previous.source, previous.index).catch(() => {});
   }
 }
 
@@ -214,7 +240,14 @@ export function measurementsScreen({session}) {
   }
 
   function saveRun(template, name, captures, result, notes) {
-    state.runs.unshift({id: Date.now(), template, name, time: new Date().toISOString(), meta: meta(), captures, result, notes});
+    const copies = captures.map((c) => ({...c}));
+    const info = meta();
+    const used = captureSettings(copies);
+    if (used) {
+      info.settings = used.common;
+      if (used.varying.length) info.varying_settings = used.varying;
+    }
+    state.runs.unshift({id: Date.now(), template, name, time: new Date().toISOString(), meta: info, captures: copies, result, notes});
     saveRuns(state.runs);
     renderRuns();
   }
@@ -287,12 +320,13 @@ export function measurementsScreen({session}) {
     const connected = session.ready;
     const needConnection = connected ? null : h('p', {class: 'note is-warn'}, 'Connect to the device or an emulator on the Hardware screen first.');
 
-    const doCapture = async (controls, label, value) => {
+    const doCapture = async (controls, label, value, settings) => {
       state.busy = true;
       progress.hidden = false;
       setText(status, `Capturing ${label}…`);
       try {
-        const c = await capture(session, controls.sector.value, controls.seconds.value, Number(controls.rate.value), (f, n) => { progress.value = f; setText(status, `Capturing ${label}… ${n} readings`); });
+        const c = await withSettings(session, settings, () => capture(session, controls.sector.value, controls.seconds.value,
+          Number(controls.rate.value), (f, n) => { progress.value = f; setText(status, `Capturing ${label}… ${n} readings`); }));
         setText(status, `${label}: ${num(c.mean_db, 1)} dBFS ± ${num(c.std_db, 1)} dB from ${c.n} readings.`);
         return {label, value, ...c};
       } catch (error) {
@@ -330,55 +364,39 @@ export function measurementsScreen({session}) {
       const microphones = h('input', {class: 'input input--mono', value: '0-43', style: {width: '180px'}});
       const notes = notesInput();
       const draft = state.draft ||= {on: new Map(), off: new Map()};
-      const surveyRows = () => {
-        const ref = draft.on.get(reference.value);
-        if (!ref) return [];
-        const refOff = draft.off.get(reference.value);
-        return [...draft.on.values()].sort((a, b) => a.value - b.value).map((on) => {
-          const off = draft.off.get(on.value);
-          // With both noise passes, compare the source power alone.
-          const useOff = Boolean(refOff && off);
-          const micLevel = useOff ? signalDb(on.mean_db, off.mean_db) : on.mean_db;
-          const refLevel = useOff ? signalDb(ref.mean_db, refOff.mean_db) : ref.mean_db;
-          return {
-            microphone: on.value,
-            gain_db: Number.isFinite(micLevel) && Number.isFinite(refLevel) ? refLevel - micLevel : null,
-            delay_us: null,
-            polarity: null,
-            level_dbfs: on.mean_db,
-            noise_dbfs: off ? off.mean_db : null,
-            snr_db: off ? snrDb(on.mean_db, off.mean_db) : null,
-          };
-        });
-      };
+      const snrNote = (row) => row.noise_dbfs === null ? 'no noise pass' : row.snr_db === null ? 'below its noise' : `SNR ${num(row.snr_db, 1)} dB`;
       const show = () => {
-        const rows = surveyRows();
-        const corrected = draft.off.has(reference.value);
+        const rows = surveyRows(draft.on, draft.off, reference.value);
+        const ref = rows.find((row) => row.microphone === reference.value);
+        const corrected = rows.filter((row) => row.gain_db !== null).length;
+        const referenceUsable = Boolean(ref && ref.snr_db !== null && ref.snr_db >= MIN_SNR_DB);
+        const advice = !rows.length ? null
+          : !draft.off.size ? `Run the noise pass with the source off: a correction needs each microphone at least ${MIN_SNR_DB} dB above its noise.`
+            : !ref ? 'Survey the reference microphone as well.'
+              : !referenceUsable ? `The reference microphone's SNR is ${ref.snr_db === null ? 'below its noise' : `${num(ref.snr_db, 1)} dB`}; it needs ${MIN_SNR_DB} dB. Raise the source or bring it closer, then run both passes again.`
+                : `${corrected} of ${rows.length} microphones are at least ${MIN_SNR_DB} dB above their noise and have a correction. Delay and polarity are not measured yet.`;
         put(results,
           ...rows.map((row) => h('div', {class: 'ms-row'}, h('span', {}, `Mic ${row.microphone}`),
-            h('span', {class: 'mono'}, (row.gain_db === null ? 'no signal above its noise' : `correction ${num(row.gain_db, 2)} dB`) +
-              (row.snr_db === null ? '' : ` · SNR ${snrText(row.snr_db)}`)))),
-          rows.length ? h('p', {class: 'note'}, corrected
-            ? 'Corrections use the source power above each microphone\'s noise.'
-            : 'Run the noise pass to correct for each microphone\'s noise. Delay and polarity are not measured yet.') : null,
+            h('span', {class: 'mono'}, `${row.gain_db === null ? 'no correction' : `correction ${num(row.gain_db, 2)} dB`} · ${snrNote(row)}`))),
+          advice ? h('p', {class: referenceUsable ? 'note' : 'note is-warn'}, advice) : null,
           rows.length ? h('div', {class: 'toolbar'},
             h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('microphones',
               `Microphone survey, reference ${reference.value}`, [...draft.on.values(), ...draft.off.values()],
-              {reference_microphone: reference.value, noise_corrected: corrected, microphones: rows,
-                summary: `${rows.length} microphones, ref ${reference.value}`}, notes.value)}, 'Save run'),
-            h('button', {type: 'button', class: 'btn', onClick: () => download(new Blob([
+              {reference_microphone: reference.value, minimum_snr_db: MIN_SNR_DB, corrected_microphones: corrected, microphones: rows,
+                summary: `${corrected} of ${rows.length} corrected, ref ${reference.value}`}, notes.value)}, 'Save run'),
+            referenceUsable && corrected ? h('button', {type: 'button', class: 'btn', onClick: () => download(new Blob([
               JSON.stringify({schema: 'heimdall-microphone-calibration-v1',
                 generated_at: new Date().toISOString(), reference_microphone: reference.value,
                 microphones: rows.map(({microphone, gain_db, delay_us, polarity, noise_dbfs}) =>
                   ({microphone, gain_db, delay_us, polarity, noise_dbfs}))}, null, 2) + '\n'],
-            {type: 'application/json'}), `heimdall-microphone-calibration-${fileStamp()}.json`)}, 'Export calibration JSON')) : null);
+            {type: 'application/json'}), `heimdall-microphone-calibration-${fileStamp()}.json`)}, 'Export calibration JSON') : null) : null);
       };
       const pass = async (key) => {
         const mics = parseMicList(microphones.value);
         if (!mics.length || !mics.includes(reference.value)) { setText(status, 'Include the reference microphone in the survey list.'); return; }
         state.busy = true; progress.hidden = false;
         try {
-          await withSettings(session, {measure: 1, channel: 1}, async () => {
+          await withSettings(session, {measure: 1, channel: 1}, () => withCh1(session, async () => {
             for (let index = 0; index < mics.length; index++) {
               const mic = mics[index];
               await session.selectOutputChecked(1, mic);
@@ -387,7 +405,7 @@ export function measurementsScreen({session}) {
                 Number(controls.rate.value), (fraction) => { progress.value = (index + fraction) / mics.length; });
               draft[key].set(mic, {label: `microphone ${mic}, source ${key}`, value: mic, ...measured});
             }
-          });
+          }));
           setText(status, `Measured ${mics.length} microphones with the source ${key}.`);
         } catch (error) { setText(status, error.message); }
         finally { state.busy = false; progress.hidden = true; show(); }
@@ -419,21 +437,26 @@ export function measurementsScreen({session}) {
         if (draft.on && draft.off) {
           const levels = {beamOn: draft.on.beam.mean_db, beamOff: draft.off.beam.mean_db,
             micOn: draft.on.mic.mean_db, micOff: draft.off.mic.mean_db};
-          const gain = arrayGainDb(levels);
           const beamSnr = snrDb(levels.beamOn, levels.beamOff);
           const micSnr = snrDb(levels.micOn, levels.micOff);
+          const same = draft.on.beam.value === draft.off.beam.value && draft.on.mic.value === draft.off.mic.value;
+          const gain = same && micSnr >= MIN_SNR_DB ? arrayGainDb(levels) : NaN;
           const expected = draft.theory?.white_noise_gain_db;
+          const finite = (value) => (Number.isFinite(value) ? value : null);
+          const problem = !same ? 'The two passes used different sectors or microphones; capture both again.'
+            : !(micSnr >= MIN_SNR_DB) ? `The microphone's SNR is ${Number.isFinite(micSnr) ? `${num(micSnr, 1)} dB` : 'below its noise'}; it needs ${MIN_SNR_DB} dB. Raise the source or bring it closer.`
+              : null;
           figure = [
             h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Array gain'),
-              h('span', {class: 'ms-figure__value'}, Number.isFinite(gain) ? `${num(gain, 1)} dB` : 'source below the noise')),
-            h('p', {class: 'note'}, `Beam SNR ${snrText(beamSnr)}, microphone SNR ${snrText(micSnr)}.` +
-              (Number.isFinite(expected) ? ` Theory against noise uncorrelated between microphones: ${num(expected, 1)} dB. Room noise is partly correlated at low frequencies, so expect less.` : '')),
-            h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('arraygain',
-              `Array gain, sector ${controls.sector.value}, microphone ${microphone.value}`,
+              h('span', {class: 'ms-figure__value'}, Number.isFinite(gain) ? `${num(gain, 1)} dB` : '—')),
+            h('p', {class: problem ? 'note is-warn' : 'note'}, `Beam SNR ${snrText(beamSnr)}, microphone SNR ${snrText(micSnr)}.` +
+              (problem ? ` ${problem}` : Number.isFinite(expected) ? ` Theory against noise uncorrelated between microphones: ${num(expected, 1)} dB. Room noise is partly correlated at low frequencies, so expect less.` : '')),
+            same ? h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('arraygain',
+              `Array gain, sector ${draft.on.beam.value}, microphone ${draft.on.mic.value}`,
               [draft.on.beam, draft.on.mic, draft.off.beam, draft.off.mic],
-              {array_gain_db: gain, beam_snr_db: beamSnr, microphone_snr_db: micSnr,
-                theory_white_noise_gain_db: expected ?? null,
-                summary: Number.isFinite(gain) ? `${num(gain, 1)} dB` : 'source below the noise'}, notes.value)}, 'Save run'),
+              {array_gain_db: finite(gain), beam_snr_db: finite(beamSnr), microphone_snr_db: finite(micSnr),
+                minimum_snr_db: MIN_SNR_DB, theory_white_noise_gain_db: expected ?? null,
+                summary: Number.isFinite(gain) ? `${num(gain, 1)} dB` : 'not measurable'}, notes.value)}, 'Save run') : null,
           ];
         }
         put(results, ...rows, figure);
@@ -441,7 +464,7 @@ export function measurementsScreen({session}) {
       const pass = async (key) => {
         state.busy = true; progress.hidden = false;
         try {
-          draft[key] = await withSettings(session, {measure: 1, channel: 0}, async () => {
+          draft[key] = await withSettings(session, MCU_BEAM, () => withCh1(session, async () => {
             const beam = await capture(session, controls.sector.value, controls.seconds.value,
               Number(controls.rate.value), (fraction) => { progress.value = fraction / 2; });
             await session.selectOutputChecked(1, microphone.value);
@@ -450,7 +473,7 @@ export function measurementsScreen({session}) {
               Number(controls.rate.value), (fraction) => { progress.value = 0.5 + fraction / 2; });
             return {beam: {label: `steered beam, source ${key}`, value: controls.sector.value, ...beam},
               mic: {label: `microphone ${microphone.value}, source ${key}`, value: microphone.value, ...mic}};
-          });
+          }));
           draft.theory ||= await apiJson('/study/theory/cut?step_deg=10').catch(() => null);
           setText(status, `Captured the beam and the microphone with the source ${key}.`);
         } catch (error) { setText(status, error.message); }
@@ -480,9 +503,10 @@ export function measurementsScreen({session}) {
         if (list.length < 3) { setText(status, 'Give at least three settle times between 50 and 20000 µs.'); return; }
         state.busy = true; progress.hidden = false;
         try {
-          await ensureIdle(session);
           const original = session.latest?.settings?.settle_us ?? 1250;
-          const readings = await withSettings(session, {measure: 0, settle_us: original}, async () => {
+          let applied = {};
+          const readings = await withSettings(session, {...DSP_DETECTOR, settle_us: original}, async (settings) => {
+            applied = settings;
             const taken = [];
             let done = 0;
             for (let pass = 0; pass < count; pass++) {
@@ -514,7 +538,8 @@ export function measurementsScreen({session}) {
           const captures = rows.map(({settle, group}) => {
             const levels = group.map((r) => r.level_db);
             return {label: `settle ${settle} us`, value: settle, n: levels.length, mean_db: rawMeanDb(levels),
-              std_db: stdDb(levels), min_db: Math.min(...levels), max_db: Math.max(...levels)};
+              std_db: stdDb(levels), min_db: Math.min(...levels), max_db: Math.max(...levels),
+              settings: {...applied, settle_us: settle}};
           });
           put(results,
             h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'Detector time constant'),
@@ -538,7 +563,7 @@ export function measurementsScreen({session}) {
         h('div', {class: 'field'}, h('label', {}, 'Settle times (µs)'), settles),
         h('button', {type: 'button', class: 'btn btn--primary', disabled: !connected, onClick: run}, 'Measure time constant'),
         progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes),
-        h('p', {class: 'note'}, 'Uses the DSP detector. Pick a loud direction on the source and a quiet one well away from it.'));
+        h('p', {class: 'note'}, 'Uses the DSP detector, which also reads the beam\'s DC and rumble, the same in every direction. Pick a loud direction on a loud, close source and a quiet one well away from it.'));
       return;
     }
 
@@ -560,7 +585,7 @@ export function measurementsScreen({session}) {
         try {
           const directions = Math.max(2, Math.min(49, Math.round(count.value)));
           const isAzimuth = axis.value === 'azimuth';
-          const captures = await withSettings(session, {measure: 1, channel: 0}, () => withDirectionGrid(session, {
+          const captures = await withSettings(session, MCU_BEAM, () => withDirectionGrid(session, {
             azimuthMin: isAzimuth ? minimum.value : fixed.value,
             azimuthMax: isAzimuth ? maximum.value : fixed.value,
             columns: isAzimuth ? directions : 1,
@@ -648,7 +673,7 @@ export function measurementsScreen({session}) {
         try {
           const size = Math.max(2, Math.min(7, Math.round(count.value)));
           let azimuths = []; let elevations = [];
-          const captures = await withSettings(session, {measure: 1, channel: 0}, () => withDirectionGrid(session, {
+          const captures = await withSettings(session, MCU_BEAM, () => withDirectionGrid(session, {
             azimuthMin: trueAzimuth.value - span.value, azimuthMax: trueAzimuth.value + span.value, columns: size,
             elevationMin: trueElevation.value - span.value, elevationMax: trueElevation.value + span.value, rows: size,
           }, async (gridAzimuths, gridElevations) => {
@@ -705,20 +730,21 @@ export function measurementsScreen({session}) {
       const show = () => {
         const rows = [['Source on', draft.on], ['Source off', draft.off]].map(([k, c]) => h('div', {class: 'ms-row'}, h('span', {}, k), h('span', {class: 'mono'}, c ? `${num(c.mean_db, 1)} dBFS ± ${num(c.std_db, 1)} (${c.n})` : '—')));
         let figure = null;
-        if (draft.on && draft.off) {
-          const pOn = 10 ** (draft.on.mean_db / 10); const pOff = 10 ** (draft.off.mean_db / 10);
-          const snr = pOn > pOff ? 10 * Math.log10((pOn - pOff) / pOff) : -Infinity;
+        if (draft.on && draft.off && draft.on.sector !== draft.off.sector) {
+          figure = h('p', {class: 'note is-warn'}, 'The two captures held different sectors; capture both again on one sector.');
+        } else if (draft.on && draft.off) {
+          const snr = snrDb(draft.on.mean_db, draft.off.mean_db);
           figure = h('div', {class: 'ms-figure'}, h('span', {class: 'figure-label'}, 'SNR'), h('span', {class: 'ms-figure__value'}, snrText(snr)),
-            h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('snr', `SNR, sector ${controls.sector.value}`, [draft.on, draft.off], {snr_db: Number.isFinite(snr) ? snr : null, summary: `SNR ${snrText(snr)}`}, notes.value)}, 'Save run'));
+            h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('snr', `SNR, sector ${draft.on.sector}`, [draft.on, draft.off], {snr_db: Number.isFinite(snr) ? snr : null, summary: `SNR ${snrText(snr)}`}, notes.value)}, 'Save run'));
         }
         put(results, ...rows, figure);
       };
       put(body, header(t), needConnection, controls.el,
         h('div', {class: 'toolbar'},
-          h('button', {type: 'button', class: 'btn', disabled: !connected, onClick: async () => { draft.on = await doCapture(controls, 'source on') || draft.on; show(); }}, 'Capture with the source on'),
-          h('button', {type: 'button', class: 'btn', disabled: !connected, onClick: async () => { draft.off = await doCapture(controls, 'source off') || draft.off; show(); }}, 'Capture with the source off')),
+          h('button', {type: 'button', class: 'btn', disabled: !connected, onClick: async () => { draft.on = await doCapture(controls, 'source on', undefined, MCU_BEAM) || draft.on; show(); }}, 'Capture with the source on'),
+          h('button', {type: 'button', class: 'btn', disabled: !connected, onClick: async () => { draft.off = await doCapture(controls, 'source off', undefined, MCU_BEAM) || draft.off; show(); }}, 'Capture with the source off')),
         progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes),
-        h('p', {class: 'note'}, 'SNR = 10·log10((P_on − P_off) / P_off) with P = 10^(L/10). If the detector turns out to count power twice (see Detector scale check), halve the dB figures.'));
+        h('p', {class: 'note'}, 'SNR = 10·log10((P_on − P_off) / P_off) with P = 10^(L/10). MCU windows report RMS, so the dB figures need no detector-scale correction.'));
       show();
       return;
     }
@@ -755,14 +781,19 @@ export function measurementsScreen({session}) {
             h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, '−3 dB width'), h('span', {class: 'mono'}, w3 ? `${num(w3.width, 1)}°` : '—')),
             h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, '−6 dB width'), h('span', {class: 'mono'}, w6 ? `${num(w6.width, 1)}°` : '—')),
             h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, 'Peak at'), h('span', {class: 'mono'}, w3 ? deg(w3.peak, 1) : '—'))),
-          pts.length >= 3 ? h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('width', `Main-lobe width, sector ${controls.sector.value}`,
+          pts.length >= 3 ? h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun('width', `Main-lobe width, sector ${pts[0].capture.sector}`,
             pts.map((p) => ({...p.capture, label: `source ${p.angle}`, value: p.angle})),
-            {width_3db_deg: w3?.width?.toFixed(2) ?? '', width_6db_deg: w6?.width?.toFixed(2) ?? '', peak_deg: w3?.peak ?? '', summary: w3 ? `−3 dB ${num(w3.width, 1)}°` : 'no −3 dB edge'}, notes.value)}, 'Save run') : null);
+            {width_3db_deg: w3 ? Number(w3.width.toFixed(2)) : null, width_6db_deg: w6 ? Number(w6.width.toFixed(2)) : null, peak_deg: w3?.peak ?? null, summary: w3 ? `−3 dB ${num(w3.width, 1)}°` : 'no −3 dB edge'}, notes.value)}, 'Save run') : null);
       };
       const prompt = h('p', {class: 'ms-prompt'});
       const recordButton = h('button', {type: 'button', class: 'btn btn--primary', onClick: async () => {
         const angle = list()[draft.index];
-        const c = await doCapture(controls, `source at ${angle}°`, angle);
+        const c = await doCapture(controls, `source at ${angle}°`, angle, MCU_BEAM);
+        const held = draft.points[0]?.capture.sector;
+        if (c && held !== undefined && c.sector !== held) {
+          setText(status, `The earlier angles held sector ${held}, this capture held ${c.sector}. Start over to change the beam.`);
+          return;
+        }
         if (c) { draft.points = draft.points.filter((p) => p.angle !== angle).concat([{angle, level: c.mean_db, capture: c}]); draft.index += 1; }
         show();
       }}, 'Record this angle');
@@ -779,53 +810,63 @@ export function measurementsScreen({session}) {
     }
 
     if (t.key === 'scale' || t.key === 'dynamic') {
+      const isScale = t.key === 'scale';
+      const settings = isScale ? DSP_DETECTOR : MCU_BEAM;
       const controls = captureControls({sectorDefault: defaultSector()});
-      const setLevel = numberInput(t.key === 'scale' ? 'Source level change (dB)' : 'Source level (dB, relative)', t.key === 'scale' ? 0 : -30, {width: '120px'});
+      const setLevel = numberInput(isScale ? 'Source level change (dB)' : 'Source level (dB, relative)', isScale ? 0 : -30, {width: '120px'});
       const notes = notesInput();
       const draft = state.draft ||= {captures: []};
+      const round = (value, digits) => Number(value.toFixed(digits));
       const show = () => {
         const caps = draft.captures;
+        const floors = caps.filter((c) => c.value === null);
         const rows = caps.map((c) => h('div', {class: 'ms-row'}, h('span', {}, c.label), h('span', {class: 'mono'}, `${num(c.mean_db, 1)} dBFS ± ${num(c.std_db, 1)}`)));
         let summary = null;
         let result = null;
-        if (t.key === 'scale' && caps.length >= 2) {
-          const a = caps[0]; const b = caps.at(-1);
-          const step = b.value - a.value;
-          const seen = b.mean_db - a.mean_db;
-          const ratio = step ? seen / step : NaN;
-          const verdict = !Number.isFinite(ratio) ? 'Change the source level between captures.'
-            : Math.abs(ratio - 1) < 0.2 ? 'The reading follows the source 1:1. The detector reports amplitude dB.'
-              : Math.abs(ratio - 2) < 0.3 ? 'The reading moves twice as far as the source. Power is counted twice; halve dB differences.'
-                : `The reading moves ${ratio.toFixed(2)}× the source step. Check for clipping or the noise floor.`;
-          summary = h('p', {class: 'ms-prompt'}, `Source ${num(step, 1)} dB, reading ${num(seen, 1)} dB. ${verdict}`);
-          result = {step_db: step, seen_db: seen.toFixed(2), ratio: Number.isFinite(ratio) ? ratio.toFixed(3) : '', summary: `ratio ${Number.isFinite(ratio) ? ratio.toFixed(2) : '—'}`};
-        }
-        if (t.key === 'dynamic' && caps.length >= 2) {
-          const floor = caps.find((c) => c.value === null);
-          const steps = caps.filter((c) => c.value !== null).sort((a, b) => a.value - b.value);
-          let ceiling = steps.at(-1);
-          for (let i = 1; i < steps.length; i++) {
-            const slope = (steps[i].mean_db - steps[i - 1].mean_db) / Math.max(1e-6, steps[i].value - steps[i - 1].value);
-            if (slope < 0.5) { ceiling = steps[i - 1]; break; }
+        if (new Set(caps.map((c) => c.sector)).size > 1) {
+          summary = h('p', {class: 'note is-warn'}, 'The captures held different sectors. Start over and keep one sector.');
+        } else if (isScale) {
+          const floorDb = floors.length ? powerMean(floors.map((c) => c.mean_db)) : null;
+          const scale = detectorScale(caps, floorDb);
+          if (scale) {
+            const {ratio, margin_db: margin} = scale;
+            const valid = margin !== null && margin >= SCALE_MARGIN_DB;
+            const verdict = margin === null ? 'Capture the floor with the source off: the result counts only when the quietest level is well above it.'
+              : !valid ? `The quietest level is ${num(margin, 1)} dB above the floor; it needs ${SCALE_MARGIN_DB} dB. Bring the source closer or raise every level.`
+                : Math.abs(ratio - 1) < 0.2 ? 'The reading follows the source 1:1. The detector reports amplitude dB.'
+                  : Math.abs(ratio - 2) < 0.3 ? 'The reading moves twice as far as the source. Power is counted twice; halve dB differences.'
+                    : `The reading moves ${ratio.toFixed(2)}× the source step. Check for clipping.`;
+            summary = [h('p', {class: 'ms-prompt'}, `Source ${num(scale.step_db, 1)} dB, reading ${num(scale.seen_db, 1)} dB (least-squares slope ${ratio.toFixed(2)}).`),
+              h('p', {class: valid ? 'note' : 'note is-warn'}, verdict)];
+            result = {step_db: scale.step_db, seen_db: round(scale.seen_db, 2), ratio: round(ratio, 3),
+              floor_dbfs: floorDb === null ? null : round(floorDb, 2), margin_db: margin === null ? null : round(margin, 2),
+              minimum_margin_db: SCALE_MARGIN_DB, valid,
+              summary: valid ? `ratio ${ratio.toFixed(2)}` : margin === null ? 'no floor captured' : 'not valid, source near the floor'};
+          } else if (caps.length) {
+            summary = h('p', {class: 'note'}, 'Capture the floor with the source off and the source at two or more levels.');
           }
-          const range = floor && ceiling ? ceiling.mean_db - floor.mean_db : null;
-          summary = h('p', {class: 'ms-prompt'}, floor
-            ? `Floor ${num(floor.mean_db, 1)} dBFS, highest level that still follows the source ${num(ceiling.mean_db, 1)} dBFS: dynamic range ${num(range, 1)} dB.`
-            : 'Capture the floor with the source off as well.');
-          result = floor ? {floor_dbfs: floor.mean_db.toFixed(2), ceiling_dbfs: ceiling.mean_db.toFixed(2), range_db: range.toFixed(2), summary: `range ${num(range, 1)} dB`} : null;
+        } else if (caps.length) {
+          const range = dynamicRange(caps);
+          const message = !floors.length ? 'Capture the floor with the source off as well.'
+            : !range ? 'Capture the source at two or more levels.'
+              : range.range_db === null ? 'The reading does not follow the source between any two levels. Raise the levels above the floor.'
+                : `Floor ${num(range.floor_db, 1)} dBFS, highest level that still follows the source ${num(range.ceiling_db, 1)} dBFS: dynamic range ${num(range.range_db, 1)} dB.`;
+          summary = h('p', {class: 'ms-prompt'}, message);
+          result = range?.range_db != null ? {floor_dbfs: round(range.floor_db, 2), ceiling_dbfs: round(range.ceiling_db, 2),
+            range_db: round(range.range_db, 2), summary: `range ${num(range.range_db, 1)} dB`} : null;
         }
         put(results, ...rows, summary, result ? h('button', {type: 'button', class: 'btn btn--primary', onClick: () => saveRun(t.key, t.name, caps, result, notes.value)}, 'Save run') : null);
       };
       put(body, header(t), needConnection, controls.el, setLevel.el,
         h('div', {class: 'toolbar'},
           h('button', {type: 'button', class: 'btn', disabled: !connected, onClick: async () => {
-            const c = await doCapture(controls, `source ${num(setLevel.value, 1)} dB`, setLevel.value);
+            const c = await doCapture(controls, 'floor, source off', null, settings);
+            if (c) draft.captures.unshift(c); show();
+          }}, 'Capture the floor (source off)'),
+          h('button', {type: 'button', class: 'btn', disabled: !connected, onClick: async () => {
+            const c = await doCapture(controls, `source ${num(setLevel.value, 1)} dB`, setLevel.value, settings);
             if (c) draft.captures.push(c); show();
           }}, 'Capture at this level'),
-          t.key === 'dynamic' ? h('button', {type: 'button', class: 'btn', disabled: !connected, onClick: async () => {
-            const c = await doCapture(controls, 'floor, source off', null);
-            if (c) draft.captures.unshift({...c, value: null}); show();
-          }}, 'Capture the floor (source off)') : null,
           h('button', {type: 'button', class: 'btn btn--ghost', onClick: () => { draft.captures = []; show(); }}, 'Start over')),
         progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes));
       show();
@@ -833,8 +874,8 @@ export function measurementsScreen({session}) {
     }
 
     if (t.key === 'range') {
-      const lastSnr = state.runs.find((r) => r.template === 'snr');
-      const snr0 = numberInput('Measured SNR (dB)', lastSnr ? Number(lastSnr.result.snr_db).toFixed(1) : 20, {width: '120px'});
+      const lastSnr = state.runs.find((r) => r.template === 'snr' && Number.isFinite(r.result?.snr_db));
+      const snr0 = numberInput('Measured SNR (dB)', lastSnr ? lastSnr.result.snr_db.toFixed(1) : 20, {width: '120px'});
       const d0 = numberInput('at distance (m)', 10, {width: '110px'});
       const threshold = numberInput('Detection threshold (dB)', 6, {width: '120px'});
       const alpha = numberInput('Air absorption (dB/km)', 5, {width: '120px'});

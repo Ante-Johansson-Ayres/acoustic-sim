@@ -14,9 +14,86 @@ export function signalDb(onDb, offDb) {
   return signal > 0 ? 10 * Math.log10(signal) : -Infinity;
 }
 
-/** Beam SNR minus single-microphone SNR; a fixed gain on either path cancels out. */
+/** Below this SNR a level is too close to its noise for a gain correction or an array gain. */
+export const MIN_SNR_DB = 10;
+
+/** Beam SNR minus single-microphone SNR; a fixed gain on either path cancels out. NaN if either is below its noise. */
 export function arrayGainDb({beamOn, beamOff, micOn, micOff}) {
-  return snrDb(beamOn, beamOff) - snrDb(micOn, micOff);
+  const beam = snrDb(beamOn, beamOff);
+  const microphone = snrDb(micOn, micOff);
+  return Number.isFinite(beam) && Number.isFinite(microphone) ? beam - microphone : NaN;
+}
+
+/**
+ * Microphone survey rows from captures keyed by microphone ({mean_db}). A correction needs the
+ * noise pass and at least minSnrDb on both the microphone and the reference; otherwise it is null.
+ */
+export function surveyRows(on, off, reference, minSnrDb = MIN_SNR_DB) {
+  const measure = (microphone) => {
+    const sourceOn = on.get(microphone);
+    const sourceOff = off.get(microphone);
+    if (!sourceOn || !sourceOff) return {snr: null, level: null};
+    const snr = snrDb(sourceOn.mean_db, sourceOff.mean_db);
+    return {snr: Number.isFinite(snr) ? snr : null,
+      level: snr >= minSnrDb ? signalDb(sourceOn.mean_db, sourceOff.mean_db) : null};
+  };
+  const ref = measure(reference);
+  return [...on.keys()].sort((a, b) => a - b).map((microphone) => {
+    const mic = measure(microphone);
+    return {
+      microphone,
+      gain_db: ref.level !== null && mic.level !== null ? ref.level - mic.level : null,
+      delay_us: null,
+      polarity: null,
+      level_dbfs: on.get(microphone).mean_db,
+      noise_dbfs: off.get(microphone)?.mean_db ?? null,
+      snr_db: mic.snr,
+    };
+  });
+}
+
+/** Reading dB the quietest scale-check capture needs above the floor, so noise moves it < 0.15 dB. */
+export const SCALE_MARGIN_DB = 15;
+
+/**
+ * Detector scale from captures at known source levels ({value: source dB, mean_db}): the
+ * least-squares slope of reading against source level. 1 means amplitude dB, 2 power counted twice.
+ */
+export function detectorScale(captures, floorDb = null) {
+  const points = captures.filter((c) => Number.isFinite(c.value) && Number.isFinite(c.mean_db));
+  if (new Set(points.map((p) => p.value)).size < 2) return null;
+  const meanX = points.reduce((sum, p) => sum + p.value, 0) / points.length;
+  const meanY = points.reduce((sum, p) => sum + p.mean_db, 0) / points.length;
+  const sxx = points.reduce((sum, p) => sum + (p.value - meanX) ** 2, 0);
+  const sxy = points.reduce((sum, p) => sum + (p.value - meanX) * (p.mean_db - meanY), 0);
+  const ratio = sxy / sxx;
+  const step = Math.max(...points.map((p) => p.value)) - Math.min(...points.map((p) => p.value));
+  const quietest = Math.min(...points.map((p) => p.mean_db));
+  return {ratio, step_db: step, seen_db: ratio * step,
+    margin_db: Number.isFinite(floorDb) ? quietest - floorDb : null};
+}
+
+const powerMeanDb = (levels) => 10 * Math.log10(levels.reduce((sum, db) => sum + power(db), 0) / levels.length);
+
+/**
+ * Dynamic range from floor captures (value null) and captures at source levels (value in dB):
+ * from the floor to the highest level whose step from the level below still moves the reading by
+ * at least half the step. Captures at the same level are power-averaged. Null without a floor and
+ * two levels; range_db is null if the reading never follows the source.
+ */
+export function dynamicRange(captures) {
+  const floors = captures.filter((c) => c.value === null).map((c) => c.mean_db);
+  const values = [...new Set(captures.filter((c) => Number.isFinite(c.value)).map((c) => c.value))].sort((a, b) => a - b);
+  if (!floors.length || values.length < 2) return null;
+  const levels = values.map((value) => ({value,
+    mean_db: powerMeanDb(captures.filter((c) => c.value === value).map((c) => c.mean_db))}));
+  const floor = powerMeanDb(floors);
+  for (let i = levels.length - 1; i >= 1; i--) {
+    if ((levels[i].mean_db - levels[i - 1].mean_db) / (levels[i].value - levels[i - 1].value) >= 0.5) {
+      return {floor_db: floor, ceiling_db: levels[i].mean_db, range_db: levels[i].mean_db - floor};
+    }
+  }
+  return {floor_db: floor, ceiling_db: null, range_db: null};
 }
 
 /** Below this loud-to-quiet contrast a settle-sweep reading carries no usable decay. */

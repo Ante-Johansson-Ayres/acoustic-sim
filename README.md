@@ -302,9 +302,10 @@ the device differs from the flashed program, Hardware shows a banner.
 
 **Measurements.** Guided procedures that hold a beam and poll `M`: SNR (source
 on/off), main-lobe width by moving the source, a detector scale check, dynamic
-range and a detection-range estimate. They use only existing commands. Runs are
-kept in the browser and export as CSV with the device, register-map hash and
-settings.
+range and a detection-range estimate. They use only existing commands. SNR,
+width and dynamic range measure with MCU windows; the scale check measures the
+DSP detector against its floor. Runs are kept in the browser and export as CSV
+with the device, register-map hash and the settings the captures used.
 
 **Device support.** The emulators implement the proposed parameter commands
 through `/dsp/write`, `/dsp/read`, `/dsp/memory` and `/dsp/set` (their levels do
