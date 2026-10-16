@@ -28,6 +28,8 @@ TRACK_MOVE_CONFIRMATIONS = 2
 GLOBAL_RESCAN_INTERVAL = 50
 FLIGHT_PROFILES = frozenset({"crossing", "approach", "orbit", "patrol", "evasive", "legacy"})
 EMULATED_DRONE_F0_HZ = 182.0
+# The firmware gives up a download after 2 s without an ACK and goes back to text records.
+AUDIO_STALL_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,7 @@ class SerialHeimdallTransport(HeimdallTransport, threading.Thread):
         self.audio_header: dict[str, Any] | None = None
         self.audio_payload = bytearray()
         self.audio_acknowledged = 0
+        self.audio_block_started = 0.0
 
     def run(self) -> None:
         self.running = True
@@ -228,6 +231,7 @@ class SerialHeimdallTransport(HeimdallTransport, threading.Thread):
         self.send_command("I")
         try:
             while self.running:
+                self._abandon_stalled_audio()
                 data = self.serial.read(max(1, self.serial.in_waiting))
                 if not data:
                     continue
@@ -285,6 +289,7 @@ class SerialHeimdallTransport(HeimdallTransport, threading.Thread):
                 self.audio_header = record
                 self.audio_payload = bytearray()
                 self.audio_acknowledged = 0
+                self.audio_block_started = self.clock()
                 with self.lock:
                     self.latest_audio = None
                     self.audio_download_expected = record["bytes"]
@@ -314,6 +319,23 @@ class SerialHeimdallTransport(HeimdallTransport, threading.Thread):
                 self.audio_acknowledged + interval,
                 self.audio_download_expected,
             )
+            self.audio_block_started = self.clock()
+
+    def _abandon_stalled_audio(self) -> None:
+        """Give up a download that stopped mid-block; what arrived since the last ACK is text."""
+        if (self.audio_header is None or len(self.audio_payload) >= self.audio_download_expected
+                or self.clock() - self.audio_block_started < AUDIO_STALL_S):
+            return
+        self.rx_buffer[:0] = self.audio_payload[self.audio_acknowledged:]
+        self.audio_header = None
+        self.audio_payload = bytearray()
+        self.audio_acknowledged = 0
+        with self.lock:
+            self.audio_download_error = "audio download stalled"
+            self.state.recording_state = "error"
+            self.protocol_errors += 1
+            self.state.sequence += 1
+        self._process_received_data(b"")
 
     def _finish_audio_download(self, footer: dict[str, Any]) -> None:
         header = self.audio_header

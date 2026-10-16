@@ -322,6 +322,7 @@ def test_serial_audio_payload_uses_exact_length_not_newline_framing():
     transport.audio_header = None
     transport.audio_payload = bytearray()
     transport.audio_acknowledged = 0
+    transport.audio_block_started = 0.0
     transport.write_lock = __import__("threading").Lock()
     transport.serial = FakeSerial()
 
@@ -342,6 +343,48 @@ def test_serial_audio_payload_uses_exact_length_not_newline_framing():
     assert captured["bits_per_sample"] == 16
     assert transport.snapshot()["audio_download_progress"] == 1.0
     assert transport.serial.writes == [b"\x06", b"\x06"]
+
+
+def test_serial_audio_download_that_stalls_goes_back_to_text_records():
+    class FakeSerial:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, data):
+            self.writes.append(data)
+            return len(data)
+
+        def flush(self):
+            pass
+
+    now = [100.0]
+    transport = SerialHeimdallTransport.__new__(SerialHeimdallTransport)
+    HeimdallTransport.__init__(transport, clock=lambda: now[0])
+    transport.rx_buffer = bytearray()
+    transport.audio_header = None
+    transport.audio_payload = bytearray()
+    transport.audio_acknowledged = 0
+    transport.audio_block_started = 0.0
+    transport.write_lock = __import__("threading").Lock()
+    transport.serial = FakeSerial()
+
+    transport._process_received_data(b"AUDIO_BEGIN,2,8192,48000,16,2,4096,00000000\n" + bytes(4096))
+    assert transport.serial.writes == [b"\x06"]
+    # The firmware missed that ACK, gave up and answers commands again.
+    transport._process_received_data(b"SET_OK,guard_us,700\n")
+    now[0] += 2.9
+    transport._abandon_stalled_audio()
+    assert transport.audio_header is not None
+    now[0] += 0.2
+    transport._abandon_stalled_audio()
+
+    snapshot = transport.snapshot()
+    assert transport.audio_header is None
+    assert snapshot["audio_download_error"] == "audio download stalled"
+    assert snapshot["recording_state"] == "error"
+    assert snapshot["settings"]["guard_us"] == 700
+    transport._process_received_data(b"SET_OK,guard_us,500\n")
+    assert transport.snapshot()["settings"]["guard_us"] == 500
 
 
 def test_transport_request_waits_for_matching_reply_and_reports_firmware_errors():

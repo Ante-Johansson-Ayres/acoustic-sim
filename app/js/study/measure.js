@@ -21,8 +21,8 @@ import { newMeasurementDb } from '../hardware/replies.js';
 const RUNS_KEY = 'heimdall.study.runs';
 const put = (el, ...kids) => el.replaceChildren(...kids.flat().filter(Boolean));
 
-// MCU windows on the Ch0 stream, band-passed when band = 1. The steered beam has no high-pass or
-// DC block, so DC and rumble set the DSP detector's floor; only the procedures that study it use it.
+// MCU windows on the Ch0 stream, band-passed when band = 1. The DSP detector has no high-pass, so
+// sound below 100 Hz sets its floor; only the procedures that study it use it.
 const MCU_BEAM = {measure: 1, channel: 0};
 const DSP_DETECTOR = {measure: 0};
 
@@ -42,7 +42,7 @@ const TEMPLATES = [
   {key: 'width', name: 'Main-lobe width, move the source', ready: true,
     text: 'Hold one beam, measured with MCU windows, and move the speaker through a list of angles. Gives the measured −3 dB and −6 dB widths and the pointing error of a fixed beam.'},
   {key: 'scale', name: 'Detector scale check', ready: true,
-    text: `Checks the DSP detector, which has no high-pass: DC and rumble set its floor. Capture the floor with the source off, then the source at levels a known step apart (for example 0 and +12 dB), the quietest at least ${SCALE_MARGIN_DB} dB above the floor. A reading that rises by the step means amplitude dB; twice the step means power is counted twice.`},
+    text: `Checks the DSP detector, which has no high-pass: sound below 100 Hz sets its floor. Capture the floor with the source off, then the source at levels a known step apart (for example 0 and +12 dB), the quietest at least ${SCALE_MARGIN_DB} dB above the floor. A reading that rises by the step means amplitude dB; twice the step means power is counted twice.`},
   {key: 'dynamic', name: 'Dynamic range', ready: true,
     text: 'Measured with MCU windows. Capture the floor with the source off, then step the source level up. The range runs from the floor to where the reading stops following the source.'},
   {key: 'range', name: 'Detection range, estimate', ready: true,
@@ -563,7 +563,7 @@ export function measurementsScreen({session}) {
         h('div', {class: 'field'}, h('label', {}, 'Settle times (µs)'), settles),
         h('button', {type: 'button', class: 'btn btn--primary', disabled: !connected, onClick: run}, 'Measure time constant'),
         progress, status, results, h('div', {class: 'field'}, h('label', {}, 'Notes'), notes),
-        h('p', {class: 'note'}, 'Uses the DSP detector, which also reads the beam\'s DC and rumble, the same in every direction. Pick a loud direction on a loud, close source and a quiet one well away from it.'));
+        h('p', {class: 'note'}, 'Uses the DSP detector, which also reads sound below 100 Hz, about the same in every direction. Pick a loud direction on a loud, close source and a quiet one well away from it.'));
       return;
     }
 
