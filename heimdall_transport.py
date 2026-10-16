@@ -49,6 +49,7 @@ class DeployedProgram:
     bank_elevation_deg: tuple[float, ...] = ()
     map_hash: str | None = None
     level_time_constant_ms: float = 8.665
+    mount: str = "upright"
 
     @classmethod
     def from_contract(cls, contract: dict[str, Any]) -> "DeployedProgram":
@@ -71,6 +72,7 @@ class DeployedProgram:
             bank_elevation_deg=tuple(float(value) for value in bank.get("elevation_deg", ())),
             map_hash=(contract.get("study") or {}).get("map_hash"),
             level_time_constant_ms=float(contract.get("level_time_constant_ms", 8.665)),
+            mount=str(contract.get("array_mount") or "upright"),
         )
 
     @property
@@ -79,7 +81,7 @@ class DeployedProgram:
 
     def configuration_lines(self) -> list[str]:
         """What the firmware prints after AZIMUTH/ELEVATION for this program."""
-        lines = []
+        lines = [f"MOUNT,{self.mount}"]
         if self.bank_beams:
             lines.append(f"BANK,{self.bank_rows},{self.bank_columns},{self.bank_rate_hz}")
         if self.selectors:

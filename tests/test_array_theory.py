@@ -28,7 +28,8 @@ def test_broadside_cut_is_symmetric_and_narrows_with_frequency():
     low_width = beamwidth(low)
     high_width = beamwidth(high)
     assert low_width is not None and high_width is not None
-    assert low_width["width_deg"] == pytest.approx(40.0, abs=2.0)
+    # The deployed board is turned a quarter turn, so its shorter side spans azimuth.
+    assert low_width["width_deg"] == pytest.approx(43.0, abs=2.0)
     assert high_width["width_deg"] == pytest.approx(10.0, abs=1.0)
 
 

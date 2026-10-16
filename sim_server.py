@@ -1173,6 +1173,7 @@ def _array_layout():
             "coordinate_system": data.get("coordinate_system"),
             "positions": [[float(value) for value in point] for point in data["microphone_positions_mm"]],
             "taper_sigma": float(data.get("taper_sigma", 0.0)),
+            "mount": data.get("array_mount") or "upright",
         }
     except (AttributeError, KeyError, TypeError, ValueError):
         return None
@@ -1520,6 +1521,7 @@ def _hardware_payload(payload_type, snapshot):
         "recording_meta": snapshot.get("recording_meta"),
         "bank": _bank_with_directions(snapshot.get("bank")),
         "outputs": snapshot.get("outputs"),
+        "array_mount": snapshot.get("array_mount"),
         "ch1": snapshot.get("ch1"),
         "level_time_constant_ms": _deployed_program().level_time_constant_ms,
         "taper": snapshot.get("taper"),

@@ -24,6 +24,9 @@ FIRMWARE_SETTINGS = {
     "tone": (0, 10000, 0),
 }
 
+# How the board is turned, seen from behind (beamforming_mathematics/array_mount.py).
+ARRAY_MOUNTS = ("upright", "cw90", "180", "ccw90")
+
 
 @dataclass(frozen=True)
 class BeamConfiguration:
@@ -189,6 +192,9 @@ def parse_line(line: str) -> dict[str, Any]:
             "microphones": _integer(parts[1], "microphones", 1, 255),
             "bank_beams": _integer(parts[2], "bank beams", 0, 400),
         }
+
+    if record_type == "MOUNT" and len(parts) == 2 and parts[1] in ARRAY_MOUNTS:
+        return {"type": "mount", "mount": parts[1]}
 
     if record_type == "LEVELS" and len(parts) >= 5 and parts[1] in {"B", "S"}:
         rows = _integer(parts[2], "rows", 1, 255)
@@ -438,6 +444,7 @@ class HeimdallState:
         self.bank_maps = 0
         self.bank_target: dict[str, Any] | None = None
         self.outputs: dict[str, Any] | None = None
+        self.array_mount: str | None = None
         self.ch1: dict[str, Any] | None = None
         self.settings: dict[str, int] = {}
         self.map_hash: str | None = None
@@ -452,11 +459,12 @@ class HeimdallState:
 
         if record_type == "ready":
             configuration = record["configuration"]
-            # The bank and output lines follow READY on every INFO.
+            # The mount, bank and output lines follow READY on every INFO.
             self.bank = None
             self.bank_levels_raw = None
             self.bank_target = None
             self.outputs = None
+            self.array_mount = None
             if configuration != self.configuration:
                 self.configuration = configuration
                 self.azimuth_deg = []
@@ -495,6 +503,8 @@ class HeimdallState:
             self.bank = {key: record[key] for key in ("rows", "columns", "rate_hz")}
         elif record_type == "outputs":
             self.outputs = {key: record[key] for key in ("microphones", "bank_beams")}
+        elif record_type == "mount":
+            self.array_mount = record["mount"]
         elif record_type == "levels":
             if record["source"] == "S":
                 self._require_configuration()
@@ -663,6 +673,7 @@ class HeimdallState:
             "tables": deepcopy(self.tables),
             "bank": self._bank_snapshot(),
             "outputs": deepcopy(self.outputs),
+            "array_mount": self.array_mount,
             "ch1": deepcopy(self.ch1),
             "settings": dict(self.settings),
             "map_hash": self.map_hash,

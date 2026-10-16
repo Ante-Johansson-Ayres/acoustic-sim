@@ -197,4 +197,4 @@ def test_deployed_program_reads_the_bank_contract():
     program = DeployedProgram.from_contract(json.loads(BANK_CONTRACT.read_text(encoding="ascii")))
     assert (program.bank_rows, program.bank_columns, program.bank_rate_hz) == (5, 5, 12000)
     assert len(program.bank_azimuth_deg) == 25 and program.selectors
-    assert program.configuration_lines() == ["BANK,5,5,12000", "OUTPUTS,44,25"]
+    assert program.configuration_lines() == ["MOUNT,cw90", "BANK,5,5,12000", "OUTPUTS,44,25"]

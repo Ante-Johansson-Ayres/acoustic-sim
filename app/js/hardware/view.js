@@ -27,6 +27,7 @@ const CAPTIONS = {
   points: 'Each point moves toward the array where the sound stands above the background; colour shows the level.',
 };
 const STYLES = [['tiles', 'Tiles'], ['surface', 'Surface'], ['points', 'Point cloud']];
+const MOUNTS = {upright: 'upright', cw90: 'turned 90° clockwise', 180: 'turned 180°', ccw90: 'turned 90° anticlockwise'};
 
 function loadPrefs() {
   try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch (_) { return {}; }
@@ -278,6 +279,14 @@ export function createView(container, {session}) {
     }
     const taper = frame?.taper;
     if (taper && !taper.applied) parts.push(h('span', {class: 'is-fault'}, `Taper not in place (${taper.verified}/${taper.written})`));
+    const mount = frame?.array_mount;
+    const tableMount = session.arrayLayout?.mount;
+    if (mount && tableMount && mount !== tableMount) {
+      parts.push(h('span', {class: 'is-fault'},
+        `Array ${MOUNTS[mount] ?? mount} in the firmware but ${MOUNTS[tableMount] ?? tableMount} in the beam table: rebuild and flash`));
+    } else if (mount) {
+      parts.push(h('span', {}, h('b', {}, 'Array '), MOUNTS[mount] ?? mount));
+    }
     if (field) {
       const span = `±${Math.round(fieldSpan(field))}° field of view`;
       parts.push(h('span', {}, h('b', {}, field.kind === 'bank' ? 'Bank ' : 'Sector grid '),
