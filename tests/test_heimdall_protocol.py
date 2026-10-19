@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import time
 import zlib
@@ -48,6 +49,15 @@ def test_dynamic_configuration_and_measurement_state():
     assert snapshot["levels_raw"][1][2] == 16777216
     assert snapshot["levels_linear"][1][2] == 1.0
     assert snapshot["levels_db"][1][2] == 0.0
+
+
+def test_snapshot_right_after_ready_serializes():
+    state = HeimdallState()
+    state.apply_line("READY,2D,2,3,6,44")
+
+    snapshot = state.snapshot()
+    json.dumps(snapshot)
+    assert snapshot["last_record"]["configuration"]["rows"] == 2
 
 
 def test_transport_reports_target_update_rate_and_age():

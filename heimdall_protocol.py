@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 import math
 from typing import Any
 
@@ -663,7 +663,10 @@ class HeimdallState:
             "last_steer": deepcopy(self.last_steer),
             "last_timing": deepcopy(self.last_timing),
             "last_error": deepcopy(self.last_error),
-            "last_record": deepcopy(self.last_record),
+            "last_record": None if self.last_record is None else {
+                key: asdict(value) if is_dataclass(value) else deepcopy(value)
+                for key, value in self.last_record.items()
+            },
             "audio_format": deepcopy(self.audio_format),
             "recording_state": self.recording_state,
             "last_recording": deepcopy(self.last_recording),
