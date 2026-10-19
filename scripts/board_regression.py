@@ -216,11 +216,11 @@ def channel_order(board, report):
     report.add("channel order (beam on channel 0)", difference >= 10, f"beam {difference:+.1f} dB over mic 0")
 
 
-def play(path):
+def play(path, loop=False):
     """Start a WAV on the default output, or stop it with None."""
     import winsound
     if path:
-        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | (winsound.SND_LOOP if loop else 0))
     else:
         winsound.PlaySound(None, 0)
 
