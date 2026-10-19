@@ -130,10 +130,11 @@ export function createView(container, {session, navigate}) {
       setText(detail, `Level ${num(solution.level, 1)} dBFS${margin}.`);
     } else {
       label.classList.remove('is-live');
-      setText(label, mode === 'track' ? 'Searching' : 'Paused');
+      const searching = mode === 'track' || mode === 'stare';
+      setText(label, searching ? 'Searching' : 'Paused');
       setText(azBig, '—');
       setText(elBig, '');
-      setText(detail, mode === 'track' ? 'Listening across the whole field for a source.' : 'Press Track to find and follow a sound source.');
+      setText(detail, searching ? 'Listening across the whole field for a source.' : 'Press Track to find and follow a sound source.');
     }
 
     if (cfg && frame?.levels_db) {
