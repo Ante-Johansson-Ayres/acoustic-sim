@@ -430,7 +430,9 @@ def beam_against_microphone(session, sector, microphone, microphones):
 
 
 def steering(session, args):
-    """7 x 7 search over +-12 deg with 2 kHz noise; re-centred once if the peak lands on the edge."""
+    """7 x 7 search over +-12 deg with 2 kHz noise; re-centred once if the peak lands on the edge.
+
+    Each peak gets a 1-sigma from the readings' own scatter: every cell moves by its standard error."""
     report, size, span = session.report, 7, 12.0
     centre = (args.speaker_az, args.speaker_el)
     for attempt in range(2):
@@ -438,12 +440,14 @@ def steering(session, args):
             session.sound("B2k")
             azimuths, elevations = session.grid(centre[0] - span, centre[0] + span, size,
                                                 centre[1] - span, centre[1] + span, size)
-            grid = np.zeros((size, size))
+            grid, noise = np.zeros((size, size)), np.zeros((size, size))
             for sector in range(size * size):
                 row, column = divmod(sector, size)
-                grid[row, column] = session.capture(
-                    "steering", f"{azimuths[column]:.1f}, {elevations[row]:.1f}", sector, 0.5,
-                    azimuth_deg=azimuths[column], elevation_deg=elevations[row])["mean_db"]
+                capture = session.capture(
+                    "steering", f"{azimuths[column]:.1f}, {elevations[row]:.1f}", sector, args.steer_seconds,
+                    azimuth_deg=azimuths[column], elevation_deg=elevations[row])
+                grid[row, column] = capture["mean_db"]
+                noise[row, column] = capture["std_db"] / np.sqrt(capture["n"])
             session.sound(None)
         row, column = np.unravel_index(int(np.argmax(grid)), grid.shape)
         on_edge = row in (0, size - 1) or column in (0, size - 1)
@@ -451,13 +455,17 @@ def steering(session, args):
             break
         centre = (azimuths[column], elevations[row])
     azimuth, elevation = refine_peak_2d(grid, azimuths, elevations)
+    sigma = [spread(lambda g, i=i: refine_peak_2d(g, azimuths, elevations)[i], grid, noise) for i in (0, 1)]
     errors = (azimuth - args.speaker_az, elevation - args.speaker_el)
-    session.values["steering"] = {"azimuth_deg": azimuth, "elevation_deg": elevation, "on_edge": bool(on_edge),
-                                  "contrast_db": float(grid.max() - grid.min())}
-    report.add("steering peak in azimuth", not on_edge and abs(errors[0]) <= 3,
-               f"{azimuth:.1f} deg, {errors[0]:+.1f} from the speaker" + (", peak on the grid edge" if on_edge else ""))
-    report.add("steering peak in elevation", not on_edge and abs(errors[1]) <= 8,
-               f"{elevation:.1f} deg, {errors[1]:+.1f} from the speaker (tape elevation is rough)")
+    session.values["steering"] = {"azimuth_deg": azimuth, "elevation_deg": elevation, "sigma_deg": sigma,
+                                  "on_edge": bool(on_edge), "contrast_db": float(grid.max() - grid.min())}
+    for axis, peak, error, s, tolerance, note in (
+            ("azimuth", azimuth, errors[0], sigma[0], 3, ""),
+            ("elevation", elevation, errors[1], sigma[1], 8, " (tape elevation is rough)")):
+        precise = s is not None and s <= 1.0
+        report.add(f"steering peak in {axis}", not on_edge and abs(error) <= tolerance and precise,
+                   f"{peak:.1f} +- {'?' if s is None else f'{s:.1f}'} deg, {error:+.1f} from the speaker{note}" +
+                   (", peak on the grid edge" if on_edge else "") + ("" if precise else ", sigma above 1 deg"))
     return azimuth, elevation
 
 
@@ -569,6 +577,9 @@ def main():
     parser.add_argument("--distance", type=float, help="speaker distance in metres (recorded in the summary)")
     parser.add_argument("--microphone", type=int, default=4, help="microphone compared with the beam")
     parser.add_argument("--cut-seconds", type=float, default=1.0, help="capture per cut direction")
+    parser.add_argument("--steer-seconds", type=float, default=2.0,
+                        help="capture per steering point; on a free-field theory grid at 2 kHz, 1 s gives a peak "
+                             "sigma of 0.8-1.0 deg and 2 s gives 0.55-0.75 (gate: 1 deg)")
     parser.add_argument("--skip-survey", action="store_true", help="skip the 44-microphone survey")
     parser.add_argument("--out", help="folder for the signals, captures.csv and summary.json (default: temp)")
     args = parser.parse_args()

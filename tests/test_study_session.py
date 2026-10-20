@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import sys
 import wave
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -128,6 +130,43 @@ def test_capture_refuses_without_a_reading_of_its_sector():
         study.Session(FakeBoard(refuse_steer=True), {}, Rows(), study.Results()).capture("t", "l", 24, 0.01)
     with pytest.raises(RuntimeError, match="no level readings"):
         study.Session(FakeBoard(wrong_sector=True), {}, Rows(), study.Results()).capture("t", "l", 24, 0.01)
+
+
+class SteeringSession:
+    """Answers captures from a paraboloid peaked at (1, -1) deg, 0.48 dB down at 4 deg, with a set scatter."""
+
+    def __init__(self, std_db, n):
+        self.report, self.values, self.std_db, self.n = study.Results(), {}, std_db, n
+
+    @contextmanager
+    def settings(self, **changes):
+        yield
+
+    def sound(self, name):
+        pass
+
+    def grid(self, az_min, az_max, columns, el_min, el_max, rows):
+        self.axes = study.grid_angles(az_min, az_max, columns), study.grid_angles(el_min, el_max, rows)
+        return self.axes
+
+    def capture(self, step, label, sector, seconds, azimuth_deg, elevation_deg):
+        level = -20 - 0.03 * ((azimuth_deg - 1) ** 2 + (elevation_deg + 1) ** 2)
+        return {"mean_db": level, "std_db": self.std_db, "n": self.n}
+
+
+def test_steering_passes_only_with_a_small_sigma():
+    args = SimpleNamespace(speaker_az=0.0, speaker_el=0.0, steer_seconds=2.0)
+    quiet = SteeringSession(std_db=0.6, n=18)
+    azimuth, elevation = study.steering(quiet, args)
+    assert azimuth == pytest.approx(1.0, abs=0.05) and elevation == pytest.approx(-1.0, abs=0.05)
+    assert all(s < 1.0 for s in quiet.values["steering"]["sigma_deg"])
+    assert [passed for _, passed, _ in quiet.report.rows] == [True, True]
+
+    noisy = SteeringSession(std_db=3.0, n=9)
+    study.steering(noisy, args)
+    assert all(s > 1.0 for s in noisy.values["steering"]["sigma_deg"])
+    assert [passed for _, passed, _ in noisy.report.rows] == [False, False]
+    assert all("sigma above 1 deg" in detail for _, _, detail in noisy.report.rows)
 
 
 def test_signals_loop_cleanly_and_do_not_clip(tmp_path):
