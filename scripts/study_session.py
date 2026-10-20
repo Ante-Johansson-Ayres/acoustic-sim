@@ -118,6 +118,16 @@ def same_angles(actual, expected):
         abs(a - b) < 1e-3 for a, b in zip(actual, expected))
 
 
+# Uncertainty of a result computed from noisy means ------------------------------------------------
+
+def spread(estimate, means, errors, runs=1000):
+    """1-sigma of estimate(means) when every mean moves by its standard error; None if it mostly fails."""
+    rng = np.random.default_rng(1)
+    values = [estimate(np.asarray(means, float) + rng.normal(0, errors)) for _ in range(runs)]
+    values = [v for v in values if v is not None]
+    return float(np.std(values)) if len(values) >= runs // 2 else None
+
+
 # Test signals: periodic in LOOP_S, so a looping WAV has no seam ----------------------------------
 
 def make_signals(folder):

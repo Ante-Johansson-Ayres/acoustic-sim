@@ -64,6 +64,13 @@ def test_grid_angles_follow_the_firmware():
     assert study.same_angles([-30.0, 0.0, 30.0], study.grid_angles(-30, 30, 3))
 
 
+def test_spread_is_the_scatter_of_the_estimate():
+    # The mean of 100 values each with sigma 1 scatters by 1 / sqrt(100).
+    assert study.spread(np.mean, np.zeros(100), np.ones(100)) == pytest.approx(0.1, rel=0.1)
+    assert study.spread(np.mean, np.zeros(100), np.zeros(100)) == 0.0
+    assert study.spread(lambda values: None, np.zeros(3), np.ones(3)) is None
+
+
 def test_signals_loop_cleanly_and_do_not_clip(tmp_path):
     paths = study.make_signals(str(tmp_path))
     assert set(paths) == {"A", "B1k", "B2k", "A-6", "A-12", "A-18", "A-24", "A-30", "A-36", "D150", "D200", "D310"}
