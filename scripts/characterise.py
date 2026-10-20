@@ -9,7 +9,9 @@
     python scripts/characterise.py r1     room reverberation time per octave (interrupted noise)
     python scripts/characterise.py s1     system sensitivity and equivalent noise with an SPL meter
 
-The speaker tests ask where to put the speaker and for the position you measured. Needs sim_server.py
+The speaker tests say where to put the speaker. a3 and l1 then find it with the steered beam (--truth array,
+the default: rough placement is enough, no tape); with --truth measured they ask for the measured position.
+a4 always needs measured positions (tape or a phone measuring app). Needs sim_server.py
 connected to the board, the speaker as the Windows default output and a quiet room. Writes every capture
 (captures.csv), summary.json and figures to --out, and restores gains, settings, Ch1 and the grid.
 """
@@ -271,6 +273,19 @@ OCTAVES = {"500 Hz": 500.0, "1 kHz": 1000.0, "2 kHz": 2000.0, "4 kHz": 4000.0}
 L1_POSITIONS = "-30,0;-22.5,0;-15,0;-7.5,0;0,0;7.5,0;15,0;22.5,0;30,0;0,-15;0,-7.5;0,7.5;0,15"
 
 
+def place(nominal_az, nominal_el, distance_m):
+    """Rough placement; the array then measures where the speaker is. Returns the nominal distance."""
+    a, e = np.radians(nominal_az), np.radians(nominal_el)
+    right, up = distance_m * np.cos(e) * np.sin(a), distance_m * np.sin(e)
+    side = (f"{abs(100 * right):.0f} cm {'right' if right >= 0 else 'left'} of the centre line (seen from behind "
+            "the array)" if abs(right) >= 0.05 else "straight ahead")
+    height = (f", {abs(100 * up):.0f} cm {'above' if up >= 0 else 'below'} the array centre" if abs(up) >= 0.05
+              else ", at the height of the array centre")
+    input(f"\nSpeaker roughly {side}{height}, about {distance_m:g} m away, facing the array. Rest it on something "
+          "rather than holding it; close is fine, the array measures where it is. Enter when ready.")
+    return distance_m
+
+
 def ask_position(nominal_az, nominal_el, distance_m):
     """Tell the operator where the speaker goes; return the measured (azimuth, elevation, distance)."""
     a, e = np.radians(nominal_az), np.radians(nominal_el)
@@ -392,11 +407,41 @@ def sidelobe_bound(cut, centre_value, rel_model, db_model):
     return float(np.nanmax(cut["signal_db"][outside]) - np.nanmax(cut["signal_db"]))
 
 
+def locate(session, contract, centre, distance_m, repeats, seconds, rng, label):
+    """Find the speaker with the steered beam: 7x7 search at 4 deg around `centre`, then 1 deg cuts through its
+    peak fitted with theory. Returns ((az, el), (sigma_az, sigma_el), fits, coarse peak)."""
+    session.sound("B2k")
+    azimuths, elevations = session.grid(centre[0] - 12, centre[0] + 12, 7, centre[1] - 12, centre[1] + 12, 7)
+    grid = np.zeros((7, 7))
+    for s in range(49):
+        r, c = divmod(s, 7)
+        grid[r, c] = session.capture(label, f"search {azimuths[c]:g}, {elevations[r]:g}", s, 0.5,
+                                     azimuth_deg=azimuths[c], elevation_deg=elevations[r])["mean_db"]
+    coarse = refine_peak_2d(grid, azimuths, elevations)
+    found, sigma, fits = [], [], {}
+    for i, axis in enumerate(("azimuth", "elevation")):
+        cut = measure_cut(session, axis, coarse, 1.0, 12.0, "B2k", repeats, seconds, rng, label)
+        rel_model, db_model = template(contract, coarse, axis, band_frequencies(2000.0), distance_m)
+        fits[axis] = fit_axis(cut, coarse[i], rel_model, db_model)
+        found.append(coarse[i] + fits[axis]["shift_deg"] if fits[axis] else float("nan"))
+        sigma.append(fits[axis]["shift_sigma_deg"] if fits[axis] else float("nan"))
+    session.restore_grid()
+    return tuple(found), tuple(sigma), fits, coarse
+
+
 def a3(session, args, out, array):
     """Azimuth and elevation cuts through the speaker per band, fitted with the theory."""
     contract = load_beam_contract()
-    az, el, distance = ask_position(0.0, 0.0, args.distance)
     rng = np.random.default_rng(args.seed)
+    if args.truth == "array":
+        distance = place(0.0, 0.0, args.distance)
+        with session.settings(**MCU_BEAM):
+            (az, el), _, _, _ = locate(session, contract, (0.0, 0.0), distance, 1, 1.0, rng, "a3 locate")
+        if not (np.isfinite(az) and np.isfinite(el)):
+            raise RuntimeError("the steered beam did not find the speaker; is it on and roughly in front?")
+        print(f"  speaker found at {az:+.2f}, {el:+.2f} deg", flush=True)
+    else:
+        az, el, distance = ask_position(0.0, 0.0, args.distance)
     results, plots = {}, []
     with session.settings(**MCU_BEAM):
         for band in args.bands.split(","):
@@ -435,24 +480,13 @@ def a4(session, args, out, array):
     contract = load_beam_contract()
     rng = np.random.default_rng(args.seed)
     rows = []
+    print("A4 needs each speaker position measured (tape, or a phone measuring app): here the array cannot be "
+          "its own reference.", flush=True)
     with session.settings(**MCU_BEAM):
         for nominal in parse_positions(args.positions):
             az, el, distance = ask_position(nominal[0], nominal[1], args.distance)
-            session.sound("B2k")
-            azimuths, elevations = session.grid(az - 12, az + 12, 7, el - 12, el + 12, 7)
-            grid = np.zeros((7, 7))
-            for s in range(49):
-                r, c = divmod(s, 7)
-                grid[r, c] = session.capture("a4", f"search {azimuths[c]:g}, {elevations[r]:g}", s, 0.5,
-                                             azimuth_deg=azimuths[c], elevation_deg=elevations[r])["mean_db"]
-            coarse = refine_peak_2d(grid, azimuths, elevations)
-            found, sigma, fits = [], [], {}
-            for i, axis in enumerate(("azimuth", "elevation")):
-                cut = measure_cut(session, axis, coarse, 1.0, 12.0, "B2k", args.repeats, args.seconds or 1.0, rng, "a4")
-                rel_model, db_model = template(contract, (az, el), axis, band_frequencies(2000.0), distance)
-                fits[axis] = fit_axis(cut, coarse[i], rel_model, db_model)
-                found.append(coarse[i] + fits[axis]["shift_deg"] if fits[axis] else float("nan"))
-                sigma.append(fits[axis]["shift_sigma_deg"] if fits[axis] else float("nan"))
+            found, sigma, fits, coarse = locate(session, contract, (az, el), distance, args.repeats,
+                                                args.seconds or 1.0, rng, "a4")
             rows.append({"true_az": az, "true_el": el, "distance_m": distance, "measured_az": found[0],
                          "measured_el": found[1], "sigma_az": sigma[0], "sigma_el": sigma[1],
                          "coarse": list(coarse), "fits": fits})
@@ -558,13 +592,25 @@ def l1(session, args, out, array):
     """Live direction vs speaker position, against the firmware centroid applied to theory bank levels."""
     contract = load_beam_contract()
     bank = find(json.loads(Path(default_contract_path()).read_text(encoding="utf-8")), "bank")
+    rng = np.random.default_rng(args.seed)
     rows = []
     for nominal in parse_positions(args.positions or L1_POSITIONS):
-        az, el, distance = ask_position(nominal[0], nominal[1], args.distance)
-        predicted = bank_prediction(bank, contract, az, el, distance)
+        if args.truth == "array":
+            distance = place(nominal[0], nominal[1], args.distance)
+        else:
+            az, el, distance = ask_position(nominal[0], nominal[1], args.distance)
         trials = [live_trial(session, args.sound, args.listen) for _ in range(args.trials)]
         hits = np.array([t for t in trials if t])
-        row = {"true_az": az, "true_el": el, "distance_m": distance, "predicted_az": predicted[0],
+        if args.truth == "array":
+            centre = (float(np.median(hits[:, 0])), float(np.median(hits[:, 1]))) if len(hits) else nominal
+            with session.settings(**MCU_BEAM):
+                (az, el), truth_sigma, _, _ = locate(session, contract, centre, distance, 1, 1.0, rng, "l1 locate")
+        else:
+            truth_sigma = (args.alignment_sigma, args.alignment_sigma)
+        predicted = bank_prediction(bank, contract, az, el, distance) if np.isfinite([az, el]).all() else (
+            float("nan"), float("nan"))
+        row = {"true_az": az, "true_el": el, "distance_m": distance, "truth": args.truth,
+               "truth_sigma_deg": list(truth_sigma), "predicted_az": predicted[0],
                "predicted_el": predicted[1], "trials": trials, "detected": len(hits) / len(trials)}
         if len(hits):
             row.update({"median_az": float(np.median(hits[:, 0])), "median_el": float(np.median(hits[:, 1])),
@@ -572,15 +618,21 @@ def l1(session, args, out, array):
                         "spread_el": float(np.subtract(*np.percentile(hits[:, 1], [75, 25])))})
             for axis, key in (("az", 0), ("el", 1)):
                 se = 1.253 * np.std(hits[:, key], ddof=1) / np.sqrt(len(hits)) if len(hits) > 1 else 0.0
-                row[f"sigma_{axis}"] = float(np.hypot(se, args.alignment_sigma))
+                row[f"sigma_{axis}"] = float(np.hypot(se, truth_sigma[key]))
             print(f"  true {az:+.1f}, {el:+.1f}: Live {row['median_az']:+.1f}, {row['median_el']:+.1f}; "
                   f"predicted {predicted[0]:+.1f}, {predicted[1]:+.1f}; detected {row['detected']:.0%}", flush=True)
         rows.append(row)
-    detected = [r for r in rows if "median_az" in r]
+    detected = [r for r in rows if "median_az" in r and np.isfinite([r["true_az"], r["true_el"]]).all()]
+    lost = [r for r in rows if not np.isfinite([r["true_az"], r["true_el"]]).all()]
+    if lost:
+        session.report.add("L1 speaker found by the steered beam", False,
+                           f"not found at {len(lost)} position(s): speaker off, too quiet or outside the search")
     near = all(abs(r["median_az"] - r["predicted_az"]) <= 2 * r["sigma_az"] and
                abs(r["median_el"] - r["predicted_el"]) <= 2 * r["sigma_el"] for r in detected)
     session.report.add("L1 every position within 2 sigma of the prediction", bool(detected) and near,
-                       f"{len(detected)} of {len(rows)} positions detected")
+                       f"{len(detected)} of {len(rows)} positions detected; speaker direction from "
+                       + ("the steered beam's fit (Live vs the array's own fine beam)" if args.truth == "array"
+                          else "measured positions"))
     session.report.add("L1 detection", all(r["detected"] >= 0.95 for r in rows),
                        f"lowest {min(r['detected'] for r in rows):.0%} of trials")
     errors = [np.hypot(r["median_az"] - r["true_az"], r["median_el"] - r["true_el"]) for r in detected]
@@ -764,6 +816,8 @@ def main():
     parser.add_argument("--positions", default="-30,0;-15,0;0,0;15,0;30,0",
                         help="a4/l1: 'az,el;az,el;...' nominal positions (l1 default: 13 positions)")
     parser.add_argument("--alignment-sigma", type=float, default=0.4, help="speaker placement 1-sigma (deg)")
+    parser.add_argument("--truth", choices=("array", "measured"), default="array",
+                        help="a3/l1: find the speaker with the steered beam, or type in measured positions")
     parser.add_argument("--trials", type=int, default=5, help="l1: trials per position")
     parser.add_argument("--listen", type=float, default=8.0, help="l1: seconds of sound per trial")
     parser.add_argument("--sound", default="A", help="l1: signal name or WAV path (e.g. audio/drone.wav)")
