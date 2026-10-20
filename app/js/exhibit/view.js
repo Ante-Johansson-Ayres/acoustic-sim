@@ -33,14 +33,16 @@ export function createView(container, {session, navigate}) {
   const label = h('span', {class: 'ex-answer__label'}, 'Paused');
   const azBig = h('span', {class: 'ex-answer__big'}, '—');
   const elBig = h('span', {class: 'ex-answer__big'}, '');
-  const detail = h('span', {class: 'ex-answer__detail'}, 'Press Track to find and follow a sound source.');
+  const detail = h('span', {class: 'ex-answer__detail'}, 'Press Live to find a sound source.');
   const answer = h('div', {class: 'ex-answer', 'aria-live': 'polite'}, label, azBig, elBig, detail);
 
   const pill = (text, onClick) => h('button', {type: 'button', class: 'ex-pill', 'aria-pressed': 'false', onClick}, text);
+  const liveButton = pill('Live', () => session.stare());
   const trackButton = pill('Track', () => session.track());
   const scanButton = pill('Scan', () => session.continuous());
   const stopButton = pill('Stop', () => session.stop());
-  const controls = h('div', {class: 'ex-controls', role: 'toolbar', 'aria-label': 'Mode'}, trackButton, scanButton, stopButton);
+  const controls = h('div', {class: 'ex-controls', role: 'toolbar', 'aria-label': 'Mode'},
+    liveButton, trackButton, scanButton, stopButton);
 
   const miniTitle = h('span', {class: 'ex-mini__title'}, 'All sectors');
   const mini = h('div', {class: 'ex-mini__grid', 'aria-hidden': 'true'});
@@ -114,10 +116,11 @@ export function createView(container, {session, navigate}) {
     setText(subtitle, cfg ? `Acoustic drone tracking, ${cfg.microphones} microphones` : 'Acoustic drone tracking');
 
     const mode = operatingMode(session);
+    liveButton.setAttribute('aria-pressed', String(mode === 'stare'));
     trackButton.setAttribute('aria-pressed', String(mode === 'track'));
     scanButton.setAttribute('aria-pressed', String(mode === 'continuous'));
     stopButton.setAttribute('aria-pressed', String(mode === 'idle'));
-    for (const button of [trackButton, scanButton, stopButton]) button.disabled = !session.ready;
+    for (const button of [liveButton, trackButton, scanButton, stopButton]) button.disabled = !session.ready;
 
     const solution = session.solution(frame);
     const showAnswer = solution && (solution.kind === 'target' || mode === 'continuous' || mode === 'once' || mode === 'fixed');
@@ -134,7 +137,7 @@ export function createView(container, {session, navigate}) {
       setText(label, searching ? 'Searching' : 'Paused');
       setText(azBig, '—');
       setText(elBig, '');
-      setText(detail, searching ? 'Listening across the whole field for a source.' : 'Press Track to find and follow a sound source.');
+      setText(detail, searching ? 'Listening across the whole field for a source.' : 'Press Live to find a sound source.');
     }
 
     if (cfg && frame?.levels_db) {
