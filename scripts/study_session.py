@@ -150,7 +150,8 @@ def make_signals(folder):
         return rms(sum(np.sin(2 * np.pi * f0 * h * t + 2 * np.pi * rng.random()) / h for h in range(1, 9)), -18)
 
     base = band(500, 3500)
-    signals = {"A": base, "B1k": band(891, 1122), "B2k": band(1782, 2245)}
+    signals = {"A": base, "B1k": band(891, 1122), "B2k": band(1782, 2245), "B3k": band(2806, 3536),
+               "W": band(200, 8000), "T1k": rms(np.sin(2 * np.pi * 1000 * np.arange(n) / RATE), -18)}
     signals.update({f"A-{step}": base * 10 ** (-step / 20) for step in range(6, 37, 6)})
     signals.update({f"D{f0}": harmonics(f0) for f0 in TONES_HZ})
     paths = {}

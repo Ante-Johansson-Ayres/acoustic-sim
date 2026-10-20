@@ -154,12 +154,18 @@ def windows(board, report, rounds):
                f"{measured}/{rounds} measured, {errors} failed (last error {board.state.get('last_error')})")
 
 
-def record(board, seconds):
-    """Record, stop and download; the stop record's statistics and the stereo PCM, or a reason."""
+def record(board, seconds, at=None, action=None):
+    """Record, stop and download; the stop record's statistics and the stereo PCM, or a reason.
+    `action()` runs `at` seconds into the recording (for example to stop a sound)."""
     board.command("R,1")
     if not board.pump(3.0, lambda s: s.get("recording_state") == "recording"):
         return None, None, f"did not start ({board.state.get('last_error')})"
-    board.pump(seconds)
+    if action is not None:
+        board.pump(at)
+        action()
+        board.pump(seconds - at)
+    else:
+        board.pump(seconds)
     board.command("R,0")
     if not board.pump(5.0, lambda s: s.get("recording_state") in ("ready", "error")):
         return None, None, "did not stop"
