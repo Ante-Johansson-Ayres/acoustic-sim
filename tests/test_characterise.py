@@ -83,3 +83,34 @@ def test_l90_and_summaries():
     assert characterise.l90(list(range(101))) == pytest.approx(10.0)
     mean, se = characterise.summarise([1.0, 3.0])
     assert (mean, se) == pytest.approx((2.0, 1.0))
+
+
+def test_band_directivity_and_the_diffuse_field_formula():
+    contract = characterise.load_beam_contract()
+    assert characterise.band_directivity_db(contract, 2000.0) == pytest.approx(14.8, abs=0.15)
+    assert characterise.band_directivity_db(contract, 1000.0) == pytest.approx(10.0, abs=0.15)
+    beam = 44 ** 2 / 30.0 * 0.1
+    assert characterise.directivity_from_levels(44, 0.1, 1.0, beam) == pytest.approx(30.0)
+    assert np.isnan(characterise.excess(-60.0, -50.0))
+
+
+def test_highpass_for_the_aliasing_test():
+    taps = characterise.highpass_taps(3500.0)
+    response = lambda f: 20 * np.log10(abs(np.sum(taps * np.exp(-2j * np.pi * f / 48000 * np.arange(11)))))
+    assert response(0.0) < -60
+    assert response(500.0) < -25
+    assert -2.0 < response(8000.0) < 1.0
+    assert response(5000.0) > -6.0
+    assert characterise.to_word(-1.0) == 0xFF000000
+    assert characterise.to_word(0.5) == 0x00800000
+
+
+def test_grating_lobes_appear_at_8k_not_at_5k():
+    contract = characterise.load_beam_contract()
+    for centre, expect in ((5000.0, False), (8000.0, True)):
+        rel, db = characterise.template(contract, (0.0, 0.0), "azimuth", characterise.band_frequencies(centre), None)
+        half = characterise.first_null_half_width(rel, db)
+        lobes = [lobe for lobe in characterise.grating_lobes(rel, db, half, -6.0) if abs(lobe[0]) <= 60.0]
+        assert bool(lobes) is expect
+        if expect:
+            assert all(35.0 < abs(angle) < 60.0 for angle, _ in lobes)

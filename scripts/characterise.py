@@ -8,6 +8,8 @@
     python scripts/characterise.py l1     Live (bank) direction vs speaker position, against the firmware's centroid
     python scripts/characterise.py r1     room reverberation time per octave (interrupted noise)
     python scripts/characterise.py s1     system sensitivity and equivalent noise with an SPL meter
+    python scripts/characterise.py a9     path gain, directivity index (diffuse field), signal and noise gain
+    python scripts/characterise.py a10    spatial aliasing: grating lobes at 5 and 8 kHz (beam FIR swapped for a high-pass)
 
 The speaker tests say where to put the speaker. a3 and l1 then find it with the steered beam (--truth array,
 the default: rough placement is enough, no tape); with --truth measured they ask for the measured position.
@@ -26,13 +28,14 @@ import sys
 import tempfile
 import time
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from array_theory import band_frequencies, fit_cut, steered_response  # noqa: E402
+from array_theory import band_frequencies, directivity_index_db, fit_cut, steered_response  # noqa: E402
 from board_regression import WS_URL, Board, connect, http, play, record  # noqa: E402
 from heimdall_acoustic import default_contract_path, load_beam_contract  # noqa: E402
 from study_session import (FIELDS, MCU_BEAM, WINDOWS, Results, Session, make_signals, power,  # noqa: E402
@@ -363,7 +366,8 @@ def measure_cut(session, axis, centre, step, half, signal, repeats, seconds, rng
         mean = np.nanmean(runs, axis=0)
     snr = np.array([snr_db(np.mean(np.array(levels)[:, s]), off[s]) for s in range(n)])
     return {"angles": angles, "signal_db": mean, "se_db": np.fmax(within, np.nan_to_num(between)),
-            "snr_db": snr, "repeats_db": runs, "drift_db": drifts, "silent_db": off}
+            "snr_db": snr, "repeats_db": runs, "drift_db": drifts, "silent_db": off,
+            "on_db": np.mean(np.array(levels), axis=0)}
 
 
 def fit_axis(cut, centre_value, rel_model, db_model, shifts=None):
@@ -801,8 +805,263 @@ def figure_live(rows, out):
     fig.savefig(os.path.join(out, "l1_live.png"), dpi=150)
 
 
-TESTS = {"n1": n1, "n2": n2, "a3": a3, "a4": a4, "a8": a8, "l1": l1, "r1": r1, "s1": s1}
-SOUND_TESTS = {"a3", "a4", "a8", "l1", "r1", "s1"}
+A9_BANDS = ("B1k", "B2k", "B3k")
+A10_BANDS = {"B5k": 5000.0, "B8k": 8000.0}
+
+
+def registry_parameter(group):
+    """(address, words) of a DSP parameter group from the backend's register map."""
+    status, registry = http("GET", "/dsp/registry")
+    if status != 200:
+        raise RuntimeError(f"no DSP register map ({status})")
+    for parameter in registry["parameters"]:
+        if parameter.get("group") == group:
+            return int(parameter["address"]), int(parameter["words"])
+    raise RuntimeError(f"no {group} in the DSP register map")
+
+
+def read_words(address, count):
+    status, body = http("POST", "/dsp/read", {"address": address, "count": count})
+    if status != 200:
+        raise RuntimeError(f"DSP read refused ({status}): {body}")
+    return [int(word) for word in body["words"]]
+
+
+def highpass_taps(cutoff_hz, taps=11, rate=48000.0):
+    """Linear-phase FIR high-pass: centre tap minus a Hamming-windowed sinc low-pass with unity DC gain."""
+    n = np.arange(taps) - (taps - 1) / 2
+    low = 2 * cutoff_hz / rate * np.sinc(2 * cutoff_hz / rate * n) * np.hamming(taps)
+    high = -low / low.sum()
+    high[(taps - 1) // 2] += 1.0
+    return high
+
+
+def to_word(value):
+    """8.24 fixed point as the 32-bit two's-complement word the DSP stores."""
+    return int(round(value * (1 << 24))) & 0xFFFFFFFF
+
+
+@contextmanager
+def fir_replaced(board, highpass_hz=None):
+    """Beam FIR stage 1 as a centre tap of 1 (Study's Bypass), stage 2 the same or a high-pass at highpass_hz;
+    the flashed taps are put back and checked."""
+    board.stop()
+    stages = [registry_parameter(group) for group in ("fir1", "fir2")]
+    originals = [read_words(address, words) for address, words in stages]
+    try:
+        for index, (address, words) in enumerate(stages):
+            taps = np.zeros(words)
+            taps[words // 2] = 1.0
+            if index == 1 and highpass_hz:
+                taps = highpass_taps(highpass_hz, words)
+            write_words({address + k: to_word(t) for k, t in enumerate(taps)})
+        yield
+    finally:
+        board.stop()
+        for (address, words), taps in zip(stages, originals):
+            write_words({address + k: tap for k, tap in enumerate(taps)})
+        if [read_words(address, words) for address, words in stages] != originals:
+            raise RuntimeError("FIR taps not restored: reset the MCU (its boot reloads the DSP program)")
+
+
+def excess(on_db, off_db):
+    """Signal power: on minus off, in power; nan when not above the floor."""
+    value = float(power(on_db) - power(off_db))
+    return value if value > 0 else float("nan")
+
+
+def band_directivity_db(contract, centre_hz):
+    """Directivity index at 0,0 for diffuse noise over a 1/3-octave band (power average of 1/DF)."""
+    inverse = np.mean([10 ** (-directivity_index_db(contract, f) / 10) for f in band_frequencies(centre_hz)])
+    return float(-10 * np.log10(inverse))
+
+
+def directivity_from_levels(microphones, path_gain, microphone_power, beam_power):
+    """DF = N^2 * G * P_mic / P_beam: the diffuse-field beam/microphone ratio corrected by the path gain G."""
+    return float(microphones ** 2 * path_gain * microphone_power / beam_power)
+
+
+def grating_lobes(rel_deg, db, main_half_deg, threshold_db=-10.0):
+    """Local maxima at or above threshold_db (re the main peak) outside +-main_half_deg: [(angle, level)]."""
+    return [(float(rel_deg[i]), float(db[i])) for i in range(1, len(db) - 1)
+            if abs(rel_deg[i]) > main_half_deg and db[i] >= threshold_db and db[i] >= db[i - 1] and db[i] >= db[i + 1]]
+
+
+def first_null_half_width(rel_deg, db):
+    minima = [abs(rel_deg[i]) for i in range(1, len(db) - 1)
+              if db[i] < db[i - 1] and db[i] <= db[i + 1] and db[i] < -6]
+    return min(minima) if minima else 10.0
+
+
+def a9(session, args, out, array):
+    """(1) Path gain G: one microphone through the beam (others muted) vs the same microphone on Ch1.
+    (2) Directivity index by the diffuse-field method: speaker facing away, beam/microphone power ratio / G.
+    (3) Speaker close and in front: signal gain and noise gain of the full beam (/ G); their difference is the
+    array gain here. WNG proper (16.4 dB) needs a free field and a self-noise-limited floor."""
+    contract = load_beam_contract()
+    data = json.loads(Path(default_contract_path()).read_text(encoding="utf-8"))
+    addresses = [int(a) for a in find(data, "gain_addresses")]
+    unity = [int(w) for w in find(data, "gain_fixpt_8_24")]
+    count = len(addresses)
+    references = [int(m) for m in np.random.default_rng(1).permutation(count)[:args.references]]
+    seconds = args.seconds or 3.0
+    centre = session.speaker_sector(0, 0)
+    rng = np.random.default_rng(args.seed)
+
+    def beam(label, sector=centre):
+        return session.capture("a9", label, sector, seconds)["mean_db"]
+
+    def mics(label, which, source=1):
+        values = {}
+        with session.settings(**WINDOWS, channel=1):
+            for m in which:
+                session.route(source, m)
+                values[m] = session.capture("a9", f"{label}, Ch1 {source},{m}", centre, seconds, value=m)["mean_db"]
+        return values
+
+    def gains_only(on):
+        session.board.stop()
+        write_words({a: (unity[k] if k in on else 0) for k, a in enumerate(addresses)})
+
+    place(0.0, 0.0, args.distance)
+    path, links = {}, {}
+    try:
+        with session.settings(**MCU_BEAM):
+            gains_only(set())
+            links["ch0"] = beam("link floor, all muted")
+            links["ch1"] = mics("link floor, all muted", [0], source=0)[0]
+            for m in references[:2]:
+                gains_only({m})
+                for band in A9_BANDS:
+                    session.sound(None)
+                    off_b, off_m = beam(f"path {band} silent, microphone {m} alone"), mics(f"path {band} silent", [m])[m]
+                    session.sound(band)
+                    on_b, on_m = beam(f"path {band}, microphone {m} alone"), mics(f"path {band}", [m])[m]
+                    path.setdefault(band, []).append(excess(on_b, off_b) / excess(on_m, off_m))
+                session.sound(None)
+    finally:
+        gains_only(set(range(count)))
+        reload_dsp(session.board)
+    g = {band: float(np.nanmean(values)) for band, values in path.items()}
+    result = {"references": references, "link_floor_dbfs": links, "path_gain_db": {}, "bands": {}}
+    for band in A9_BANDS:
+        result["path_gain_db"][band] = [10 * np.log10(v) if np.isfinite(v) else None for v in path[band]]
+        session.report.info(f"A9 path gain {band}", f"{10 * np.log10(g[band]):+.1f} dB, beam path vs microphone path "
+                            f"(microphones {references[:2]}: " + ", ".join(
+                                f"{v:+.1f}" for v in result["path_gain_db"][band] if v is not None) + ")")
+
+    input("\nA9 diffuse field: turn the speaker to face a far wall or corner, as far from the array as the room "
+          "allows, ideally with no direct line to the array. Enter when ready.")
+    directions = [(0.0, 0.0), (34.29, 0.0), (-34.29, 0.0), (0.0, 34.29), (0.0, -34.29)]
+    sectors = [session.speaker_sector(az, el) for az, el in directions]
+    with session.settings(**MCU_BEAM):
+        for band in A9_BANDS:
+            session.sound(None)
+            off_b, off_m = [beam(f"diffuse {band} silent", s) for s in sectors], mics(f"diffuse {band} silent", references)
+            session.sound(band)
+            on_b, on_m = [beam(f"diffuse {band}", s) for s in sectors], mics(f"diffuse {band}", references)
+            session.sound(None)
+            beam_power = np.array([excess(a, b) for a, b in zip(on_b, off_b)])
+            mic_power = np.array([excess(on_m[m], off_m[m]) for m in references])
+            df = directivity_from_levels(count, g[band], np.nanmean(mic_power), np.nanmean(beam_power))
+            theory = band_directivity_db(contract, BANDS[band][0])
+            spread = float(10 * np.log10(np.nanmax(beam_power) / np.nanmin(beam_power)))
+            measured = 10 * np.log10(df) if df > 0 else float("nan")
+            result["bands"].setdefault(band, {}).update({"di_db": measured, "di_theory_db": theory,
+                                                         "beam_spread_db": spread})
+            session.report.info(f"A9 directivity index {band}", f"{measured:.1f} dB, theory {theory:.1f} "
+                                f"(diffuse-field method, approximate in a room); beam spread over 5 directions "
+                                f"{spread:.1f} dB (large = direct sound still present)")
+
+    near = place(0.0, 0.0, args.near_distance)
+    with session.settings(**MCU_BEAM):
+        (az, el), _, _, _ = locate(session, contract, (0.0, 0.0), near, 1, 1.0, rng, "a9 locate")
+        if not np.isfinite([az, el]).all():
+            az, el = 0.0, 0.0
+        session.grid(az, az, 1, el, el, 1)
+        for band in A9_BANDS:
+            session.sound(None)
+            off_b, off_m = beam(f"near {band} silent", 0), mics(f"near {band} silent", references)
+            session.sound(band)
+            on_b, on_m = beam(f"near {band}", 0), mics(f"near {band}", references)
+            session.sound(None)
+            signal = excess(on_b, off_b) / np.nanmean([excess(on_m[m], off_m[m]) for m in references]) / g[band]
+            noise = (excess(off_b, links["ch0"]) /
+                     np.nanmean([excess(off_m[m], links["ch1"]) for m in references]) / g[band])
+            direct = count ** 2 * float(steered_response(contract, az, el, az, el,
+                                                         band_frequencies(BANDS[band][0]), near)[0])
+            values = {"signal_gain_db": 10 * np.log10(signal), "signal_gain_direct_theory_db": 10 * np.log10(direct),
+                      "noise_gain_db": 10 * np.log10(noise), "noise_gain_independent_db": 10 * np.log10(count)}
+            values["array_gain_db"] = values["signal_gain_db"] - values["noise_gain_db"]
+            result["bands"].setdefault(band, {}).update(values)
+            session.report.info(f"A9 gains {band}", f"signal {values['signal_gain_db']:.1f} dB (direct sound only "
+                                f"{values['signal_gain_direct_theory_db']:.1f}), noise {values['noise_gain_db']:.1f} dB "
+                                f"(independent noise {10 * np.log10(count):.1f}); array gain here "
+                                f"{values['array_gain_db']:+.1f} dB, WNG theory {10 * np.log10(count):.1f}")
+    result["speaker_near"] = {"azimuth_deg": az, "elevation_deg": el, "distance_m": near}
+    session.values["a9"] = result
+
+
+def a10(session, args, out, array):
+    """Spatial aliasing: speaker straight ahead, the beam steered across +-60 deg with the FIR pair replaced by
+    a 3.5 kHz high-pass (removes the low-frequency floor) and the MCU window unfiltered (band 0), at 5 kHz
+    (theory: no grating lobe in view) and 8 kHz (lobes near +-50 deg). Measured false peaks against theory."""
+    contract = load_beam_contract()
+    distance = place(0.0, 0.0, args.distance)
+    seconds = args.seconds or 1.0
+    rng = np.random.default_rng(args.seed)
+    results, plots = {}, []
+    with fir_replaced(session.board, highpass_hz=3500.0), session.settings(**{**MCU_BEAM, "band": 0}):
+        for band, centre_hz in A10_BANDS.items():
+            for axis in ("azimuth", "elevation"):
+                cut = measure_cut(session, axis, (0.0, 0.0), 2.5, 60.0, band, 1, seconds, rng, "a10")
+                db = cut["signal_db"] - np.nanmax(cut["signal_db"])
+                peak = float(cut["angles"][int(np.nanargmax(cut["signal_db"]))])
+                source = (peak, 0.0) if axis == "azimuth" else (0.0, peak)
+                rel_model, db_model = template(contract, source, axis, band_frequencies(centre_hz), distance)
+                half = first_null_half_width(rel_model, db_model)
+                limit = 60.0 - abs(peak)
+                expected = [lobe for lobe in grating_lobes(rel_model, db_model, half, -6.0) if abs(lobe[0]) <= limit]
+                found = grating_lobes(cut["angles"] - peak, np.nan_to_num(db, nan=-99.0), half, -10.0)
+                matched = all(any(abs(f[0] - e[0]) <= 5.0 and abs(f[1] - e[1]) <= 6.0 for f in found) for e in expected)
+                clean = expected or not any(level >= -6.0 for _, level in found)
+                name = f"{band} {axis}"
+                results[name] = {"peak_deg": peak, "expected": expected, "found": found,
+                                 "max_on_dbfs": float(np.nanmax(cut["on_db"])), "angles": cut["angles"],
+                                 "signal_db": cut["signal_db"]}
+                plots.append((name, cut["angles"] - peak, db, rel_model, db_model))
+                session.report.add(f"A10 {name}", matched and bool(clean),
+                                   "theory lobes " + (", ".join(f"{a:+.0f} deg {l:.0f} dB" for a, l in expected) or "none")
+                                   + "; measured " + (", ".join(f"{a:+.0f} deg {l:.0f} dB" for a, l in found
+                                                               if l >= -6.0) or "none above -6 dB"))
+                if results[name]["max_on_dbfs"] > -12.0:
+                    session.report.add(f"A10 {name} level", False, f"{results[name]['max_on_dbfs']:.1f} dBFS RMS: band "
+                                       "noise peaks about 10 dB higher and may clip; turn the speaker down, repeat")
+    session.values["a10"] = {"distance_m": distance, "cuts": results}
+    figure_a10(plots, out)
+
+
+def figure_a10(plots, out):
+    import matplotlib.pyplot as plt
+    if not plots:
+        return
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), squeeze=False)
+    for ax, (name, rel, db, rel_model, db_model) in zip(axes.flat, plots):
+        ax.plot(rel, db, "o-", ms=3, color="k", label="measured")
+        ax.plot(rel_model, db_model, "--", lw=1, label="theory")
+        ax.set_xlim(-62, 62)
+        ax.set_ylim(-30, 3)
+        ax.set_xlabel("steering angle from the speaker (deg)")
+        ax.set_ylabel("dB re main lobe")
+        ax.set_title(name)
+        ax.legend(fontsize=8, loc="lower center")
+    fig.suptitle("A10: grating lobes (false beams) above the spatial aliasing frequency")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "a10_aliasing.png"), dpi=150)
+
+
+TESTS = {"n1": n1, "n2": n2, "a3": a3, "a4": a4, "a8": a8, "a9": a9, "a10": a10, "l1": l1, "r1": r1, "s1": s1}
+SOUND_TESTS = {"a3", "a4", "a8", "a9", "a10", "l1", "r1", "s1"}
 
 
 def main():
@@ -823,6 +1082,8 @@ def main():
     parser.add_argument("--sound", default="A", help="l1: signal name or WAV path (e.g. audio/drone.wav)")
     parser.add_argument("--microphone", type=int, default=4, help="r1: microphone on Ch1")
     parser.add_argument("--microphones", default="0,4,20,24", help="s1: microphones to calibrate")
+    parser.add_argument("--references", type=int, default=8, help="a9: reference microphones (seeded, spread)")
+    parser.add_argument("--near-distance", type=float, default=1.0, help="a9: speaker distance for the gains (m)")
     parser.add_argument("--record", type=float, default=5.0, help="r1: recording length (s)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", help="output folder (default: temp)")

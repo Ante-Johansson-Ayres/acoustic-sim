@@ -66,8 +66,8 @@ def test_grid_angles_follow_the_firmware():
 
 def test_signals_loop_cleanly_and_do_not_clip(tmp_path):
     paths = study.make_signals(str(tmp_path))
-    assert set(paths) == {"A", "B1k", "B2k", "B3k", "W", "T1k", "A-6", "A-12", "A-18", "A-24", "A-30", "A-36",
-                          "D150", "D200", "D310"}
+    assert set(paths) == {"A", "B1k", "B2k", "B3k", "B5k", "B8k", "W", "T1k", "A-6", "A-12", "A-18", "A-24",
+                          "A-30", "A-36", "D150", "D200", "D310"}
 
     def read(name):
         with wave.open(paths[name], "rb") as handle:

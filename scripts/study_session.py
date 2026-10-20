@@ -2,7 +2,7 @@
 
 Plays test signals on the default Windows output and measures with the commands the Study
 screen uses (S, M, DG, O, SET): where Live finds the speaker, clipping, linearity and SNR,
-every microphone, the beam against one microphone, a 2 kHz steering search with its +-1 sigma,
+every microphone, the array gain against one microphone, a 2 kHz steering search with its +-1 sigma,
 and the tonal detector. Needs sim_server.py connected to the board, the speaker as the
 default output, a quiet room, and the speaker's direction from the array centre (azimuth
 + = right, elevation + = up, as seen from behind the array). Stops after the first three
@@ -151,7 +151,8 @@ def make_signals(folder):
 
     base = band(500, 3500)
     signals = {"A": base, "B1k": band(891, 1122), "B2k": band(1782, 2245), "B3k": band(2806, 3536),
-               "W": band(200, 8000), "T1k": rms(np.sin(2 * np.pi * 1000 * np.arange(n) / RATE), -18)}
+               "B5k": band(4454, 5612), "B8k": band(7127, 8980), "W": band(200, 8000),
+               "T1k": rms(np.sin(2 * np.pi * 1000 * np.arange(n) / RATE), -18)}
     signals.update({f"A-{step}": base * 10 ** (-step / 20) for step in range(6, 37, 6)})
     signals.update({f"D{f0}": harmonics(f0) for f0 in TONES_HZ})
     paths = {}
@@ -409,24 +410,28 @@ def survey(session, sector, microphones):
                         " dB (the inner rings read louder; acoustic)")
 
 
-def beam_against_microphone(session, sector, microphone, microphones):
-    in_step, as_noise = 20 * np.log10(microphones), 10 * np.log10(microphones)
-    gaps = {}
+def array_gain(session, sector, microphone, microphones):
+    """Beam SNR minus one microphone's SNR per band. Path gains cancel in an SNR; raw levels do not compare."""
+    levels = {}
     with session.settings(**MCU_BEAM):
-        for signal in ("B1k", "B2k", "A"):
+        for signal in (None, "B1k", "B2k", "A"):
             session.sound(signal)
-            beam = session.capture("beam vs microphone", f"beam, {signal}", sector, 4)["mean_db"]
+            name = signal or "silent"
+            beam = session.capture("array gain", f"beam, {name}", sector, 4)["mean_db"]
             session.route(1, microphone)
             session.set("channel", 1)
-            single = session.capture("beam vs microphone", f"microphone {microphone}, {signal}", sector, 4,
+            single = session.capture("array gain", f"microphone {microphone}, {name}", sector, 4,
                                      value=microphone)["mean_db"]
             session.set("channel", 0)
-            gaps[signal] = beam - single
+            levels[name] = (beam, single)
         session.sound(None)
-    session.values["beam_minus_microphone_db"] = gaps
-    session.report.info(f"beam minus microphone {microphone}",
-                        ", ".join(f"{name} {gap:.1f}" for name, gap in gaps.items()) +
-                        f" dB (direct sound in step {in_step:.1f}, independent noise {as_noise:.1f})")
+    off_beam, off_mic = levels.pop("silent")
+    gains = {name: snr_db(beam, off_beam) - snr_db(single, off_mic) for name, (beam, single) in levels.items()}
+    session.values["array_gain_db"] = gains
+    session.report.info(f"array gain vs microphone {microphone}",
+                        ", ".join(f"{name} {gain:+.1f}" for name, gain in gains.items()) +
+                        f" dB (theory {10 * np.log10(microphones):.1f} for direct sound over independent noise; "
+                        "reverberation and room noise lower it)")
 
 
 def steering(session, args):
@@ -514,8 +519,7 @@ def run(session, args):
     if (state.get("outputs") or {}).get("microphones", 0) > 0:
         if not args.skip_survey:
             steps.append(("microphone survey", lambda: survey(session, sector, microphones)))
-        steps.append(("beam against one microphone",
-                      lambda: beam_against_microphone(session, sector, args.microphone, microphones)))
+        steps.append(("array gain", lambda: array_gain(session, sector, args.microphone, microphones)))
     else:
         session.report.info("microphone checks", "skipped: this DSP program has no output selector")
     for name, step in steps:
