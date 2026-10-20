@@ -2,8 +2,8 @@
 
 Plays test signals on the default Windows output and measures with the commands the Study
 screen uses (S, M, DG, O, SET): where Live finds the speaker, clipping, linearity and SNR,
-every microphone, the beam against one microphone, a steering search and two beam cuts at
-2 kHz, and the tonal detector. Needs sim_server.py connected to the board, the speaker as the
+every microphone, the beam against one microphone, a 2 kHz steering search with its +-1 sigma,
+and the tonal detector. Needs sim_server.py connected to the board, the speaker as the
 default output, a quiet room, and the speaker's direction from the array centre (azimuth
 + = right, elevation + = up, as seen from behind the array). Stops after the first three
 checks if one fails, since nothing later would be valid. Puts back the settings, Ch1, the
@@ -28,14 +28,17 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from board_regression import WS_URL, Board, Report, connect, http, play, record
+from board_regression import WS_URL, Board, Report, connect, play, record
 
 RATE = 48000
 LOOP_S = 20
-MCU_BEAM = {"measure": 1, "channel": 0}
+# One 5 ms window of 1/3-octave noise scatters ~3 dB; 100 ms (the firmware maximum) ~0.6 dB.
+WINDOWS = {"measure": 1, "window_us": 100000}
+MCU_BEAM = {**WINDOWS, "channel": 0}
+PRECISION_DEG = 1.0
 TONES_HZ = (150, 200, 310)
 FIELDS = ["step", "label", "sector", "value", "azimuth_deg", "elevation_deg", "n", "mean_db", "std_db",
-          "min_db", "max_db", "settings"]
+          "min_db", "max_db", "levels", "settings"]
 
 
 # The Study screen's arithmetic (app/js/study/analysis.js and measure.js) -------------------------
@@ -118,6 +121,14 @@ def same_angles(actual, expected):
         abs(a - b) < 1e-3 for a, b in zip(actual, expected))
 
 
+def spread(estimate, means, errors, runs=1000):
+    """1-sigma of estimate(means) when every mean moves by its standard error; None if it mostly fails."""
+    rng = np.random.default_rng(1)
+    values = [estimate(np.asarray(means, float) + rng.normal(0, errors)) for _ in range(runs)]
+    values = [value for value in values if value is not None]
+    return float(np.std(values)) if len(values) >= runs // 2 else None
+
+
 # Test signals: periodic in LOOP_S, so a looping WAV has no seam ----------------------------------
 
 def make_signals(folder):
@@ -177,37 +188,35 @@ class Session:
         play(self.signals[name] if name else None, loop=True)
         self.board.pump(2.0 if name else 0.5)
 
-    def capture(self, step, label, sector, seconds, rate=20, **extra):
-        """Hold `sector`, read it with M at `rate` Hz, drop readings in the first five detector time constants."""
+    def read(self, command):
+        """Send S,<sector> or M and wait for its measurement; None if none came."""
+        board = self.board
+        count = int((board.state.get("last_measurement") or {}).get("count", 0))
+        error = board.state.get("last_error")
+        board.command(command)
+        board.pump(2.0, lambda s: int((s.get("last_measurement") or {}).get("count", 0)) > count
+                   or s.get("last_error") != error)
+        measurement = board.state.get("last_measurement") or {}
+        return measurement if int(measurement.get("count", 0)) > count else None
+
+    def capture(self, step, label, sector, seconds, **extra):
+        """Hold `sector` and read it with M, one window after the other, for `seconds`."""
         board = self.board
         board.stop()
         columns = board.state["configuration"]["columns"]
-        tau_s = float(board.state.get("level_time_constant_ms") or 8.665) / 1000
-        count = int((board.state.get("last_measurement") or {}).get("count", 0))
-        levels = []
-
-        def collect(state):
-            nonlocal count
-            measurement = state.get("last_measurement") or {}
-            if measurement.get("count", 0) > count:
-                count = measurement["count"]
-                if measurement["row"] * columns + measurement["column"] == sector and time.monotonic() >= accept:
-                    levels.append(measurement["level_db"])
-            return False
-
-        board.command(f"S,{sector}")
-        start = time.monotonic()
-        accept, end, next_read = start + 5 * tau_s, start + 5 * tau_s + seconds, start + 1 / rate
+        # S's own reading starts 0.5 ms after the steer, inside the audio path's latency.
+        if self.read(f"S,{sector}") is None:
+            raise RuntimeError(f"S,{sector} gave no reading ({board.state.get('last_error')})")
+        levels, end = [], time.monotonic() + seconds
         while time.monotonic() < end:
-            if time.monotonic() >= next_read:
-                board.command("M")
-                next_read += 1 / rate
-            board.pump(max(0.001, min(next_read, end) - time.monotonic()), collect)
+            measurement = self.read("M")
+            if measurement and measurement["row"] * columns + measurement["column"] == sector:
+                levels.append(measurement["level_db"])
         if not levels:
-            raise RuntimeError(f"no level readings for {label}")
+            raise RuntimeError(f"no level readings for {label} ({board.state.get('last_error')})")
         row = {"step": step, "label": label, "sector": sector, "n": len(levels), "mean_db": power_mean_db(levels),
                "std_db": float(np.std(levels, ddof=1)) if len(levels) > 1 else 0.0,
-               "min_db": min(levels), "max_db": max(levels),
+               "min_db": min(levels), "max_db": max(levels), "levels": [round(float(v), 2) for v in levels],
                "settings": json.dumps(board.state.get("settings") or {}, sort_keys=True), **extra}
         self.writer.writerow(row)
         return row
@@ -290,7 +299,7 @@ class Session:
             self.restore_grid()
         except RuntimeError as error:
             print(f"warning: {error}")
-        for key in ("measure", "channel", "settle_us", "guard_us", "band", "tone"):
+        for key in ("measure", "channel", "settle_us", "guard_us", "window_us", "band", "tone"):
             if key in self.settings_before and (board.state.get("settings") or {}).get(key) != self.settings_before[key]:
                 board.set(key, self.settings_before[key])
         board.command(f"O,{self.ch1_before.get('source', 0)},{self.ch1_before.get('index', 0)}")
@@ -374,7 +383,7 @@ def level_check(session, sector):
 
 def survey(session, sector, microphones):
     on, off = {}, {}
-    with session.settings(measure=1, channel=1):
+    with session.settings(**WINDOWS, channel=1):
         for phase, levels, signal in (("on", on, "A"), ("off", off, None)):
             session.sound(signal)
             for microphone in range(microphones):
@@ -428,12 +437,14 @@ def steering(session, args):
             session.sound("B2k")
             azimuths, elevations = session.grid(centre[0] - span, centre[0] + span, size,
                                                 centre[1] - span, centre[1] + span, size)
-            grid = np.zeros((size, size))
+            grid, noise = np.zeros((size, size)), np.zeros((size, size))
             for sector in range(size * size):
                 row, column = divmod(sector, size)
-                grid[row, column] = session.capture(
-                    "steering", f"{azimuths[column]:.1f}, {elevations[row]:.1f}", sector, 0.5,
-                    azimuth_deg=azimuths[column], elevation_deg=elevations[row])["mean_db"]
+                capture = session.capture(
+                    "steering", f"{azimuths[column]:.1f}, {elevations[row]:.1f}", sector, 1.0,
+                    azimuth_deg=azimuths[column], elevation_deg=elevations[row])
+                grid[row, column] = capture["mean_db"]
+                noise[row, column] = capture["std_db"] / np.sqrt(capture["n"])
             session.sound(None)
         row, column = np.unravel_index(int(np.argmax(grid)), grid.shape)
         on_edge = row in (0, size - 1) or column in (0, size - 1)
@@ -441,43 +452,18 @@ def steering(session, args):
             break
         centre = (azimuths[column], elevations[row])
     azimuth, elevation = refine_peak_2d(grid, azimuths, elevations)
+    sigma = [spread(lambda g, i=i: refine_peak_2d(g, azimuths, elevations)[i], grid, noise) for i in (0, 1)]
     errors = (azimuth - args.speaker_az, elevation - args.speaker_el)
-    session.values["steering"] = {"azimuth_deg": azimuth, "elevation_deg": elevation, "on_edge": bool(on_edge),
-                                  "contrast_db": float(grid.max() - grid.min())}
-    report.add("steering peak in azimuth", not on_edge and abs(errors[0]) <= 3,
-               f"{azimuth:.1f} deg, {errors[0]:+.1f} from the speaker" + (", peak on the grid edge" if on_edge else ""))
-    report.add("steering peak in elevation", not on_edge and abs(errors[1]) <= 8,
-               f"{elevation:.1f} deg, {errors[1]:+.1f} from the speaker (tape elevation is rough)")
+    session.values["steering"] = {"azimuth_deg": azimuth, "elevation_deg": elevation, "sigma_deg": sigma,
+                                  "on_edge": bool(on_edge), "contrast_db": float(grid.max() - grid.min())}
+    for name, value, error, s, tolerance, note in (
+            ("azimuth", azimuth, errors[0], sigma[0], 3, ""),
+            ("elevation", elevation, errors[1], sigma[1], 8, " (tape elevation is rough)")):
+        report.add(f"steering peak in {name}", not on_edge and abs(error) <= tolerance and s <= PRECISION_DEG,
+                   f"{value:.1f} +- {s:.1f} deg, {error:+.1f} from the speaker{note}"
+                   + (", peak on the grid edge" if on_edge else "")
+                   + ("" if s <= PRECISION_DEG else f"; too noisy to judge (over {PRECISION_DEG:g} deg)"))
     return azimuth, elevation
-
-
-def cuts(session, peak, seconds):
-    """Azimuth and elevation cuts through the steering peak, 2 kHz noise, against theory at 2 kHz."""
-    session.values["cuts"] = {}
-    for axis in ("azimuth", "elevation"):
-        along = 0 if axis == "azimuth" else 1
-        if axis == "azimuth":
-            spec = (peak[0] - 30, peak[0] + 30, 25, peak[1], peak[1], 1)
-        else:
-            spec = (peak[0], peak[0], 1, peak[1] - 30, peak[1] + 30, 25)
-        with session.settings(**MCU_BEAM):
-            session.sound("B2k")
-            azimuths, elevations = session.grid(*spec)
-            angles = azimuths if axis == "azimuth" else elevations
-            levels = [session.capture("cut", f"{axis} {angle:.1f}", sector, seconds, value=angle)["mean_db"]
-                      for sector, angle in enumerate(angles)]
-            session.sound(None)
-        status, theory = http("GET", f"/study/theory/cut?axis={axis}&steer_azimuth_deg={peak[0]}"
-                                     f"&steer_elevation_deg={peak[1]}&frequency_hz=2000&minimum_deg={angles[0]}"
-                                     f"&maximum_deg={angles[-1]}&step_deg={(angles[-1] - angles[0]) / 240}")
-        theory_width = (theory.get("beamwidth_3db") or {}).get("width_deg") if status == 200 else None
-        measured_peak, width = refine_peak(levels, angles), width_at(angles, levels)
-        session.values["cuts"][axis] = {"peak_deg": measured_peak, "width_3db_deg": width,
-                                        "theory_width_3db_deg": theory_width}
-        session.report.add(f"{axis} cut peak", abs(measured_peak - peak[along]) <= 3,
-                           f"{measured_peak:.1f} deg, steering peak {peak[along]:.1f}")
-        session.report.info(f"{axis} -3 dB width, 2 kHz", (f"{width:.1f} deg" if width else "not bracketed") +
-                            (f", theory {theory_width:.1f}" if theory_width else ""))
 
 
 def tonal_detector(session, sector):
@@ -537,12 +523,11 @@ def run(session, args):
             step()
         except RuntimeError as error:
             session.report.add(name, False, str(error))
-    print("-- steering search and cuts", flush=True)
+    print("-- steering search", flush=True)
     try:
-        peak = steering(session, args)
-        cuts(session, peak, args.cut_seconds)
+        steering(session, args)
     except RuntimeError as error:
-        session.report.add("steering and cuts", False, str(error))
+        session.report.add("steering", False, str(error))
     finally:
         session.restore_grid()
     print("-- tonal detector", flush=True)
@@ -558,7 +543,6 @@ def main():
     parser.add_argument("--speaker-el", type=float, required=True, help="degrees from the array centre, + = up")
     parser.add_argument("--distance", type=float, help="speaker distance in metres (recorded in the summary)")
     parser.add_argument("--microphone", type=int, default=4, help="microphone compared with the beam")
-    parser.add_argument("--cut-seconds", type=float, default=1.0, help="capture per cut direction")
     parser.add_argument("--skip-survey", action="store_true", help="skip the 44-microphone survey")
     parser.add_argument("--out", help="folder for the signals, captures.csv and summary.json (default: temp)")
     args = parser.parse_args()

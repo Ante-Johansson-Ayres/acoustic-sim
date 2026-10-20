@@ -78,3 +78,9 @@ def test_signals_loop_cleanly_and_do_not_clip(tmp_path):
     assert 20 * np.log10(np.sqrt(np.mean(read("A-12") ** 2))) == pytest.approx(-30, abs=0.1)
     # Periodic in the file length: the jump from the last sample to the first is an ordinary step.
     assert abs(noise[-1] - noise[0]) < 4 * np.std(np.diff(noise))
+
+
+def test_spread_is_the_standard_error_of_a_mean():
+    assert study.spread(np.mean, np.zeros(100), np.ones(100)) == pytest.approx(0.1, rel=0.1)
+    assert study.spread(np.mean, np.zeros(4), np.zeros(4)) == 0.0
+    assert study.spread(lambda v: None, np.zeros(4), np.ones(4)) is None
