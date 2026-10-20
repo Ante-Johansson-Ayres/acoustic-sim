@@ -2,10 +2,11 @@
 
 Plays test signals on the default Windows output and measures with the commands the Study
 screen uses (S, M, DG, O, SET): where Live finds the speaker, clipping, linearity and SNR,
-every microphone, the beam against one microphone, a steering search and two beam cuts at
-2 kHz, and the tonal detector. Needs sim_server.py connected to the board, the speaker as the
-default output, a quiet room, and the speaker's direction from the array centre (azimuth
-+ = right, elevation + = up, as seen from behind the array). Stops after the first three
+every microphone, the beam against one microphone, a steering search at 2 kHz with the
+uncertainty of its peak, and the tonal detector (beam cuts belong to the characterisation, A3).
+MCU windows of 100 ms, read one at a time. Needs sim_server.py connected to the board, the
+speaker as the default output, a quiet room, and the speaker's direction from the array centre
+(azimuth + = right, elevation + = up, as seen from behind the array). Stops after the first three
 checks if one fails, since nothing later would be valid. Puts back the settings, Ch1, the
 grid and tone. Writes the signals, every capture (captures.csv) and summary.json to --out.
 Exit code 1 if a check fails.
@@ -28,7 +29,7 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from board_regression import WS_URL, Board, Report, connect, http, play, record
+from board_regression import WS_URL, Board, Report, connect, play, record
 
 RATE = 48000
 LOOP_S = 20
@@ -469,35 +470,6 @@ def steering(session, args):
     return azimuth, elevation
 
 
-def cuts(session, peak, seconds):
-    """Azimuth and elevation cuts through the steering peak, 2 kHz noise, against theory at 2 kHz."""
-    session.values["cuts"] = {}
-    for axis in ("azimuth", "elevation"):
-        along = 0 if axis == "azimuth" else 1
-        if axis == "azimuth":
-            spec = (peak[0] - 30, peak[0] + 30, 25, peak[1], peak[1], 1)
-        else:
-            spec = (peak[0], peak[0], 1, peak[1] - 30, peak[1] + 30, 25)
-        with session.settings(**MCU_BEAM):
-            session.sound("B2k")
-            azimuths, elevations = session.grid(*spec)
-            angles = azimuths if axis == "azimuth" else elevations
-            levels = [session.capture("cut", f"{axis} {angle:.1f}", sector, seconds, value=angle)["mean_db"]
-                      for sector, angle in enumerate(angles)]
-            session.sound(None)
-        status, theory = http("GET", f"/study/theory/cut?axis={axis}&steer_azimuth_deg={peak[0]}"
-                                     f"&steer_elevation_deg={peak[1]}&frequency_hz=2000&minimum_deg={angles[0]}"
-                                     f"&maximum_deg={angles[-1]}&step_deg={(angles[-1] - angles[0]) / 240}")
-        theory_width = (theory.get("beamwidth_3db") or {}).get("width_deg") if status == 200 else None
-        measured_peak, width = refine_peak(levels, angles), width_at(angles, levels)
-        session.values["cuts"][axis] = {"peak_deg": measured_peak, "width_3db_deg": width,
-                                        "theory_width_3db_deg": theory_width}
-        session.report.add(f"{axis} cut peak", abs(measured_peak - peak[along]) <= 3,
-                           f"{measured_peak:.1f} deg, steering peak {peak[along]:.1f}")
-        session.report.info(f"{axis} -3 dB width, 2 kHz", (f"{width:.1f} deg" if width else "not bracketed") +
-                            (f", theory {theory_width:.1f}" if theory_width else ""))
-
-
 def tonal_detector(session, sector):
     board, report = session.board, session.report
     try:
@@ -555,12 +527,11 @@ def run(session, args):
             step()
         except RuntimeError as error:
             session.report.add(name, False, str(error))
-    print("-- steering search and cuts", flush=True)
+    print("-- steering search", flush=True)
     try:
-        peak = steering(session, args)
-        cuts(session, peak, args.cut_seconds)
+        steering(session, args)
     except RuntimeError as error:
-        session.report.add("steering and cuts", False, str(error))
+        session.report.add("steering", False, str(error))
     finally:
         session.restore_grid()
     print("-- tonal detector", flush=True)
@@ -576,7 +547,6 @@ def main():
     parser.add_argument("--speaker-el", type=float, required=True, help="degrees from the array centre, + = up")
     parser.add_argument("--distance", type=float, help="speaker distance in metres (recorded in the summary)")
     parser.add_argument("--microphone", type=int, default=4, help="microphone compared with the beam")
-    parser.add_argument("--cut-seconds", type=float, default=1.0, help="capture per cut direction")
     parser.add_argument("--steer-seconds", type=float, default=2.0,
                         help="capture per steering point; on a free-field theory grid at 2 kHz, 1 s gives a peak "
                              "sigma of 0.8-1.0 deg and 2 s gives 0.55-0.75 (gate: 1 deg)")
