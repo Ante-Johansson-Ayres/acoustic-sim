@@ -71,6 +71,65 @@ def test_spread_is_the_scatter_of_the_estimate():
     assert study.spread(lambda values: None, np.zeros(3), np.ones(3)) is None
 
 
+class FakeBoard:
+    """Answers S,<n> with a reading of -90 dB (inside the latency) and M with -20 dB at the held sector."""
+
+    def __init__(self, refuse_steer=False, wrong_sector=False):
+        self.state = {"configuration": {"rows": 7, "columns": 7, "microphones": 44}, "settings": {},
+                      "azimuth_deg": [], "elevation_deg": [], "firmware_mode": "IDLE"}
+        self.refuse_steer, self.wrong_sector = refuse_steer, wrong_sector
+        self.replies, self.commands, self.count, self.sector = [], [], 0, None
+
+    def command(self, text):
+        self.commands.append(text)
+        if text.startswith("S,"):
+            if self.refuse_steer:
+                self.replies.append({"last_error": {"code": "BUSY", "n": len(self.commands)}})
+                return
+            self.sector = int(text[2:])
+            self.reply(-90.0)
+        elif text == "M" and self.sector is not None:
+            self.reply(-20.0)
+
+    def reply(self, level_db):
+        self.count += 1
+        sector = (self.sector + 1) % 49 if self.wrong_sector and level_db > -90 else self.sector
+        row, column = divmod(sector, 7)
+        self.replies.append({"last_measurement": {"count": self.count, "row": row, "column": column,
+                                                  "level_db": level_db}})
+
+    def pump(self, seconds, until=None):
+        while self.replies:
+            self.state.update(self.replies.pop(0))
+            if until is not None and until(self.state):
+                return True
+        return False
+
+    def stop(self):
+        return True
+
+
+class Rows(list):
+    writerow = list.append
+
+
+def test_capture_drops_the_steer_reading_and_reads_one_window_at_a_time():
+    board = FakeBoard()
+    rows = Rows()
+    session = study.Session(board, {}, rows, study.Results())
+    row = session.capture("test", "label", 24, 0.02)
+    assert board.commands[0] == "S,24" and set(board.commands[1:]) == {"M"}
+    assert row["n"] == len(board.commands) - 1 and row["mean_db"] == pytest.approx(-20.0)
+    assert rows == [row]
+
+
+def test_capture_refuses_without_a_reading_of_its_sector():
+    with pytest.raises(RuntimeError, match="S,24 gave no reading"):
+        study.Session(FakeBoard(refuse_steer=True), {}, Rows(), study.Results()).capture("t", "l", 24, 0.01)
+    with pytest.raises(RuntimeError, match="no level readings"):
+        study.Session(FakeBoard(wrong_sector=True), {}, Rows(), study.Results()).capture("t", "l", 24, 0.01)
+
+
 def test_signals_loop_cleanly_and_do_not_clip(tmp_path):
     paths = study.make_signals(str(tmp_path))
     assert set(paths) == {"A", "B1k", "B2k", "A-6", "A-12", "A-18", "A-24", "A-30", "A-36", "D150", "D200", "D310"}

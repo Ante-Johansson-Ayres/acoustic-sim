@@ -32,7 +32,9 @@ from board_regression import WS_URL, Board, Report, connect, http, play, record
 
 RATE = 48000
 LOOP_S = 20
-MCU_BEAM = {"measure": 1, "channel": 0}
+# MCU windows of 100 ms (the maximum): one reading of 1/3-octave noise scatters 0.6 dB, not 2.7 as at 5 ms.
+WINDOWS = {"measure": 1, "window_us": 100000}
+MCU_BEAM = {**WINDOWS, "channel": 0}
 TONES_HZ = (150, 200, 310)
 FIELDS = ["step", "label", "sector", "value", "azimuth_deg", "elevation_deg", "n", "mean_db", "std_db",
           "min_db", "max_db", "settings"]
@@ -187,32 +189,30 @@ class Session:
         play(self.signals[name] if name else None, loop=True)
         self.board.pump(2.0 if name else 0.5)
 
-    def capture(self, step, label, sector, seconds, rate=20, **extra):
-        """Hold `sector`, read it with M at `rate` Hz, drop readings in the first five detector time constants."""
+    def read(self, command):
+        """Send S,<sector> or M and wait for its measurement; None if none came."""
+        board = self.board
+        count = int((board.state.get("last_measurement") or {}).get("count", 0))
+        error = board.state.get("last_error")
+        board.command(command)
+        board.pump(2.0, lambda s: int((s.get("last_measurement") or {}).get("count", 0)) > count
+                   or s.get("last_error") != error)
+        measurement = board.state.get("last_measurement") or {}
+        return measurement if int(measurement.get("count", 0)) > count else None
+
+    def capture(self, step, label, sector, seconds, **extra):
+        """Hold `sector` and read it with M, one window after the other, for `seconds`."""
         board = self.board
         board.stop()
         columns = board.state["configuration"]["columns"]
-        tau_s = float(board.state.get("level_time_constant_ms") or 8.665) / 1000
-        count = int((board.state.get("last_measurement") or {}).get("count", 0))
-        levels = []
-
-        def collect(state):
-            nonlocal count
-            measurement = state.get("last_measurement") or {}
-            if measurement.get("count", 0) > count:
-                count = measurement["count"]
-                if measurement["row"] * columns + measurement["column"] == sector and time.monotonic() >= accept:
-                    levels.append(measurement["level_db"])
-            return False
-
-        board.command(f"S,{sector}")
-        start = time.monotonic()
-        accept, end, next_read = start + 5 * tau_s, start + 5 * tau_s + seconds, start + 1 / rate
+        # S's own reading starts 0.5 ms after the steer, inside the audio path's latency.
+        if self.read(f"S,{sector}") is None:
+            raise RuntimeError(f"S,{sector} gave no reading ({board.state.get('last_error')})")
+        levels, end = [], time.monotonic() + seconds
         while time.monotonic() < end:
-            if time.monotonic() >= next_read:
-                board.command("M")
-                next_read += 1 / rate
-            board.pump(max(0.001, min(next_read, end) - time.monotonic()), collect)
+            measurement = self.read("M")
+            if measurement and measurement["row"] * columns + measurement["column"] == sector:
+                levels.append(measurement["level_db"])
         if not levels:
             raise RuntimeError(f"no level readings for {label}")
         row = {"step": step, "label": label, "sector": sector, "n": len(levels), "mean_db": power_mean_db(levels),
@@ -300,7 +300,7 @@ class Session:
             self.restore_grid()
         except RuntimeError as error:
             print(f"warning: {error}")
-        for key in ("measure", "channel", "settle_us", "guard_us", "band", "tone"):
+        for key in ("measure", "channel", "settle_us", "guard_us", "window_us", "band", "tone"):
             if key in self.settings_before and (board.state.get("settings") or {}).get(key) != self.settings_before[key]:
                 board.set(key, self.settings_before[key])
         board.command(f"O,{self.ch1_before.get('source', 0)},{self.ch1_before.get('index', 0)}")
@@ -384,7 +384,7 @@ def level_check(session, sector):
 
 def survey(session, sector, microphones):
     on, off = {}, {}
-    with session.settings(measure=1, channel=1):
+    with session.settings(**WINDOWS, channel=1):
         for phase, levels, signal in (("on", on, "A"), ("off", off, None)):
             session.sound(signal)
             for microphone in range(microphones):
