@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import characterise  # noqa: E402
+from array_theory import band_directivity_index_db, band_frequencies, first_null_half_width, steering_cut_db  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +21,7 @@ def array():
 
 def test_diffuse_noise_lies_between_independent_and_common(array):
     assert array.diffuse_sum([0]) == pytest.approx(1.0)
-    everyone = list(range(len(array.positions)))
+    everyone = list(range(array.contract.microphones))
     total = array.diffuse_sum(everyone)
     assert len(everyone) < total < len(everyone) ** 2
 
@@ -53,7 +54,7 @@ def test_positions_and_direction_sets():
 
 def test_theory_template_peaks_at_the_speaker():
     contract = characterise.load_beam_contract()
-    rel, db = characterise.template(contract, (10.0, 0.0), "azimuth", [2000.0], None)
+    rel, db = steering_cut_db(contract, (10.0, 0.0), "azimuth", [2000.0], None)
     assert rel[int(np.argmax(db))] == pytest.approx(0.0, abs=0.05)
 
 
@@ -87,8 +88,8 @@ def test_l90_and_summaries():
 
 def test_band_directivity_and_the_diffuse_field_formula():
     contract = characterise.load_beam_contract()
-    assert characterise.band_directivity_db(contract, 2000.0) == pytest.approx(14.8, abs=0.15)
-    assert characterise.band_directivity_db(contract, 1000.0) == pytest.approx(10.0, abs=0.15)
+    assert band_directivity_index_db(contract, band_frequencies(2000.0)) == pytest.approx(14.8, abs=0.15)
+    assert band_directivity_index_db(contract, band_frequencies(1000.0)) == pytest.approx(10.0, abs=0.15)
     beam = 44 ** 2 / 30.0 * 0.1
     assert characterise.directivity_from_levels(44, 0.1, 1.0, beam) == pytest.approx(30.0)
     assert np.isnan(characterise.excess(-60.0, -50.0))
@@ -108,8 +109,8 @@ def test_highpass_for_the_aliasing_test():
 def test_grating_lobes_appear_at_8k_not_at_5k():
     contract = characterise.load_beam_contract()
     for centre, expect in ((5000.0, False), (8000.0, True)):
-        rel, db = characterise.template(contract, (0.0, 0.0), "azimuth", characterise.band_frequencies(centre), None)
-        half = characterise.first_null_half_width(rel, db)
+        rel, db = steering_cut_db(contract, (0.0, 0.0), "azimuth", band_frequencies(centre), None)
+        half = first_null_half_width(rel, db)
         lobes = [lobe for lobe in characterise.grating_lobes(rel, db, half, -6.0) if abs(lobe[0]) <= 60.0]
         assert bool(lobes) is expect
         if expect:

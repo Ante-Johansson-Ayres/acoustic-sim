@@ -35,7 +35,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from array_theory import band_frequencies, directivity_index_db, fit_cut, steered_response  # noqa: E402
+from array_theory import (band_directivity_index_db, band_frequencies, diffuse_power,  # noqa: E402
+                          first_null_half_width, fit_cut, steered_response, steering_cut_db)
 from board_regression import WS_URL, Board, connect, http, play, record  # noqa: E402
 from heimdall_acoustic import default_contract_path, load_beam_contract  # noqa: E402
 from study_session import (FIELDS, MCU_BEAM, WINDOWS, Results, Session, make_signals, power,  # noqa: E402
@@ -74,30 +75,19 @@ class Array:
     """Deployed geometry and the three noise models, averaged over the 0.5-3.5 kHz measurement band."""
 
     def __init__(self):
-        contract = load_beam_contract()
-        self.positions = np.asarray(contract.microphone_positions_mm, float) / 1000.0
-        self.c = float(contract.speed_of_sound_m_s)
+        self.contract = load_beam_contract()
         self.freqs = np.linspace(*BAND_HZ, 61)
 
     def diffuse_sum(self, members):
         """Band mean of sum_ij sinc(k d_ij): beam power from diffuse noise, one microphone = 1."""
-        p = self.positions[list(members)]
-        d = np.hypot(p[:, None, 0] - p[None, :, 0], p[:, None, 1] - p[None, :, 1])
-        return float(np.mean([np.sinc(2 * f * d / self.c).sum() for f in self.freqs]))
+        return float(np.mean([diffuse_power(self.contract, f, members=members) for f in self.freqs]))
 
     def steered(self, azimuth_deg, elevation_deg):
         """(common-mode, diffuse) beam power steered to a direction, relative to steering at 0,0, in dB."""
-        a, e = np.radians(azimuth_deg), np.radians(elevation_deg)
-        tau = (self.positions[:, 0] * np.cos(e) * np.sin(a) + self.positions[:, 1] * np.sin(e)) / self.c
-        d = np.hypot(*(self.positions[:, None, :] - self.positions[None, :, :]).transpose(2, 0, 1))
-        common, diffuse, diffuse0 = [], [], []
-        for f in self.freqs:
-            phase = np.exp(2j * np.pi * f * tau)
-            gamma = np.sinc(2 * f * d / self.c)
-            common.append(abs(phase.sum()) ** 2 / len(tau) ** 2)
-            diffuse.append(float(np.real(np.conj(phase) @ gamma @ phase)))
-            diffuse0.append(float(gamma.sum()))
-        return 10 * np.log10(np.mean(common)), 10 * np.log10(np.mean(diffuse) / np.mean(diffuse0))
+        common = steered_response(self.contract, 0.0, 0.0, azimuth_deg, elevation_deg, self.freqs)[0]
+        diffuse = np.mean([diffuse_power(self.contract, f, azimuth_deg, elevation_deg) for f in self.freqs])
+        diffuse0 = np.mean([diffuse_power(self.contract, f) for f in self.freqs])
+        return 10 * np.log10(common), 10 * np.log10(diffuse / diffuse0)
 
 
 def write_words(words):
@@ -319,15 +309,6 @@ def axis_spec(axis, centre_az, centre_el, step, half):
     return centre_az, centre_az, 1, centre_el - half, centre_el + half, count
 
 
-def template(contract, centre, axis, frequencies, distance_m):
-    """Theory along one axis for a source at `centre`: relative angles and dB re the peak (peak at 0)."""
-    rel = np.arange(-60.0, 60.001, 0.05)
-    az = centre[0] + rel if axis == "azimuth" else np.full(rel.shape, centre[0])
-    el = centre[1] + rel if axis == "elevation" else np.full(rel.shape, centre[1])
-    p = steered_response(contract, centre[0], centre[1], az, el, frequencies, distance_m)
-    return rel, 10 * np.log10(np.maximum(p / p.max(), 1e-12))
-
-
 def measure_cut(session, axis, centre, step, half, signal, repeats, seconds, rng, label):
     """One silent pass, then shuffled repeats with the speaker on and the centre re-measured every 10
     points (its drift is corrected and reported). Signal = on minus off, in power."""
@@ -425,7 +406,7 @@ def locate(session, contract, centre, distance_m, repeats, seconds, rng, label):
     found, sigma, fits = [], [], {}
     for i, axis in enumerate(("azimuth", "elevation")):
         cut = measure_cut(session, axis, coarse, 1.0, 12.0, "B2k", repeats, seconds, rng, label)
-        rel_model, db_model = template(contract, coarse, axis, band_frequencies(2000.0), distance_m)
+        rel_model, db_model = steering_cut_db(contract, coarse, axis, band_frequencies(2000.0), distance_m)
         fits[axis] = fit_axis(cut, coarse[i], rel_model, db_model)
         found.append(coarse[i] + fits[axis]["shift_deg"] if fits[axis] else float("nan"))
         sigma.append(fits[axis]["shift_sigma_deg"] if fits[axis] else float("nan"))
@@ -454,7 +435,7 @@ def a3(session, args, out, array):
                 cut = measure_cut(session, axis, (az, el), step, half, band, args.repeats, args.seconds or 1.0, rng,
                                   "a3")
                 centre_value = az if axis == "azimuth" else el
-                rel_model, db_model = template(contract, (az, el), axis, band_frequencies(centre_hz), distance)
+                rel_model, db_model = steering_cut_db(contract, (az, el), axis, band_frequencies(centre_hz), distance)
                 fit = fit_axis(cut, centre_value, rel_model, db_model, shifts=np.arange(-10.0, 10.001, 0.02))
                 psl = sidelobe_bound(cut, centre_value, rel_model, db_model)
                 name = f"{band} {axis}"
@@ -871,12 +852,6 @@ def excess(on_db, off_db):
     return value if value > 0 else float("nan")
 
 
-def band_directivity_db(contract, centre_hz):
-    """Directivity index at 0,0 for diffuse noise over a 1/3-octave band (power average of 1/DF)."""
-    inverse = np.mean([10 ** (-directivity_index_db(contract, f) / 10) for f in band_frequencies(centre_hz)])
-    return float(-10 * np.log10(inverse))
-
-
 def directivity_from_levels(microphones, path_gain, microphone_power, beam_power):
     """DF = N^2 * G * P_mic / P_beam: the diffuse-field beam/microphone ratio corrected by the path gain G."""
     return float(microphones ** 2 * path_gain * microphone_power / beam_power)
@@ -886,12 +861,6 @@ def grating_lobes(rel_deg, db, main_half_deg, threshold_db=-10.0):
     """Local maxima at or above threshold_db (re the main peak) outside +-main_half_deg: [(angle, level)]."""
     return [(float(rel_deg[i]), float(db[i])) for i in range(1, len(db) - 1)
             if abs(rel_deg[i]) > main_half_deg and db[i] >= threshold_db and db[i] >= db[i - 1] and db[i] >= db[i + 1]]
-
-
-def first_null_half_width(rel_deg, db):
-    minima = [abs(rel_deg[i]) for i in range(1, len(db) - 1)
-              if db[i] < db[i - 1] and db[i] <= db[i + 1] and db[i] < -6]
-    return min(minima) if minima else 10.0
 
 
 def a9(session, args, out, array):
@@ -965,7 +934,7 @@ def a9(session, args, out, array):
             beam_power = np.array([excess(a, b) for a, b in zip(on_b, off_b)])
             mic_power = np.array([excess(on_m[m], off_m[m]) for m in references])
             df = directivity_from_levels(count, g[band], np.nanmean(mic_power), np.nanmean(beam_power))
-            theory = band_directivity_db(contract, BANDS[band][0])
+            theory = band_directivity_index_db(contract, band_frequencies(BANDS[band][0]))
             spread = float(10 * np.log10(np.nanmax(beam_power) / np.nanmin(beam_power)))
             measured = 10 * np.log10(df) if df > 0 else float("nan")
             result["bands"].setdefault(band, {}).update({"di_db": measured, "di_theory_db": theory,
@@ -1019,8 +988,8 @@ def a10(session, args, out, array):
                 db = cut["signal_db"] - np.nanmax(cut["signal_db"])
                 peak = float(cut["angles"][int(np.nanargmax(cut["signal_db"]))])
                 source = (peak, 0.0) if axis == "azimuth" else (0.0, peak)
-                rel_model, db_model = template(contract, source, axis, band_frequencies(centre_hz), distance)
-                half = first_null_half_width(rel_model, db_model)
+                rel_model, db_model = steering_cut_db(contract, source, axis, band_frequencies(centre_hz), distance)
+                half = first_null_half_width(rel_model, db_model) or 10.0
                 limit = 60.0 - abs(peak)
                 expected = [lobe for lobe in grating_lobes(rel_model, db_model, half, -6.0) if abs(lobe[0]) <= limit]
                 found = grating_lobes(cut["angles"] - peak, np.nan_to_num(db, nan=-99.0), half, -10.0)

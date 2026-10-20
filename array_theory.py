@@ -141,16 +141,86 @@ def steered_response(contract: BeamContract, source_azimuth_deg: float, source_e
     return total / len(np.atleast_1d(frequencies_hz)) / np.sum(np.abs(weights)) ** 2
 
 
+def steering_cut_db(contract: BeamContract, centre, axis: str, frequencies_hz, distance_m: float | None = None,
+                    rel_deg=None) -> tuple[np.ndarray, np.ndarray]:
+    """Steering sweep along one axis across a source at centre (az, el): relative angles and dB re the peak."""
+    rel = np.arange(-60.0, 60.001, 0.05) if rel_deg is None else np.asarray(rel_deg, dtype=np.float64)
+    az = centre[0] + rel if axis == "azimuth" else np.full(rel.shape, float(centre[0]))
+    el = centre[1] + rel if axis == "elevation" else np.full(rel.shape, float(centre[1]))
+    p = steered_response(contract, centre[0], centre[1], az, el, frequencies_hz, distance_m)
+    return rel, 10 * np.log10(np.maximum(p / p.max(), 1e-12))
+
+
+def first_null_half_width(rel_deg, db) -> float | None:
+    """Smallest |angle| of a minimum below -6 dB in a cut peaking at angle 0: half the first-null width."""
+    minima = [abs(rel_deg[i]) for i in range(1, len(db) - 1)
+              if db[i] < db[i - 1] and db[i] <= db[i + 1] and db[i] < -6]
+    return float(min(minima)) if minima else None
+
+
+def broadside_widths_deg(contract: BeamContract, axis: str, frequencies_hz) -> tuple[float | None, float | None]:
+    """(-3 dB width, first-null half width) of the beam straight ahead; None where the visible region ends first."""
+    rel, db = steering_cut_db(contract, (0.0, 0.0), axis, frequencies_hz, rel_deg=np.arange(-89.0, 89.0001, 0.02))
+    width = beamwidth([{"angle_deg": float(a), "gain_db": float(g)} for a, g in zip(rel, db)])
+    return (width["width_deg"] if width else None), first_null_half_width(rel, db)
+
+
+def diffuse_power(contract: BeamContract, frequency_hz: float, azimuth_deg: float = 0.0, elevation_deg: float = 0.0,
+                  members=None) -> float:
+    """Beam power in a 3D diffuse field, a^H Gamma a with Gamma = sinc(k d), for all or some microphones (one = 1)."""
+    positions = contract.microphone_positions_mm / 1000.0
+    weights = np.asarray(contract.gains, dtype=np.float64)
+    if members is not None:
+        positions, weights = positions[list(members)], weights[list(members)]
+    k = 2.0 * math.pi * float(frequency_hz) / contract.speed_of_sound_m_s
+    d = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2)
+    a = weights * np.exp(1j * k * (positions @ direction_components(azimuth_deg, elevation_deg)))
+    return float(np.real(np.conj(a) @ np.sinc(k * d / math.pi) @ a))
+
+
 def directivity_index_db(contract: BeamContract, frequency_hz: float, azimuth_deg: float = 0.0,
                          elevation_deg: float = 0.0) -> float:
     """10 log10 of the directivity factor |sum w|^2 / (a^H Gamma a), Gamma = sinc(k d) (diffuse field)."""
+    weights = np.asarray(contract.gains, dtype=np.float64)
+    return float(10.0 * math.log10(np.sum(weights) ** 2
+                                   / diffuse_power(contract, frequency_hz, azimuth_deg, elevation_deg)))
+
+
+def band_directivity_index_db(contract: BeamContract, frequencies_hz) -> float:
+    """Directivity index straight ahead over a band: the power average of 1/DF, as band-limited noise sees it."""
+    inverse = np.mean([10 ** (-directivity_index_db(contract, f) / 10) for f in np.atleast_1d(frequencies_hz)])
+    return float(-10 * np.log10(inverse))
+
+
+def pattern_power(contract: BeamContract, frequency_hz: float, steer_u: float, steer_v: float, u, v) -> np.ndarray:
+    """|B|^2 of the plane-wave beam steered to direction cosines (steer_u, steer_v), at (u, v); 1 on the beam."""
     positions = contract.microphone_positions_mm / 1000.0
     weights = np.asarray(contract.gains, dtype=np.float64)
-    k = 2.0 * math.pi * frequency_hz / contract.speed_of_sound_m_s
-    d = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2)
-    steer = direction_components(azimuth_deg, elevation_deg)
-    a = weights * np.exp(1j * k * (positions @ steer))
-    return float(10.0 * math.log10(np.sum(weights) ** 2 / np.real(np.conj(a) @ np.sinc(k * d / math.pi) @ a)))
+    k = 2.0 * math.pi * float(frequency_hz) / contract.speed_of_sound_m_s
+    phase = k * (np.multiply.outer(np.asarray(u, dtype=np.float64) - steer_u, positions[:, 0])
+                 + np.multiply.outer(np.asarray(v, dtype=np.float64) - steer_v, positions[:, 1]))
+    return np.abs((weights * np.exp(1j * phase)).sum(-1)) ** 2 / np.sum(weights) ** 2
+
+
+def peak_sidelobe_db(contract: BeamContract, frequency_hz: float, azimuth_deg: float = 0.0,
+                     elevation_deg: float = 0.0, grid: int = 361) -> float | None:
+    """Highest level (dB re the beam) in the visible region outside the main lobe; None if the main lobe fills it.
+
+    The main lobe is the ellipse reaching, along each axis, the first rise after the pattern drops below -6 dB."""
+    u0, v0 = direction_components(azimuth_deg, elevation_deg)
+    radii = []
+    for du, dv in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        r = np.arange(0.002, 2.0, 0.002)
+        p = pattern_power(contract, frequency_hz, u0, v0, u0 + du * r, v0 + dv * r)
+        rising = np.nonzero((p[1:] > p[:-1]) & (p[:-1] < 0.25))[0]
+        radii.append(r[rising[0]] if rising.size else 2.0)
+    ru, rv = max(radii[:2]), max(radii[2:])
+    g = np.linspace(-1.0, 1.0, grid)
+    U, V = np.meshgrid(g, g)
+    outside = (U ** 2 + V ** 2 <= 1) & (((U - u0) / ru) ** 2 + ((V - v0) / rv) ** 2 > 1)
+    if not outside.any():
+        return None
+    return float(10 * np.log10(pattern_power(contract, frequency_hz, u0, v0, U[outside], V[outside]).max()))
 
 
 def fit_cut(angles_deg, levels_db, errors_db, model_angles_deg, model_db, drop_db: float = 6.0,
