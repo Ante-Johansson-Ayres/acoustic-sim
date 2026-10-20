@@ -734,7 +734,8 @@ def s1(session, args, out, array):
                             "silent_db_spl": off[key] - sensitivity + 94.0}
         name = "beam" if key == "beam" else f"microphone {key}"
         session.report.info(f"S1 {name}", f"{sensitivity:.1f} dBFS at 94 dB SPL, 1 kHz; silent level "
-                                          f"{off[key] - sensitivity + 94.0:.1f} dB SPL (0.5-3.5 kHz, unweighted)")
+                                          f"{off[key] - sensitivity + 94.0:.1f} dB SPL, so SNR re 94 dB SPL "
+                                          f"{sensitivity - off[key]:.1f} dB (0.5-3.5 kHz, unweighted, includes the room)")
     session.values["s1"] = {"meter_db_spl": spl, "channels": result}
 
 
