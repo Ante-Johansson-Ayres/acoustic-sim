@@ -8,6 +8,7 @@
 import { h, setText } from '../shared/dom.js';
 import { levelToUnit, rampColor, rgbCss } from '../shared/colormap.js';
 import { num } from '../shared/format.js';
+import { look } from '../shared/look.js';
 import { operatingMode } from '../hardware/status.js';
 
 const FLOOR = -40;
@@ -48,9 +49,17 @@ export function createView(container, {session, navigate}) {
   const mini = h('div', {class: 'ex-mini__grid', 'aria-hidden': 'true'});
   const fullscreen = h('button', {type: 'button', class: 'ex-link', onClick: () => toggleFullscreen()}, 'Full screen');
   const back = h('a', {class: 'ex-link', href: '#hardware'}, 'Operator console →');
+  // The Arasaka look shows the field as beams (a ray per sector) by default, as its mockup, with tiles one click away.
+  let display = look === 'arasaka' ? 'beams' : 'tiles';
+  const displayLink = look === 'arasaka' ? h('button', {type: 'button', class: 'ex-link', onClick: () => {
+    display = display === 'beams' ? 'tiles' : 'beams';
+    setText(displayLink, display === 'beams' ? 'Show tiles' : 'Show beams');
+    scene?.setDisplay(display);
+    render();
+  }}, 'Show tiles') : null;
   const corner = h('div', {class: 'ex-corner'},
     h('div', {class: 'ex-mini'}, miniTitle, mini),
-    h('div', {class: 'ex-links'}, fullscreen, back),
+    h('div', {class: 'ex-links'}, displayLink, fullscreen, back),
   );
   const offline = h('div', {class: 'ex-offline', hidden: true},
     h('p', {}, 'Heimdall is not connected.'),
@@ -63,9 +72,10 @@ export function createView(container, {session, navigate}) {
   let visible = false;
   let miniKey = '';
   let miniCells = [];
+  let build = null;          // the full 3D build plays every time Present opens
 
   import('../hardware/scene3d.js').then(({SectorScene}) => {
-    scene = new SectorScene(stage, {theme: 'exhibit'});
+    scene = new SectorScene(stage, {theme: 'exhibit', beams: look === 'arasaka'});
     scene.setOrbit(20, 10, 2.5);
     if (visible) scene.start();
     render();
@@ -124,7 +134,9 @@ export function createView(container, {session, navigate}) {
 
     const solution = session.solution(frame);
     const showAnswer = solution && (solution.kind === 'target' || mode === 'continuous' || mode === 'once' || mode === 'fixed');
-    if (showAnswer) {
+    if (showCount()) {
+      // counting the microphones in (count below)
+    } else if (showAnswer) {
       setText(label, solution.kind === 'target' ? 'Tracking a source' : solution.kind === 'beam' ? 'Listening in one direction' : 'Loudest direction');
       label.classList.add('is-live');
       setText(azBig, words(solution.azimuth, 'right', 'left', 'ahead'));
@@ -156,8 +168,33 @@ export function createView(container, {session, navigate}) {
         cell.style.opacity = fresh ? '1' : '0.4';
         cell.style.boxShadow = sector === marker && showAnswer ? 'inset 0 0 0 2px #ffffff' : 'none';
       }
-      scene?.render(frame, {floor: FLOOR, session});
+      // Idle motion while stopped; in the Beams display the glow wave also runs while searching, as the mockup.
+      const searching = (mode === 'track' || mode === 'stare') && !showAnswer;
+      scene?.render(frame, {floor: FLOOR, session, idle: mode === 'idle', searching: display === 'beams' && searching});
+      if (build && scene && online) {
+        scene.play(build);
+        build = null;
+        requestAnimationFrame(count);
+      }
     }
+  }
+
+  /** During the build the answer counts the microphones in, in DSP channel order (an animation: no test runs). */
+  function showCount() {
+    const channel = scene?.buildChannel?.();
+    if (!channel) return false;
+    label.classList.add('is-live');
+    setText(label, `Microphones 01–${String(scene.rig?.parts.mics.count ?? 44).padStart(2, '0')}`);
+    setText(azBig, String(channel).padStart(2, '0'));
+    setText(elBig, '');
+    setText(detail, '');
+    return true;
+  }
+
+  function count() {
+    if (!visible || !scene?.building) { render(); return; }
+    showCount();
+    requestAnimationFrame(count);
   }
 
   function onKey(event) {
@@ -172,6 +209,7 @@ export function createView(container, {session, navigate}) {
   return {
     show() {
       visible = true;
+      build = 'full';
       scene?.start();
       render();
     },

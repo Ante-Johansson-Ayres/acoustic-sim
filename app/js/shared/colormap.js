@@ -3,13 +3,34 @@
  * the beam-pattern views. Inputs are normalised 0..1.
  */
 
+import { look } from './look.js';
+
 export const RAMPS = {
   inferno: [[0, '#1b0f36'], [0.25, '#57106e'], [0.5, '#bc3754'], [0.75, '#f98c0a'], [1, '#fcffa4']],
   cividis: [[0, '#0b2350'], [0.25, '#3b496c'], [0.5, '#707173'], [0.75, '#aea06f'], [1, '#fde737']],
   blue: [[0, '#18202c'], [0.5, '#2f65b0'], [1, '#d6e7ff']],
   // Exhibition (style D): dark to ember to warm white.
   ember: [[0, '#16171b'], [0.35, '#4a1f1a'], [0.6, '#b8351f'], [0.82, '#ff7a45'], [1, '#ffe3c2']],
+  // Panel look, as its mockup: six flat greys from light to ink, and orange for the top tenth
+  // (within 3 dB on the beam pattern's 30 dB scale).
+  panel: [
+    [0, '#dcdcda'], [1 / 6, '#dcdcda'], [1 / 6, '#b5b5b2'], [2 / 6, '#b5b5b2'], [2 / 6, '#8c8c8a'], [3 / 6, '#8c8c8a'],
+    [3 / 6, '#636362'], [4 / 6, '#636362'], [4 / 6, '#3a3a39'], [5 / 6, '#3a3a39'], [5 / 6, '#111111'], [0.9, '#111111'],
+    [0.9, '#ea5a00'], [1, '#ea5a00'],
+  ],
+  // Arasaka look: near black, through dark red, to red and a pale red top.
+  arasaka: [[0, '#120b0c'], [0.35, '#3a0a10'], [0.65, '#9e0e1d'], [0.9, '#f2122a'], [1, '#ffc2ca']],
 };
+
+// A hidden look (look.js) draws with its own ramp wherever the app uses its two.
+const LOOK_RAMPS = {
+  panel: {inferno: 'panel', ember: 'panel'},
+  arasaka: {inferno: 'arasaka', ember: 'arasaka'},
+};
+
+function resolve(name) {
+  return (look && LOOK_RAMPS[look][name]) || name;
+}
 
 const parsed = {};
 
@@ -24,7 +45,7 @@ function stopsOf(name) {
 
 /** Colour at t in [0, 1] as [r, g, b] (0..255). */
 export function rampColor(t, name = 'inferno') {
-  const stops = stopsOf(name);
+  const stops = stopsOf(resolve(name));
   const x = Math.max(0, Math.min(1, Number.isFinite(t) ? t : 0));
   for (let i = 1; i < stops.length; i++) {
     if (x <= stops[i][0]) {
@@ -55,7 +76,7 @@ export function inkOn(rgb) {
 }
 
 export function rampGradient(direction = 'to top', name = 'inferno') {
-  return `linear-gradient(${direction}, ${(RAMPS[name] || RAMPS.inferno)
+  return `linear-gradient(${direction}, ${(RAMPS[resolve(name)] || RAMPS.inferno)
     .map(([t, hex]) => `${hex} ${Math.round(t * 100)}%`).join(', ')})`;
 }
 

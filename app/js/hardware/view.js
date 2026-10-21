@@ -8,7 +8,9 @@
 import { h, options, segmented, setText } from '../shared/dom.js';
 import { rampGradient } from '../shared/colormap.js';
 import { deg, num } from '../shared/format.js';
+import { look } from '../shared/look.js';
 import { FieldMap } from './map.js';
+import { modeWord, scaleFill } from './lookparts.js';
 import { HistoryCharts } from './history.js';
 import { AudioPanel, DiagnosticsPanel, EventLog, ManualBeamPanel, MeasurementPanel, SourcePanel, TonePanel, operatingMode, sourceAnswer } from './status.js';
 import { AcousticScene, AuditionPanel, ConnectionPanel } from './connection.js';
@@ -48,7 +50,8 @@ export function createView(container, {session}) {
   const prefs = {view: '3d', camera: 'behind', style: 'tiles', floor: -40, values: 'strongest', log: 'open', ...loadPrefs()};
   if (!['3d', 'map'].includes(prefs.view)) prefs.view = '3d';
   if (!STYLES.some(([key]) => key === prefs.style)) prefs.style = 'tiles';
-  const state = {visible: false, kind: null, field: null, hover: null, tab: null};
+  // build: the 3D build waiting to play once the 3D view is on screen ('full' the first time, 'quick' after).
+  const state = {visible: false, kind: null, field: null, hover: null, tab: null, build: null, built: false};
 
   const acoustic = new AcousticScene();
   const connection = new ConnectionPanel(session, acoustic);
@@ -84,12 +87,28 @@ export function createView(container, {session}) {
     }}, label));
   const scanMenu = h('details', {class: 'menu'}, scanSummary, h('div', {class: 'menu__list'}, ...scanItems));
   document.addEventListener('click', (event) => { if (!scanMenu.contains(event.target)) scanMenu.open = false; });
-  const command = h('section', {class: 'command', 'aria-label': 'Commands'},
-    liveButton, stopButton, stateBox, h('div', {class: 'command__right'}, scanMenu));
+  // The hidden looks lead the band with the mode as a big word, after a row of lamps (Panel) or a
+  // scale of the level above the background (Arasaka), and keep the keys on the right.
+  const modeText = look ? h('span', {class: 'lk-word'}) : null;
+  const scaleCells = look === 'arasaka' ? Array.from({length: 8}, () => h('i')) : [];
+  const lead = {
+    panel: () => h('div', {class: 'lk-lamps', 'aria-hidden': 'true'},
+      [5, 5, 4, 3, 2, 2, 1, 1, 0, 0].map((step, i) => h('i', {dataset: {lkStep: String(step)}, style: `--i: ${i}`}))),
+    arasaka: () => h('div', {class: 'lk-band', 'aria-hidden': 'true'}, h('span', {class: 'lk-band__name'}, 'Heimdall'),
+      h('div', {class: 'lk-scale'}, scaleCells), h('div', {class: 'lk-scale__ticks'}, ['30', '20', '10', '0'].map((t) => h('span', {}, t)))),
+  }[look]?.();
+  const command = look
+    ? h('section', {class: 'command', 'aria-label': 'Commands'},
+      lead, modeText, stateBox, h('div', {class: 'command__right'}, liveButton, stopButton, scanMenu))
+    : h('section', {class: 'command', 'aria-label': 'Commands'},
+      liveButton, stopButton, stateBox, h('div', {class: 'command__right'}, scanMenu));
 
   // ── Field: 3D or map, with its tools in the header ────────────────────
   const viewSeg = segmented([['3d', '3D'], ['map', 'Map']], {
-    label: 'Field view', onPick: (key) => { prefs.view = key; savePrefs(prefs); layout(); render(true); },
+    label: 'Field view', onPick: (key) => {
+      if (key === '3d' && prefs.view !== '3d') want3d('quick');
+      prefs.view = key; savePrefs(prefs); layout(); render(true);
+    },
   });
   const cameraSeg = segmented([['behind', 'Behind'], ['above', 'Above'], ['side', 'Side']], {
     label: 'Camera', onPick: (key) => { prefs.camera = key; savePrefs(prefs); cameraSeg.set(key); scene3d?.setView(key); },
@@ -115,7 +134,8 @@ export function createView(container, {session}) {
   const bar = h('div', {class: 'well__bar', 'aria-hidden': 'true'},
     h('div', {class: 'fmap__ramp', style: {background: rampGradient('to top')}}), barTicks);
   const waiting = h('p', {class: 'well__waiting', hidden: true});
-  const well = h('div', {class: 'well'}, sceneBox, mapBox, caption, h('p', {class: 'well__hint'}, 'Drag to rotate'), bar, waiting);
+  const standby = look ? h('p', {class: 'lk-standby', 'aria-hidden': 'true'}, 'Standby') : null;
+  const well = h('div', {class: 'well'}, sceneBox, mapBox, caption, h('p', {class: 'well__hint'}, 'Drag to rotate'), bar, waiting, standby);
   const fieldSection = h('section', {class: 'hw-field', 'aria-label': 'Field'}, fieldHead, well);
 
   // ── Drawer: the less frequent tools open under the Field ──────────────
@@ -188,6 +208,28 @@ export function createView(container, {session}) {
     render(true);
   }
 
+  /** Ask for a 3D build: the first one of the visit is always full. */
+  function want3d(kind) {
+    state.build = state.built ? kind : 'full';
+  }
+
+  /** Play the waiting build once the 3D view is on screen with its scene loaded. */
+  function playBuild() {
+    if (!state.build || !scene3d || prefs.view !== '3d' || consoleEl.hidden) return;
+    scene3d.play(state.build);
+    state.build = null;
+    state.built = true;
+    requestAnimationFrame(countMics);
+  }
+
+  /** While a build counts the microphones in, the azimuth board shows the count (only the Source panel redraws). */
+  function countMics() {
+    if (!state.visible || !scene3d?.motion?.build) { render(); return; }
+    const channel = scene3d.buildChannel();
+    if (channel && state.answer) source.render({...state.answer, counting: channel});
+    requestAnimationFrame(countMics);
+  }
+
   function ensureScene() {
     if (scene3d) return;
     import('./field3d.js').then(({FieldScene}) => {
@@ -225,7 +267,14 @@ export function createView(container, {session}) {
       + (Number.isFinite(cell.level) ? ` · ${num(cell.level, 1)} dBFS` : ' · not measured yet') + action);
   }
 
-  function renderCommand(mode) {
+  function renderCommand(mode, answer) {
+    if (look) {
+      setText(modeText, modeWord(mode));
+      command.dataset.mode = mode;
+      well.dataset.mode = mode;
+      const lit = scaleFill(answer.margin);
+      scaleCells.forEach((cell, i) => cell.classList.toggle('on', i < lit));
+    }
     const ready = session.ready;
     liveButton.disabled = !ready;
     liveButton.setAttribute('aria-pressed', String(mode === 'stare'));
@@ -330,8 +379,9 @@ export function createView(container, {session}) {
     state.kind = fieldKind(frame, {previous: state.kind, monitoring: session.monitoring});
     const field = buildField(frame, state.kind, {cellAge: (row, column) => session.cellAge(row, column), staleMs: STALE_MS});
     state.field = field;
+    const answer = sourceAnswer(session, field, mode);
 
-    renderCommand(mode);
+    renderCommand(mode, answer);
     waiting.hidden = Boolean(field);
     caption.hidden = !field;
     if (!field) {
@@ -340,9 +390,13 @@ export function createView(container, {session}) {
       map.render(field, {floor: prefs.floor, values: prefs.values, cellPx: cellSize(field)});
     } else {
       barTicks.replaceChildren(...[0, 0.25, 0.5, 0.75, 1].map((f) => h('li', {}, f === 0 ? '0 dBFS' : num(prefs.floor * f, 0))));
-      scene3d?.render(field, {floor: prefs.floor, session, style: prefs.style});
+      scene3d?.render(field, {floor: prefs.floor, session, style: prefs.style, idle: mode === 'idle'});
+      playBuild();
     }
-    source.render(sourceAnswer(session, field, mode));
+    // During a build the hidden looks' azimuth board counts the microphones in, as the mockups.
+    state.answer = answer;
+    const channel = prefs.view === '3d' ? scene3d?.buildChannel?.() : null;
+    source.render(channel ? {...answer, counting: channel} : answer);
     audio.render(frame);
     history.render(session, {span: fieldSpan(field), force});
     if (state.tab === 'diag') pages.diag.render(mode);
@@ -360,8 +414,9 @@ export function createView(container, {session}) {
   layout();
   fold();
   return {
-    show() {
+    show({from} = {}) {
       state.visible = true;
+      if (prefs.view === '3d') want3d(from === 'exhibit' ? 'quick' : state.built ? null : 'full');
       scene3d?.start();
       ticker = setInterval(() => render(), 500);
       const refreshDsp = () => { if (session.open) dsp.load().then(() => dsp.refresh()).catch(() => {}); };

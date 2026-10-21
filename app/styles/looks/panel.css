@@ -1,0 +1,228 @@
+/* Panel look (?look=panel): light paper, ink, one orange (#EA5A00), DotGothic16 for everything.
+   Loaded only with the flag (js/looks/panel.js). It re-maps the app's tokens, then dresses the
+   existing controls as the canvas mockups: grey keys, ink primary keys with a dithered shadow,
+   tabs with an orange dot. Small orange text uses the darker #B34100 so it reads on paper. */
+
+.look-panel,
+.look-panel .theme-exhibit {
+  --bg: #f2f2f0;
+  --surface: #f9f9f8;
+  --raised: #dcdcda;
+  --line: rgba(17, 17, 17, 0.14);
+  --line-strong: rgba(17, 17, 17, 0.26);
+  --well: #f2f2f0;
+  --text: #111111;
+  --muted: #595958;
+  --subtle: #6f6f6d;
+  --accent: #ea5a00;
+  --on-accent: #111111;
+  --ok: #2e6a27;
+  --danger: #b3261e;
+  --warn: #9a5b00;
+  --series-2: #111111;
+  --font-sans: 'DotGothic16', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'DotGothic16', ui-monospace, monospace;
+  --font-display: 'DotGothic16', 'Segoe UI', system-ui, sans-serif;
+  --radius-sm: 6px;
+  --radius: 6px;
+  --ink-orange: #b34100;
+  --dither: repeating-conic-gradient(#111111 0 25%, transparent 0 50%) 0 0 / 2px 2px;
+}
+
+/* One weight only: never fake a bold pixel font. */
+.look-panel { color-scheme: light; font-synthesis: none; }
+.look-panel body.is-exhibit { background: #f2f2f0; }
+
+/* Orange as text: the darker ink-orange. */
+.look-panel a,
+.look-panel .events__item.is-target b,
+.look-panel .btn[aria-pressed="true"],
+.look-panel .menu > summary.is-active,
+.look-panel .menu__item[aria-pressed="true"],
+.look-panel .scene-label--accent,
+.look-panel .srp-legend__est,
+.look-panel .fmap__pointer,
+.look-panel .ex-answer__label.is-live,
+.look-panel .note.is-warn,
+.look-panel .clip-notes { color: var(--ink-orange); }
+
+/* Header */
+.look-panel .app-brand { font-weight: 400; letter-spacing: 0.22em; }
+.look-panel .app-brand__logo { filter: brightness(0); }
+.look-panel .app-brand small { font-weight: 400; text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; }
+.look-panel .app-nav { gap: 4px; align-self: center; padding: 4px; border-radius: 10px; background: var(--surface); }
+.look-panel .app-nav a {
+  height: 38px;
+  gap: 8px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.look-panel .app-nav a[aria-current="page"] { background: var(--bg); color: var(--text); font-weight: 400; }
+.look-panel .app-nav a[aria-current="page"]::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+
+/* Keys */
+.look-panel .btn,
+.look-panel .cmd,
+.look-panel .tab {
+  border: 0;
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-weight: 400;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.look-panel .btn { font-size: 12px; }
+.look-panel .btn--ghost { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong); }
+.look-panel .btn--quiet { background: transparent; color: var(--muted); }
+.look-panel .btn:hover:not(:disabled),
+.look-panel .cmd:hover:not(:disabled) { filter: none; box-shadow: inset 0 0 0 1.5px var(--text); }
+.look-panel .btn[aria-pressed="true"],
+.look-panel .btn.is-active { background: var(--bg); box-shadow: inset 0 0 0 1.5px var(--text); }
+
+/* Primary keys: ink with paper text and a dithered drop shadow (Run simulation, LIVE while running, Present pills). */
+.look-panel .btn--primary,
+.look-panel .cmd--live[aria-pressed="true"],
+.look-panel .ex-pill[aria-pressed="true"] {
+  position: relative;
+  isolation: isolate;
+  background: var(--text);
+  color: var(--bg);
+}
+.look-panel .btn--primary::after,
+.look-panel .cmd--live[aria-pressed="true"]::after,
+.look-panel .ex-pill[aria-pressed="true"]::after {
+  content: '';
+  position: absolute;
+  inset: 4px -4px -4px 4px;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--dither);
+}
+.look-panel .cmd--live[aria-pressed="true"] i { background: var(--accent); box-shadow: none; }
+.look-panel .cmd { letter-spacing: 0.12em; font-size: 14px; }
+.look-panel .tab::after { color: var(--muted); }
+.look-panel .tab[aria-pressed="true"] { background: var(--bg); box-shadow: inset 0 0 0 1.5px var(--text); }
+.look-panel .tab[aria-pressed="true"]::after { color: var(--ink-orange); }
+
+/* Segmented controls: a grey tray, the chosen one on paper with an orange dot */
+.look-panel .seg { border: 0; border-radius: 10px; background: var(--raised); padding: 4px; }
+.look-panel .hw-console .seg { padding: 3px; }
+.look-panel .seg button { font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; font-size: 12px; }
+.look-panel .seg button[aria-pressed="true"],
+.look-panel .seg button[aria-selected="true"] { display: inline-flex; align-items: center; gap: 6px; background: var(--bg); color: var(--text); }
+.look-panel .seg button[aria-pressed="true"]::before,
+.look-panel .seg button[aria-selected="true"]::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+/* Fields */
+.look-panel .input,
+.look-panel .select { border: 0; border-radius: 6px; background: var(--raised); }
+.look-panel .slider__input,
+.look-panel .check input,
+.look-panel .radio-row input { accent-color: var(--accent); }
+.look-panel .slider__value,
+.look-panel .figures dd,
+.look-panel .kv b { letter-spacing: 0.04em; }
+
+/* Labels: small uppercase, as the mockups */
+.look-panel .hw-console .label,
+.look-panel .section__title,
+.look-panel .field > label,
+.look-panel .slider__head label,
+.look-panel .pick,
+.look-panel .stat__k,
+.look-panel .figure-label,
+.look-panel .line__k,
+.look-panel .radio-row legend {
+  font-weight: 400;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-size: 12px;
+}
+.look-panel .hw-console .label,
+.look-panel .section__title { color: var(--text); font-size: 14px; letter-spacing: 0.06em; }
+.look-panel .bp-title,
+.look-panel .page-title { font-weight: 400; letter-spacing: 0.04em; text-transform: uppercase; font-size: 20px; }
+.look-panel .chip,
+.look-panel .tag { border-radius: 6px; font-weight: 400; letter-spacing: 0.05em; }
+.look-panel .tag--accent { border-color: var(--text); background: var(--text); color: var(--bg); }
+
+/* Console: the work columns as paper cards */
+.look-panel .rail,
+.look-panel .side { border: 0; }
+.look-panel .state { border-left-color: var(--line-strong); }
+.look-panel .state b { font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; }
+.look-panel .well { border-radius: 6px; }
+.look-panel .events__item { border-left-width: 3px; }
+.look-panel .menu__list { border: 0; border-radius: 8px; background: var(--surface); box-shadow: 0 0 0 1px var(--line-strong), 6px 6px 0 -2px rgba(17, 17, 17, 0.18); }
+.look-panel .well .scene-label--marker { background: var(--text); color: var(--bg); border-radius: 4px; font-weight: 400; }
+/* The steering label sits on the orange main lobe: give it paper to stand on. */
+.look-panel .scene-label--accent { padding: 1px 6px; border-radius: 4px; background: var(--bg); font-weight: 400; }
+
+/* Map: the crosshair and outlines in ink rather than white */
+.look-panel .fmap__cell.is-hover { box-shadow: inset 0 0 0 2px rgba(17, 17, 17, 0.85); }
+.look-panel .fmap__cell.is-strongest { box-shadow: inset 0 0 0 2px var(--text), inset 0 0 0 3px var(--bg); }
+.look-panel .fmap__cross::before,
+.look-panel .fmap__cross::after { background: var(--text); box-shadow: 0 0 0 1px var(--bg); }
+.look-panel .fmap__cross b { border-color: var(--text); box-shadow: 0 0 0 1px var(--bg), inset 0 0 0 1px var(--bg); }
+.look-panel .fmap__value { font-weight: 400; }
+
+/* Present (exhibit) */
+.look-panel .view--exhibit { font-family: var(--font-display); }
+.look-panel .ex-title { font-weight: 400; font-stretch: normal; letter-spacing: 0.22em; text-transform: uppercase; }
+.look-panel .ex-answer__label { font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; }
+.look-panel .ex-answer__big { font-weight: 400; font-stretch: normal; letter-spacing: 0.02em; }
+.look-panel .ex-live { font-weight: 400; }
+.look-panel .ex-live__dot[data-state="online"] { background: var(--ok); }
+.look-panel .ex-pill { border: 0; border-radius: 10px; background: var(--raised); color: var(--text); font-weight: 400; letter-spacing: 0.06em; text-transform: uppercase; }
+.look-panel .ex-pill[aria-pressed="true"] { color: var(--bg); }
+.look-panel .ex-link { border-bottom-color: var(--line-strong); font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; }
+.look-panel .ex-link:hover { border-bottom-color: var(--accent); }
+
+.look-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px dashed rgba(17, 17, 17, 0.32);
+  border-radius: 6px;
+  color: #b34100;
+  font-family: 'DotGothic16', monospace;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Hardware parts (parts.css), as the Panel mockup: ink dither on pale tiles, a five-cell meter and the
+   level on paper chips; the target tile turns orange inside an ink ring. */
+.look-panel {
+  --lk-off: rgba(17, 17, 17, 0.08);
+  --lk-on: #ea5a00;
+  --lk-tile: #111111;
+  --lk-tile-off: rgba(17, 17, 17, 0.08);
+  --lk-meter-on: #111111;
+}
+.look-panel .fmap__cell[data-lk-step] { border-radius: 6px; }
+.look-panel .fmap__cell.is-hover { box-shadow: inset 0 0 0 2px var(--text); }
+.look-panel .fmap__cell:is(.is-strongest, .is-held) { --lk-tile: #ea5a00; --lk-meter-on: #ea5a00; outline: none; box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--text); }
+.look-panel .lk-meter { border-radius: 4px; background: var(--surface); }
+.look-panel .lk-meter i { border-radius: 1.5px; }
+.look-panel .fmap__value { left: 6px; bottom: 6px; padding: 0 5px; border-radius: 4px; background: var(--surface); color: var(--text); font: 400 12px/18px var(--font-mono); }
+.look-panel .fmap__value:empty { display: none; }
+.look-panel .fmap__cell:is(.is-strongest, .is-held) .fmap__value { background: var(--text); color: var(--bg); }
+.look-panel .lk-steps i { border-radius: 2px; }
+.look-panel .fmap__cross { width: 46px; height: 46px; }
+.look-panel .fmap__cross::before, .look-panel .fmap__cross::after { background: var(--text); box-shadow: none; }
+.look-panel .fmap__cross::before { left: 22px; height: 46px; }
+.look-panel .fmap__cross::after { top: 22px; width: 46px; }
+.look-panel .fmap__cross b { inset: 10px; border-color: var(--text); background: var(--bg); box-shadow: none; }
+.look-panel .lk-led i { border-radius: 1px; }
+.look-panel .lk-lamps i { border-radius: 2px; }
+.look-panel .lk-standby { color: var(--ink-orange); font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; }
+.look-panel .lk-led--ink i.on { background: #111111; }

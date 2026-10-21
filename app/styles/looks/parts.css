@@ -1,0 +1,71 @@
+/* Parts the hidden looks add to the Hardware screen (js/hardware/lookparts.js): their shapes, shared
+   by both looks. panel.css and arasaka.css colour them through the --lk-* properties. Loaded only
+   with ?look=, by js/looks/panel.js and js/looks/arasaka.js. */
+
+/* Dither steps, as the mockups: solid, then 3/4, 1/2, 1/4, 1/8 and 1/16 of the pixels in currentColor. */
+[data-lk-step="0"] { background-color: currentColor !important; }
+[data-lk-step="1"] { background-image: conic-gradient(from 90deg at 1px 1px, currentColor 75%, transparent 0); background-size: 2px 2px; }
+[data-lk-step="2"] { background-image: repeating-conic-gradient(currentColor 0 25%, transparent 0 50%); background-size: 2px 2px; }
+[data-lk-step="3"] { background-image: conic-gradient(from 90deg at 1px 1px, transparent 75%, currentColor 0); background-size: 2px 2px; }
+[data-lk-step="4"] {
+  background-image: conic-gradient(from 90deg at 3px 1px, transparent 75%, currentColor 0), conic-gradient(from 270deg at 1px 3px, transparent 75%, currentColor 0);
+  background-size: 4px 4px;
+}
+[data-lk-step="5"] { background-image: conic-gradient(from 90deg at 3px 1px, transparent 75%, currentColor 0); background-size: 4px 4px; }
+
+/* Source: the direction in words above a 17 × 9 dot-matrix board, in place of the big number. */
+.src-answer:has(.lk-led) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.ro:has(.lk-led) { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 8px; }
+.ro:has(.lk-led) .ro__num { display: none; }
+.ro__word { color: var(--text); white-space: nowrap; }
+.lk-led { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(var(--lk-columns, 17), minmax(0, 1fr)); gap: 2px; }
+.lk-led i { display: block; aspect-ratio: 1; background: var(--lk-off); }
+.lk-led i.on { background: var(--lk-on); box-shadow: var(--lk-glow, none); }
+
+/* Map tiles: the dither step fills the tile; a five-cell meter on the right, the level bottom left. */
+.fmap__cell[data-lk-step] { color: var(--lk-tile); background-color: var(--lk-tile-off); }
+.lk-meter { position: absolute; right: 6px; top: 6px; bottom: 6px; width: 14px; padding: 2px; display: flex; flex-direction: column-reverse; gap: 2px; pointer-events: none; }
+.lk-meter i { display: block; flex: 1 1 0; background: var(--lk-off); }
+.lk-meter[data-fill="1"] i:nth-child(-n+1),
+.lk-meter[data-fill="2"] i:nth-child(-n+2),
+.lk-meter[data-fill="3"] i:nth-child(-n+3),
+.lk-meter[data-fill="4"] i:nth-child(-n+4),
+.lk-meter[data-fill="5"] i:nth-child(-n+5) { background: var(--lk-meter-on); box-shadow: var(--lk-glow, none); }
+.fmap--small .lk-meter { display: none; }
+.fmap__ramp.lk-steps { display: flex; flex-direction: column; gap: 2px; background: none; }
+.lk-steps i { flex: 1 1 0; color: var(--lk-tile); background-color: var(--lk-tile-off); }
+
+/* Command band: lamps or the level scale, then the mode as a big word; the keys move to the right. */
+.command:has(.lk-word) { height: 76px; gap: 20px; }
+.command:has(.lk-word) .state { margin-left: 0; }
+.lk-word { flex: none; font-size: 40px; line-height: 40px; letter-spacing: 0.06em; color: var(--accent); }
+.command[data-mode="idle"] .lk-word { color: var(--muted); text-shadow: none; }
+.lk-lamps { flex: none; display: flex; gap: 4px; }
+.lk-lamps i { display: block; width: 14px; height: 14px; color: var(--accent); background-color: var(--lk-off); }
+.command[data-mode="idle"] .lk-lamps i { color: var(--muted); }
+.lk-band { flex: none; display: flex; align-items: center; gap: 12px; }
+.lk-band__name { writing-mode: vertical-rl; transform: rotate(180deg); }
+.lk-scale { display: flex; flex-direction: column-reverse; gap: 3px; }
+.lk-scale i { display: block; width: 14px; height: 6px; background: var(--lk-off); }
+.lk-scale i.on { background: var(--lk-on); box-shadow: var(--lk-glow, none); }
+.lk-scale__ticks { height: 69px; display: flex; flex-direction: column; justify-content: space-between; }
+
+/* Standby: a label in the Field's corner while nothing runs. */
+.lk-standby { position: absolute; left: 16px; top: 14px; z-index: 2; display: none; margin: 0; pointer-events: none; }
+.well[data-mode="idle"] .lk-standby { display: block; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .well[data-mode="idle"] .lk-standby { animation: lk-blink 1.6s ease-in-out infinite; }
+  .command[data-mode="idle"] .lk-lamps i { animation: lk-chase 1.6s linear calc(var(--i) * 0.16s) infinite; }
+}
+@keyframes lk-blink { 50% { opacity: 0.35; } }
+@keyframes lk-chase { 0% { opacity: 1; } 35%, 100% { opacity: 0.25; } }
+
+/* Beam pattern and Simulator: the steering, each cut's −3 dB width and the estimate on boards, as the mockups. */
+.lk-boards { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.lk-boards__pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.lk-board { display: flex; flex-direction: column; gap: 4px; }
+.polar-figure figcaption:has(.lk-led) { display: flex; flex-direction: column; gap: 6px; }
+.answer:has(.lk-led) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.answer__figure:has(.lk-led) { display: flex; flex-direction: column; gap: 6px; }
+.answer__figure:has(.lk-led) .answer__value { display: none; }

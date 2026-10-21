@@ -31,6 +31,7 @@ export class Viewport3D {
     this.scene.add(key);
 
     this.onFrame = null;
+    this.animating = null;       // optional () => boolean: keep drawing every frame while it is true
     this.dirty = true;
     this.running = false;
     this.width = 0;
@@ -68,7 +69,7 @@ export class Viewport3D {
     if (!this.running) return;
     requestAnimationFrame(this.loop);
     const moving = this.controls.update();
-    if (!(moving || this.dirty) || this.width === 0 || this.height === 0) return;
+    if (!(moving || this.dirty || this.animating?.()) || this.width === 0 || this.height === 0) return;
     this.dirty = false;
     this.onFrame?.();
     this.renderer.render(this.scene, this.camera);

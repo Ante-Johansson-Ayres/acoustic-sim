@@ -7,15 +7,17 @@
 import * as THREE from 'three';
 import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { h, setText } from '../shared/dom.js';
+import { sceneColor } from '../shared/look.js';
 
 const VIEWS = {angled: {yaw: 32, pitch: 28}, plan: {yaw: 0, pitch: 88}};
 const COLOR = {
-  line: 0x2c3036, edge: 0x5a6068, text: 0xe9eaec, muted: 0xa3a9b0, accent: 0x7aa7ff, faint: 0x5a6068,
+  line: sceneColor('line', 0x2c3036), edge: sceneColor('strong', 0x5a6068), text: sceneColor('text', 0xe9eaec),
+  muted: sceneColor('subtle', 0xa3a9b0), accent: sceneColor('accent', 0x7aa7ff), faint: sceneColor('strong', 0x5a6068),
 };
 
 export class RoomScene {
   constructor(container) {
-    this.viewport = new Viewport3D(container, {background: '#1a1c20', fov: 40});
+    this.viewport = new Viewport3D(container, {background: sceneColor('background', '#1a1c20'), fov: 40});
     this.labels = h('div', {class: 'scene-labels', 'aria-hidden': 'true'});
     container.append(this.labels);
     this.group = new THREE.Group();

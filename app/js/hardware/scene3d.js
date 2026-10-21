@@ -13,8 +13,13 @@ import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { levelToUnit, rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
 import { deg } from '../shared/format.js';
+import { look, sceneColor } from '../shared/look.js';
 import { angularEdges, direction } from './geometry.js';
 import { STALE_MS } from './session.js';
+import { buildRig } from './rig3d.js';
+import { HALO_OUTSET, floorMesh, haloMaterial, setHalo, setTile, tileMaterial } from './look3d.js';
+import { ditherStep, meterFill } from './lookparts.js';
+import { Motion, prefersReducedMotion, tileHandle } from './build3d.js';
 
 const RADIUS = 1.25;
 const TARGET = new THREE.Vector3(0, 0, 0.7);
@@ -38,6 +43,13 @@ const THEMES = {
 
 const OK = new THREE.Color('#4cc38a');
 const WARN = new THREE.Color('#e2b454');
+const MARKER = sceneColor('marker', '#ffffff');
+
+/** A theme in the current look: its scene colours swapped for the look's (look.js); the ramp follows colormap.js. */
+function lookTheme(theme) {
+  return {...theme, background: sceneColor('background', theme.background), line: sceneColor('line', theme.line),
+    text: sceneColor('text', theme.text), accent: sceneColor('accent', theme.accent)};
+}
 
 function toScene(vec, radius = 1) {
   return new THREE.Vector3(-vec[0] * radius, vec[1] * radius, vec[2] * radius);
@@ -49,6 +61,7 @@ function srgb(rgb) {
 
 function tileGeometry(a0, a1, e0, e1, radius, steps = 6) {
   const positions = [];
+  const uvs = [];
   const index = [];
   for (let i = 0; i <= steps; i++) {
     for (let j = 0; j <= steps; j++) {
@@ -56,6 +69,7 @@ function tileGeometry(a0, a1, e0, e1, radius, steps = 6) {
       const e = e0 + (e1 - e0) * i / steps;
       const p = toScene(direction(a, e), radius);
       positions.push(p.x, p.y, p.z);
+      uvs.push(j / steps, i / steps);
     }
   }
   const row = steps + 1;
@@ -67,6 +81,7 @@ function tileGeometry(a0, a1, e0, e1, radius, steps = 6) {
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geometry.setIndex(index);
   return geometry;
 }
@@ -80,12 +95,25 @@ function outlinePoints(a0, a1, e0, e1, radius, steps = 8) {
   return points;
 }
 
+const RAY_ALPHA = [1, 0.82, 0.58, 0.45, 0.45, 0.45];   // Arasaka's rays by dither step: quiet ones no fainter than 45 %
+const SWAY = {degrees: 16, period: 36};                 // the hidden looks' slow camera sway on Present, until a drag
+
+/** A ray of unit length along +y from the origin, fading from 30 % at the array to full at its tip. */
+function rayGeometry() {
+  const geometry = new THREE.CylinderGeometry(0.0035, 0.0035, 1, 6, 1, true).translate(0, 0.5, 0);
+  const y = geometry.getAttribute('position');
+  const colors = [];
+  for (let i = 0; i < y.count; i++) colors.push(1, 1, 1, 0.3 + 0.7 * y.getY(i));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
+  return geometry;
+}
+
 export class SectorScene {
-  constructor(container, {onPick, onHover, theme = 'instrument'} = {}) {
+  constructor(container, {onPick, onHover, theme = 'instrument', beams = false} = {}) {
     this.container = container;
     this.onPick = onPick;
     this.onHover = onHover;
-    this.theme = THEMES[theme] || THEMES.instrument;
+    this.theme = lookTheme(THEMES[theme] || THEMES.instrument);
     this.colors = {
       line: new THREE.Color(this.theme.line),
       text: new THREE.Color(this.theme.text),
@@ -100,8 +128,14 @@ export class SectorScene {
     this.highlights = new THREE.Group();
     this.array = new THREE.Group();
     this.pointer = new THREE.Group();
-    this.viewport.scene.add(this.floor, this.array, this.tiles, this.highlights, this.pointer);
+    this.rays = new THREE.Group();
+    this.tips = new THREE.Group();
+    this.viewport.scene.add(this.floor, this.array, this.tiles, this.highlights, this.pointer, this.rays, this.tips);
     this.buildFloor();
+    // Arasaka's Beams display (look.js): a ray per sector from the array instead of the tiles' fill; `display` picks it.
+    this.beamsAllowed = beams;
+    this.display = beams ? 'beams' : 'tiles';
+    this.rayParts = [];
 
     this.key = '';
     this.layoutKey = '';
@@ -111,24 +145,84 @@ export class SectorScene {
     this.labelNodes = [];
     this.markerLabel = null;
 
-    this.viewport.onFrame = () => this.placeLabels();
+    // Startup and idle motion in every look (build3d.js); reaches scaled to this dome (1.25 m against Hardware's 3.5 m).
+    this.grid = {columns: 1, rows: 1};
+    this.motion = new Motion({look: look || 'default', viewport: this.viewport, parts: () => this.motionParts(),
+      reach: {wave: 2.25, ring: 1.34, pulse: 0.68, jitter: 0.013}});
+    this.sway = null;
+    const building = this.viewport.animating;
+    this.viewport.animating = () => building() || this.swaying();
+    this.viewport.onFrame = () => {
+      if (this.swaying()) this.swayStep();
+      this.motion?.apply();
+      this.placeLabels();
+    };
     this.bindPointer();
     this.setView('behind');
   }
 
+  swaying() {
+    return Boolean(this.sway) && !this.sway.manual && !prefersReducedMotion();
+  }
+
+  swayStep() {
+    const {yaw, pitch, distance, t0} = this.sway;
+    const t = performance.now() / 1000 - t0;
+    this.viewport.orbitTo(TARGET, {yaw: yaw + SWAY.degrees * Math.sin(t * 2 * Math.PI / SWAY.period), pitch, distance});
+  }
+
+  /** 'beams' (Arasaka's rays, where allowed) or 'tiles'. */
+  setDisplay(name) {
+    this.display = this.beamsAllowed && name === 'beams' ? 'beams' : 'tiles';
+    this.viewport.requestRender();
+  }
+
   start() { this.viewport.start(); }
   stop() { this.viewport.stop(); }
+
+  /** Play the 3D build: 'full' or 'quick'. */
+  play(kind) { this.motion?.play(kind); }
+
+  /** The microphone the build has reached (1–44), or null outside a build. */
+  buildChannel() { return this.motion?.channel() ?? null; }
+
+  get building() { return Boolean(this.motion?.build); }
+
+  motionParts() {
+    return {
+      rig: this.rig,
+      floor: this.floorMesh,
+      tiles: this.tileMeshes.map((mesh, i) => tileHandle(mesh, this.halos?.[i])),
+      columns: this.grid.columns,
+      rows: this.grid.rows,
+      marks: [this.pointer, this.highlights],
+      labels: [this.markerLabel],
+      rays: this.display === 'beams' ? this.rays : null,
+      tips: this.display === 'beams' ? this.tips : null,
+    };
+  }
 
   setView(name) {
     const view = CAMERA_VIEWS[name] || CAMERA_VIEWS.behind;
     this.viewport.orbitTo(TARGET, {...view, distance: DISTANCE});
   }
 
+  /** Place the camera; it then sways slowly round that place until the view is dragged (Present's motion). */
   setOrbit(yaw, pitch, distance = DISTANCE) {
     this.viewport.orbitTo(TARGET, {yaw, pitch, distance});
+    this.sway = {yaw, pitch, distance, t0: performance.now() / 1000, manual: false};
   }
 
   buildFloor() {
+    if (look) {
+      // The hidden looks' floor (look3d.js), scaled to this smaller scene: the dome here is 1.25 m, not 3.5 m.
+      const {y} = this.theme.floor;
+      this.floorMesh = floorMesh(look, {y, centre: [0, 0.45], reach: 2.6, size: 6});
+      this.floorMesh.material.uniforms.uSpacing.value *= 0.45;
+      this.floorMesh.material.uniforms.uDot.value *= 0.6;
+      this.floor.add(this.floorMesh);
+      return;
+    }
     const {half, depth: [near, far], y} = this.theme.floor;
     const points = [];
     const steps = Math.round(half / 0.2);
@@ -138,33 +232,23 @@ export class SectorScene {
       const z = near + i * ((far - near) / steps);
       points.push(new THREE.Vector3(-half, y, z), new THREE.Vector3(half, y, z));
     }
-    this.floor.add(new THREE.LineSegments(
-      new THREE.BufferGeometry().setFromPoints(points),
-      new THREE.LineBasicMaterial({color: this.colors.line}),
-    ));
+    // Fades in during the build, so transparent; drawn first, as when it was opaque.
+    this.floorMesh = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({color: this.colors.line, transparent: true}));
+    this.floorMesh.renderOrder = -1;
+    this.floor.add(this.floorMesh);
   }
 
+  /** The array as its real boards on the CAD mount and desk (rig3d.js), standing on this scene's floor. */
   setArray(layout) {
     const key = layout ? JSON.stringify(layout.positions) : '';
     if (key === this.layoutKey) return;
     this.layoutKey = key;
     clearGroup(this.array);
+    this.rig = null;
     if (!layout?.positions?.length) return;
-    const n = layout.positions.length;
-    const mean = [0, 0];
-    for (const [x, y] of layout.positions) { mean[0] += x / n; mean[1] += y / n; }
-    const mesh = new THREE.InstancedMesh(
-      new THREE.SphereGeometry(this.theme.micSize, 10, 8),
-      new THREE.MeshBasicMaterial({color: this.colors.text, transparent: true, opacity: 0.85}),
-      n,
-    );
-    const matrix = new THREE.Matrix4();
-    layout.positions.forEach(([x, y, z = 0], i) => {
-      const p = toScene([(x - mean[0]) / 1000, (y - mean[1]) / 1000, z / 1000]);
-      matrix.makeTranslation(p.x, p.y, p.z);
-      mesh.setMatrixAt(i, matrix);
-    });
-    this.array.add(mesh);
+    this.rig = buildRig({look: look || 'default', layout, floorY: this.theme.floor.y});
+    this.array.add(this.rig.group);
     this.viewport.requestRender();
   }
 
@@ -175,22 +259,77 @@ export class SectorScene {
     this.key = key;
     clearGroup(this.tiles);
     this.tileMeshes = [];
+    this.halos = [];
+    this.grid = {columns: cfg.columns, rows: cfg.rows};
     const az = angularEdges(frame.azimuth_deg);
     const el = angularEdges(frame.elevation_deg).map((v) => Math.max(-89, Math.min(89, v)));
     this.edges = {az, el};
     const inset = Math.min(0.6, (az[1] - az[0]) * 0.05, (el[1] - el[0]) * 0.05);
     for (let row = 0; row < cfg.rows; row++) {
       for (let column = 0; column < cfg.columns; column++) {
+        const [a0, a1, e0, e1] = [az[column] + inset, az[column + 1] - inset, el[row] + inset, el[row + 1] - inset];
         const mesh = new THREE.Mesh(
-          tileGeometry(az[column] + inset, az[column + 1] - inset, el[row] + inset, el[row + 1] - inset, RADIUS),
-          new THREE.MeshBasicMaterial({color: this.colors.line, transparent: true, opacity: 0.95, side: THREE.DoubleSide}),
+          tileGeometry(a0, a1, e0, e1, RADIUS),
+          look ? tileMaterial(look) : new THREE.MeshBasicMaterial({color: this.colors.line, transparent: true, opacity: 0.95, side: THREE.DoubleSide}),
         );
-        mesh.userData = {row, column, sector: row * cfg.columns + column};
+        mesh.userData = {row, column, sector: row * cfg.columns + column, opacity: 0.95};
         this.tiles.add(mesh);
         this.tileMeshes.push(mesh);
+        if (look) {
+          // The hidden looks ring the target and glow the loudest tiles from a halo just behind each tile (look3d.js).
+          const da = (a1 - a0) * HALO_OUTSET;
+          const de = (e1 - e0) * HALO_OUTSET;
+          const halo = new THREE.Mesh(tileGeometry(a0 - da, a1 + da, e0 - de, e1 + de, RADIUS * 1.004), haloMaterial(look));
+          halo.visible = false;
+          this.tiles.add(halo);
+          this.halos.push(halo);
+        }
       }
     }
+    if (this.beamsAllowed) this.buildRays(frame);
     this.buildTickLabels();
+  }
+
+  /** Arasaka's Beams display: a ray from the array toward each sector's centre, with a square tip facing the array. */
+  buildRays(frame) {
+    clearGroup(this.rays);
+    clearGroup(this.tips);
+    this.rayParts = [];
+    const geometry = rayGeometry();
+    const tip = new THREE.RingGeometry(0.016, 0.02, 4, 1, Math.PI / 4);
+    const up = new THREE.Vector3(0, 1, 0);
+    for (const mesh of this.tileMeshes) {
+      const {row, column} = mesh.userData;
+      const along = toScene(direction(frame.azimuth_deg[column], frame.elevation_deg[row])).normalize();
+      const ray = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({color: 0xf2122a, vertexColors: true, transparent: true, depthWrite: false}));
+      ray.quaternion.setFromUnitVectors(up, along);
+      const square = new THREE.Mesh(tip, new THREE.MeshBasicMaterial({color: 0xf2122a, transparent: true, side: THREE.DoubleSide}));
+      this.rays.add(ray);
+      this.tips.add(square);
+      this.rayParts.push({ray, tip: square, along});
+    }
+  }
+
+  /** Ray lengths and strengths: further and brighter the more a sector stands above the median; the target's in ink. */
+  renderRays(frame, floor, marker) {
+    const levels = this.tileMeshes.map(({userData: {row, column}}) => frame.levels_db?.[row]?.[column]);
+    const measured = levels.filter(Number.isFinite).sort((a, b) => a - b);
+    const median = measured.length ? measured[Math.floor(measured.length / 2)] : floor;
+    this.rayParts.forEach(({ray, tip, along}, i) => {
+      const level = levels[i];
+      const {row, column} = this.tileMeshes[i].userData;
+      const hot = Boolean(marker) && marker.row === row && marker.column === column;
+      const relief = Number.isFinite(level) ? Math.max(0, Math.min(1, (level - median) / 24)) : 0;
+      const length = RADIUS * (0.3 + 0.7 * relief);
+      const alpha = hot ? 1 : RAY_ALPHA[ditherStep(level, floor) ?? 5];
+      ray.scale.set(1, length, 1);
+      ray.material.color.set(hot ? '#e9e3dc' : '#f2122a');
+      ray.material.opacity = alpha;
+      tip.position.copy(along).multiplyScalar(length);
+      tip.lookAt(0, 0, 0);
+      tip.material.color.set(hot ? '#e9e3dc' : '#f2122a');
+      tip.material.opacity = alpha;
+    });
   }
 
   buildTickLabels() {
@@ -229,21 +368,45 @@ export class SectorScene {
     }
   }
 
-  render(frame, {floor, session}) {
+  /** state: {floor, session, idle: nothing running, searching: the glow wave alone (the hidden looks' motion)} */
+  render(frame, {floor, session, idle = false, searching = false}) {
     const cfg = frame?.configuration;
     if (!cfg || !frame.levels_db || !frame.azimuth_deg?.length || !frame.elevation_deg?.length) return;
+    this.motion?.setIdle(idle, idle || searching);
     this.build(frame);
     this.setArray(session.arrayLayout);
 
-    for (const mesh of this.tileMeshes) {
+    const target = frame.target;
+    const steer = !target ? frame.last_steer : null;
+    const strongest = !target && !steer ? session.strongest(frame) : null;
+    const marker = target || steer || strongest;
+    const pixel = Math.max(1, Math.round(this.viewport.renderer.getPixelRatio()));
+    const beams = this.display === 'beams';
+    this.rays.visible = beams;
+    this.tips.visible = beams && !this.motion?.build;
+    if (beams) this.renderRays(frame, floor, marker);
+    this.tileMeshes.forEach((mesh, i) => {
       const {row, column} = mesh.userData;
       const level = frame.levels_db?.[row]?.[column];
       const measured = Number.isFinite(level);
       const age = session.cellAge(row, column);
       const fresh = measured && Number.isFinite(age) && age <= STALE_MS;
-      mesh.material.color.copy(measured ? srgb(rampColor(levelToUnit(level, floor), this.theme.ramp)) : this.colors.line);
-      mesh.material.opacity = measured ? (fresh ? 0.96 : 0.38) : 0.35;
-    }
+      if (look) {
+        const state = {step: ditherStep(level, floor), fill: meterFill(level, floor),
+          target: Boolean(marker) && marker.row === row && marker.column === column};
+        setTile(mesh.material, look, {...state, opacity: beams ? 1 : measured ? (fresh ? 1 : 0.55) : 0.5});
+        mesh.material.uniforms.uPixel.value = pixel;
+        mesh.material.uniforms.uWire.value = beams ? 1 : 0;
+        setHalo(this.halos[i], look, state);
+        if (beams) this.halos[i].visible = false;
+        return;
+      }
+      // Kept on the tile too: the build's fade and the idle glow wave go on top of them (build3d.js tileHandle).
+      mesh.userData.color = measured ? srgb(rampColor(levelToUnit(level, floor), this.theme.ramp)) : this.colors.line.clone();
+      mesh.userData.opacity = measured ? (fresh ? 0.96 : 0.38) : 0.35;
+      mesh.material.color.copy(mesh.userData.color);
+      mesh.material.opacity = mesh.userData.opacity;
+    });
 
     clearGroup(this.highlights);
     clearGroup(this.pointer);
@@ -259,31 +422,35 @@ export class SectorScene {
       this.highlights.add(line);
     };
 
-    const target = frame.target;
-    const steer = !target ? frame.last_steer : null;
-    const strongest = !target && !steer ? session.strongest(frame) : null;
-    const marker = target || steer || strongest;
     if (this.hover !== null) {
       const {row, column} = this.tileMeshes[this.hover]?.userData || {};
       if (row !== undefined) outline(row, column, this.colors.text);
     }
     if (steer) outline(steer.row, steer.column, this.colors.accent, true);
-    if (marker) {
+    if (marker && beams) {
+      // In the Beams display the target's own ray, in ink, is the pointer.
+      const hot = this.rayParts[this.tileMeshes.findIndex((m) => m.userData.row === marker.row && m.userData.column === marker.column)];
+      this.markerPoint = hot ? hot.tip.position.clone() : null;
+      if (this.markerLabel) {
+        this.markerLabel.hidden = !hot;
+        setText(this.markerLabel, `${deg(frame.azimuth_deg[marker.column])}, ${deg(frame.elevation_deg[marker.row])}`);
+      }
+    } else if (marker) {
       const a = frame.azimuth_deg[marker.column];
       const e = frame.elevation_deg[marker.row];
       const tip = toScene(direction(a, e), RADIUS);
-      if (!steer) outline(marker.row, marker.column, new THREE.Color('#ffffff'));
+      if (!steer && !look) outline(marker.row, marker.column, new THREE.Color(MARKER));
       const bearing = new THREE.Line(
         new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), tip]),
         new THREE.LineDashedMaterial({color: steer ? this.colors.accent : this.colors.text, dashSize: 0.06, gapSize: 0.06}),
       );
       bearing.computeLineDistances();
       this.pointer.add(bearing);
-      const dot = new THREE.Mesh(new THREE.SphereGeometry(this.theme.ring ? 0.018 : 0.022, 16, 12), new THREE.MeshBasicMaterial({color: 0xffffff}));
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(this.theme.ring ? 0.018 : 0.022, 16, 12), new THREE.MeshBasicMaterial({color: MARKER}));
       dot.position.copy(tip);
       this.pointer.add(dot);
       if (this.theme.ring) {
-        const ring = new THREE.Mesh(new THREE.RingGeometry(0.05, 0.062, 40), new THREE.MeshBasicMaterial({color: 0xffffff, side: THREE.DoubleSide}));
+        const ring = new THREE.Mesh(new THREE.RingGeometry(0.05, 0.062, 40), new THREE.MeshBasicMaterial({color: MARKER, side: THREE.DoubleSide}));
         ring.position.copy(tip);
         ring.lookAt(0, 0, 0);
         this.pointer.add(ring);
@@ -311,6 +478,7 @@ export class SectorScene {
       this.pointer.add(line, dot);
     }
     if (this.theme.trail) this.drawTrail(session, frame);
+    this.motion?.apply();
     this.viewport.requestRender();
   }
 
@@ -333,7 +501,10 @@ export class SectorScene {
   bindPointer() {
     const canvas = this.viewport.canvas;
     let down = null;
-    canvas.addEventListener('pointerdown', (event) => { down = {x: event.clientX, y: event.clientY}; });
+    canvas.addEventListener('pointerdown', (event) => {
+      down = {x: event.clientX, y: event.clientY};
+      if (this.sway) this.sway.manual = true;
+    });
     canvas.addEventListener('pointermove', (event) => {
       if (event.buttons) return;
       const hit = this.viewport.pick(event, this.tileMeshes)[0];

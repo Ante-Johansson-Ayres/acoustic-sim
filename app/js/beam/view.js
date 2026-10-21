@@ -9,6 +9,9 @@ import { MINUS, deg, num } from '../shared/format.js';
 import { buildGeometry } from '../geometry.js';
 import { heimdallToolPositions } from '../shared/heimdall-array.js';
 import { customArray, customArrayEditor } from '../shared/custom-array.js';
+import { look } from '../shared/look.js';
+import { ledBoard } from '../shared/led.js';
+import { boardText } from '../hardware/lookparts.js';
 import { cuts, figures, makeGain, patternGrid, width3 } from './pattern.js';
 
 const GEOMETRIES = [
@@ -57,6 +60,12 @@ export function createView(container) {
   const freq = slider({id: 'bp-freq', label: 'Frequency', min: 50, max: 20000, step: 50, value: state.freq,
     format: (v) => `${v} Hz`, onInput: (v) => { state.freq = v; update(); }});
 
+  // The hidden looks show where the beam is steered on two dot-matrix boards, as their mockups.
+  const steerBoards = look ? {az: ledBoard('lk-led--ink'), el: ledBoard('lk-led--ink')} : null;
+  const steered = steerBoards && h('div', {class: 'lk-boards'}, h('span', {class: 'label'}, 'Steered to'),
+    h('div', {class: 'lk-boards__pair'},
+      h('div', {class: 'lk-board'}, steerBoards.az.el, h('span', {class: 'label'}, 'Azimuth')),
+      h('div', {class: 'lk-board'}, steerBoards.el.el, h('span', {class: 'label'}, 'Elevation'))));
   const left = h('aside', {class: 'bp-settings', 'aria-label': 'Array settings'},
     h('section', {class: 'section', 'aria-labelledby': 'bp-array-h'},
       h('h2', {class: 'section__title', id: 'bp-array-h'}, 'Array'),
@@ -65,7 +74,7 @@ export function createView(container) {
     ),
     h('section', {class: 'section', 'aria-labelledby': 'bp-steer-h'},
       h('h2', {class: 'section__title', id: 'bp-steer-h'}, 'Steering and frequency'),
-      az.el, el.el, freq.el,
+      az.el, el.el, freq.el, steered,
     ),
   );
 
@@ -119,8 +128,11 @@ export function createView(container) {
     );
     const title = h('span', {class: 'figure-label figure-label--sm'});
     const width = h('span', {class: 'mono'});
-    return {path, ray, left, bottom, svg, title, width,
-      el: h('figure', {class: 'polar-figure'}, svg, h('figcaption', {}, title, width))};
+    // The hidden looks give the −3 dB width a board of its own, in the accent (Panel) as their mockups.
+    const board = look ? ledBoard('lk-led--hot') : null;
+    const boardLabel = look ? h('span', {class: 'label'}) : null;
+    return {path, ray, left, bottom, svg, title, width, board, boardLabel,
+      el: h('figure', {class: 'polar-figure'}, svg, h('figcaption', {}, title, look ? [board.el, boardLabel] : width))};
   });
   const figureList = h('dl', {class: 'figures'});
   const aliasNote = h('p', {class: 'note note--body'});
@@ -204,6 +216,10 @@ export function createView(container) {
     legend.hidden = !ok;
     empty.hidden = ok;
     const gain = makeGain(mics, state.freq, state.az, state.el);
+    if (steerBoards) {
+      steerBoards.az.set(boardText(state.az), `Steered to azimuth ${state.az} degrees`);
+      steerBoards.el.set(boardText(state.el), `Steered to elevation ${state.el} degrees`);
+    }
     if (ok) {
       scene?.render({grid: patternGrid(gain, 5), mics, steerAz: state.az, steerEl: state.el});
       const c = cuts(gain, state.az, state.el);
@@ -222,6 +238,10 @@ export function createView(container) {
         setText(fig.title, title);
         const w = width3(cut);
         setText(fig.width, w === null ? 'No −3 dB edge' : `−3 dB width ${w}°`);
+        if (fig.board) {
+          fig.board.set(boardText(w), w === null ? 'No −3 dB edge' : `−3 dB width ${w} degrees`);
+          setText(fig.boardLabel, w === null ? 'No −3 dB edge' : '−3 dB width');
+        }
         fig.svg.setAttribute('aria-label', `${title}. ${w === null ? 'No −3 dB edge' : `−3 dB width ${w} degrees`}.`);
       });
       const f = figures(mics, state.freq, gain);

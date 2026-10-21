@@ -14,7 +14,12 @@ import * as THREE from 'three';
 import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { levelToUnit, rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
+import { look, sceneColor } from '../shared/look.js';
 import { direction } from './geometry.js';
+import { buildRig } from './rig3d.js';
+import { HALO_OUTSET, floorMesh, haloMaterial, setHalo, setTile, tileMaterial } from './look3d.js';
+import { ditherStep, meterFill } from './lookparts.js';
+import { Motion, tileHandle } from './build3d.js';
 import { cellDirection, gridDirection, gridPosition, median, surfaceUnit } from './field.js';
 import { DEPTH, PointStyle, SurfaceStyle, pinAt } from './fieldstyles.js';
 
@@ -34,8 +39,9 @@ export const CAMERA_VIEWS = {
   side: {yaw: 78, pitch: 8, distance: 11.5},
 };
 const COLORS = {
-  background: '#1d2025', line: '#2c3036', strong: '#3a3f47', subtle: '#80868e', text: '#eceef1',
-  accent: '#7aa7ff', ok: '#4cc38a', warn: '#e2b454',
+  background: sceneColor('background', '#1d2025'), line: sceneColor('line', '#2c3036'), strong: sceneColor('strong', '#3a3f47'),
+  subtle: sceneColor('subtle', '#80868e'), text: sceneColor('text', '#eceef1'), accent: sceneColor('accent', '#7aa7ff'),
+  ok: '#4cc38a', warn: '#e2b454', marker: sceneColor('marker', '#ffffff'),
 };
 
 const toScene = ([right, up, forward], radius = 1) => new THREE.Vector3(-right * radius, up * radius, forward * radius);
@@ -46,14 +52,16 @@ function arrow(value, positive, negative) {
   return !Number.isFinite(value) || Math.abs(value) < 0.5 ? '' : ` ${value > 0 ? positive : negative}`;
 }
 
-function tileGeometry(bounds, steps = 6) {
+function tileGeometry(bounds, steps = 6, radius = RADIUS) {
   const positions = [];
+  const uvs = [];
   const index = [];
   const row = steps + 1;
   for (let i = 0; i <= steps; i++) {
     for (let j = 0; j <= steps; j++) {
-      const p = toScene(cellDirection(bounds, j / steps, i / steps), RADIUS);
+      const p = toScene(cellDirection(bounds, j / steps, i / steps), radius);
       positions.push(p.x, p.y, p.z);
+      uvs.push(j / steps, i / steps);
     }
   }
   for (let i = 0; i < steps; i++) {
@@ -64,8 +72,21 @@ function tileGeometry(bounds, steps = 6) {
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geometry.setIndex(index);
   return geometry;
+}
+
+/** A cell's bounds grown by `f` of its size on every side (the hidden looks' halos round a tile). */
+function grown(b, f) {
+  if (b.space === 'sine') {
+    const du = (b.u1 - b.u0) * f;
+    const dv = (b.v1 - b.v0) * f;
+    return {...b, u0: b.u0 - du, u1: b.u1 + du, v0: b.v0 - dv, v1: b.v1 + dv};
+  }
+  const da = (b.a1 - b.a0) * f;
+  const de = (b.e1 - b.e0) * f;
+  return {...b, a0: b.a0 - da, a1: b.a1 + da, e0: b.e0 - de, e1: b.e1 + de};
 }
 
 function outlinePoints(bounds, radius, steps = 10) {
@@ -123,7 +144,11 @@ export class FieldScene {
     this.markerPoint = null;
     this.arrayPoint = new THREE.Vector3(-0.32, -0.12, 0);
 
+    // Startup and idle motion in every look (build3d.js); reaches are metres in this scene (dome radius 3.5 m).
+    this.motion = new Motion({look: look || 'default', viewport: this.viewport, parts: () => this.motionParts(),
+      reach: {wave: 6.3, ring: 3.75, pulse: 1.9, jitter: 0.036}});
     this.viewport.onFrame = () => {
+      this.motion?.apply();
       this.placeLabels();
       this.easeField();
     };
@@ -134,6 +159,24 @@ export class FieldScene {
   start() { this.viewport.start(); }
   stop() { this.viewport.stop(); }
 
+  /** Play the 3D build: 'full' or 'quick'. */
+  play(kind) { this.motion?.play(kind); }
+
+  /** The microphone the build has reached (1–44), or null outside a build. */
+  buildChannel() { return this.motion?.channel() ?? null; }
+
+  motionParts() {
+    return {
+      rig: this.rig,
+      floor: this.floor,
+      tiles: this.tileMeshes.map((mesh) => tileHandle(mesh, this.halos?.[mesh.userData.index])),
+      columns: this.field?.columns ?? 1,
+      rows: this.field?.rows ?? 1,
+      marks: [this.marks],
+      labels: [this.markerLabel],
+    };
+  }
+
   setView(name) {
     this.viewName = CAMERA_VIEWS[name] ? name : 'behind';
     this.viewport.orbitTo(TARGET, {distance: DISTANCE, ...CAMERA_VIEWS[this.viewName]});
@@ -141,6 +184,12 @@ export class FieldScene {
   }
 
   buildRoom() {
+    if (look) {
+      // The hidden looks' floor: Panel's dots or Arasaka's red grid, fading out round the dome's base (look3d.js).
+      this.floor = floorMesh(look, {y: FLOOR_Y, centre: [0, 1.4], reach: 6.5, size: 14});
+      this.room.add(this.floor);
+      return;
+    }
     const points = [];
     for (let i = 0; i <= 16; i++) {
       const x = -3.2 + i * 0.4;
@@ -148,35 +197,24 @@ export class FieldScene {
       points.push(new THREE.Vector3(x, FLOOR_Y, -0.8), new THREE.Vector3(x, FLOOR_Y, 4.0),
         new THREE.Vector3(-3.2, FLOOR_Y, z), new THREE.Vector3(3.2, FLOOR_Y, z));
     }
-    this.room.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),
-      new THREE.LineBasicMaterial({color: COLORS.line})));
+    // Fades in during the build, so transparent; drawn first, as when it was opaque.
+    this.floor = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({color: COLORS.line, transparent: true}));
+    this.floor.renderOrder = -1;
+    this.room.add(this.floor);
   }
 
-  /** The array as a plate with its microphones, on a stand down to the floor. */
+  /** The array as its real boards on the CAD mount and desk (rig3d.js), microphones numbered in the layout's DSP order. */
   setArray(layout) {
     const key = layout?.positions ? JSON.stringify(layout.positions) : '';
     if (key === this.arrayKey) return;
     this.arrayKey = key;
     clearGroup(this.array);
+    this.rig = null;
     if (!layout?.positions?.length) return;
-    const n = layout.positions.length;
-    const mean = [0, 0];
-    for (const [x, y] of layout.positions) { mean[0] += x / n; mean[1] += y / n; }
-    const metres = layout.positions.map(([x, y]) => [(x - mean[0]) / 1000, (y - mean[1]) / 1000]);
-    const reach = Math.max(...metres.map(([x, y]) => Math.hypot(x, y))) + 0.03;
-    const plate = new THREE.Mesh(new THREE.CircleGeometry(reach, 64),
-      flat(COLORS.strong, {transparent: true, opacity: 0.6}));
-    const rim = new THREE.Mesh(new THREE.RingGeometry(reach - 0.007, reach + 0.003, 64), flat(COLORS.subtle));
-    const stand = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, -FLOOR_Y - reach, 12), flat(COLORS.strong));
-    stand.position.set(0, (FLOOR_Y - reach) / 2, 0.01);
-    const mics = new THREE.InstancedMesh(new THREE.SphereGeometry(0.012, 10, 8), flat(COLORS.text), n);
-    const matrix = new THREE.Matrix4();
-    metres.forEach(([x, y], i) => {
-      matrix.makeTranslation(-x, y, -0.006);
-      mics.setMatrixAt(i, matrix);
-    });
-    this.array.add(plate, rim, stand, mics);
-    this.arrayPoint = new THREE.Vector3(-reach - 0.05, -reach * 0.8, 0);
+    this.rig = buildRig({look: look || 'default', layout, floorY: FLOOR_Y});
+    this.array.add(this.rig.group);
+    this.arrayPoint = this.rig.labelPoint.clone();
     this.viewport.requestRender();
   }
 
@@ -185,16 +223,23 @@ export class FieldScene {
     this.key = field.key;
     clearGroup(this.tiles);
     this.tileMeshes = [];
+    this.halos = [];
     const gap = 0.012;
     for (const cell of field.cells) {
       const b = cell.bounds;
       const inset = b.space === 'sine'
         ? {...b, u0: b.u0 + gap / 2, u1: b.u1 - gap / 2, v0: b.v0 + gap / 2, v1: b.v1 - gap / 2}
         : {...b, a0: b.a0 + 0.6, a1: b.a1 - 0.6, e0: b.e0 + 0.6, e1: b.e1 - 0.6};
-      const mesh = new THREE.Mesh(tileGeometry(inset), flat(COLORS.line, {transparent: true, opacity: 0.95}));
-      mesh.userData = {index: cell.index};
+      const mesh = new THREE.Mesh(tileGeometry(inset), look ? tileMaterial(look) : flat(COLORS.line, {transparent: true, opacity: 0.95}));
+      mesh.userData = {index: cell.index, column: cell.column, row: cell.row, opacity: 0.95};
       this.tiles.add(mesh);
       this.tileMeshes.push(mesh);
+      if (look) {
+        const halo = new THREE.Mesh(tileGeometry(grown(inset, HALO_OUTSET), 6, RADIUS * 1.004), haloMaterial(look));
+        halo.visible = false;
+        this.tiles.add(halo);
+        this.halos[cell.index] = halo;
+      }
     }
     this.buildAxisLabels(field);
   }
@@ -272,9 +317,10 @@ export class FieldScene {
     if (this.markerPoint) place(this.markerLabel, this.markerPoint, 16, 0);
   }
 
-  /** state: {floor, session, style: 'tiles' | 'surface' | 'points'} */
-  render(field, {floor, session, style = 'tiles'}) {
+  /** state: {floor, session, style: 'tiles' | 'surface' | 'points', idle: nothing running (the hidden looks' idle motion)} */
+  render(field, {floor, session, style = 'tiles', idle = false}) {
     if (!field) return;
+    this.motion?.setIdle(idle);
     const changed = this.field?.key !== field.key || this.style !== style;
     this.field = field;
     this.style = this.styles[style] ? style : 'tiles';
@@ -283,12 +329,27 @@ export class FieldScene {
     const tiles = this.style === 'tiles';
     this.tiles.visible = tiles;
     for (const [name, entry] of Object.entries(this.styles)) entry.group.visible = name === this.style;
-    if (tiles) {
+    if (tiles && look) {
+      // The hidden looks: a dither step and a five-cell meter per tile, the target ringed (look3d.js), as the 2D map.
+      const highlight = field.marker?.cell ?? field.strongest;
+      const pixel = Math.max(1, Math.round(this.viewport.renderer.getPixelRatio()));
       for (const mesh of this.tileMeshes) {
         const cell = field.cells[mesh.userData.index];
         const measured = Number.isFinite(cell.level);
-        mesh.material.color.copy(measured ? srgb(rampColor(levelToUnit(cell.level, floor))) : new THREE.Color(COLORS.line));
-        mesh.material.opacity = measured ? (cell.fresh ? 0.96 : 0.38) : 0.35;
+        const state = {step: ditherStep(cell.level, floor), fill: meterFill(cell.level, floor), target: highlight === cell};
+        setTile(mesh.material, look, {...state, opacity: measured ? (cell.fresh ? 1 : 0.55) : 0.5});
+        mesh.material.uniforms.uPixel.value = pixel;
+        setHalo(this.halos[cell.index], look, state);
+      }
+    } else if (tiles) {
+      for (const mesh of this.tileMeshes) {
+        const cell = field.cells[mesh.userData.index];
+        const measured = Number.isFinite(cell.level);
+        // Kept on the tile too: the build's fade and the idle glow wave go on top of them (build3d.js tileHandle).
+        mesh.userData.color = measured ? srgb(rampColor(levelToUnit(cell.level, floor))) : new THREE.Color(COLORS.line);
+        mesh.userData.opacity = measured ? (cell.fresh ? 0.96 : 0.38) : 0.35;
+        mesh.material.color.copy(mesh.userData.color);
+        mesh.material.opacity = mesh.userData.opacity;
       }
     } else {
       this.styles[this.style].build(field);
@@ -322,8 +383,9 @@ export class FieldScene {
       this.marks.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(outlinePoints(hovered.bounds, RADIUS * 0.985)),
         new THREE.LineBasicMaterial({color: COLORS.text})));
     }
-    if (tiles && marker?.cell) outline(marker.cell, marker.kind === 'beam' ? COLORS.accent : '#ffffff');
-    else if (tiles && field.strongest) outline(field.strongest, '#ffffff', 0.007);
+    if (look) { /* the hidden looks ring the target in its tile's halo */ }
+    else if (tiles && marker?.cell) outline(marker.cell, marker.kind === 'beam' ? COLORS.accent : COLORS.marker);
+    else if (tiles && field.strongest) outline(field.strongest, COLORS.marker, 0.007);
 
     if (marker && Number.isFinite(marker.azimuth) && Number.isFinite(marker.elevation)) {
       let reach = RADIUS * 0.985;
@@ -342,9 +404,9 @@ export class FieldScene {
         mesh.position.copy(tip).multiplyScalar(0.5);
         mesh.quaternion.setFromUnitVectors(up, along);
       }
-      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 12), flat('#ffffff'));
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 12), flat(COLORS.marker));
       dot.position.copy(tip);
-      const ring = new THREE.Mesh(new THREE.RingGeometry(0.08, 0.1, 48), flat('#ffffff'));
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.08, 0.1, 48), flat(COLORS.marker));
       ring.position.copy(tip);
       ring.lookAt(0, 0, 0);
       this.marks.add(beam, cone, dot, ring);
@@ -367,6 +429,7 @@ export class FieldScene {
       dot.position.copy(point);
       this.marks.add(line, dot);
     }
+    this.motion?.apply();
     this.viewport.requestRender();
   }
 

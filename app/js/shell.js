@@ -17,6 +17,18 @@ import './shared/scale.js';
 
 import { session } from './hardware/session.js';
 import { $, h, setText } from './shared/dom.js';
+import { look } from './shared/look.js';
+
+/** A hidden look (?look=…): its fonts and stylesheet load before the app shows, and a small tag in the header names it. */
+function applyLook(name) {
+  const root = document.documentElement;
+  root.classList.add('look-loading', `look-${name}`);
+  $('#linkSummary').prepend(h('span', {class: 'look-tag', title: 'Hidden look, set by ?look= in the URL'},
+    `Look · ${name[0].toUpperCase()}${name.slice(1)}`));
+  import(`./looks/${name}.js`).finally(() => root.classList.remove('look-loading'));
+}
+
+if (look) applyLook(look);
 
 const ROUTES = {
   beam: () => import('./beam/view.js'),
@@ -43,6 +55,7 @@ export function navigate(route) {
 }
 
 async function show({route, preset}) {
+  const from = current;
   const container = $('#views');
   if (!views.has(route)) {
     const section = h('section', {class: `view view--${route}`, id: `view-${route}`, 'aria-label': route});
@@ -69,7 +82,7 @@ async function show({route, preset}) {
   }
   if (!['hardware', 'exhibit'].includes(route)) session.stopMonitor();
   if (LIVE_ROUTES.has(route) && !session.open) session.discover();
-  entry.view.show?.();
+  entry.view.show?.({from: from === route ? null : from});
 }
 
 // ── Global link summary in the header ────────────────────────────────────

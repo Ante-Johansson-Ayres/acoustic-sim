@@ -34,6 +34,9 @@ h1, h2, h3, p { margin: 0; }
 
 /* ── App shell ─────────────────────────────────────────────────────────── */
 
+/* A hidden look (?look=…) keeps the app hidden until its stylesheet has loaded, so the app's own look never flashes first. */
+.look-loading .app { visibility: hidden; }
+
 .app {
   /* scale.js sets width, height and zoom so the 1600 × 900 design fits the window. */
   width: 100vw;

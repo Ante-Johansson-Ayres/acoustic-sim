@@ -9,6 +9,9 @@ import { base64ToBlobUrl } from '../shared/api.js';
 import { h, s, segmented, setText } from '../shared/dom.js';
 import { rampColor, rampGradient, rgbCss } from '../shared/colormap.js';
 import { MINUS, deg, num } from '../shared/format.js';
+import { look } from '../shared/look.js';
+import { ledBoard } from '../shared/led.js';
+import { boardText } from '../hardware/lookparts.js';
 
 const METHOD_NAMES = {srp_phat: 'SRP-PHAT', steered_das: 'Steered DAS', beam_bank_das: 'Beam bank'};
 const AUDIO = [['raw', 'One microphone'], ['unsteered', 'Unsteered sum'], ['beam', 'Beamformed'], ['ml', 'ML input']];
@@ -71,12 +74,16 @@ export class ResultsColumn {
     this.detailsSection = h('details', {class: 'disclosure section', hidden: true},
       h('summary', {}, 'Run details'), this.details);
 
+    // The hidden looks show the estimate on dot-matrix boards, as their mockups; 21 columns fit −180°.
+    this.boards = look ? {az: ledBoard('lk-led--ink', 21), el: ledBoard('lk-led--ink', 21)} : null;
+    this.boards?.az.set('--', 'Azimuth not estimated yet');
+    this.boards?.el.set('--', 'Elevation not estimated yet');
     this.el = h('aside', {class: 'sim-results', 'aria-label': 'Result'},
       h('section', {class: 'section', 'aria-labelledby': 'sim-res-h'},
         h('div', {class: 'section__row'}, h('h2', {class: 'section__title', id: 'sim-res-h'}, 'Estimated direction'), this.chip),
         h('div', {class: 'answer'},
-          h('div', {class: 'answer__figure'}, this.az, this.azErr),
-          h('div', {class: 'answer__figure'}, this.elValue, this.elErr),
+          h('div', {class: 'answer__figure'}, this.boards?.az.el, this.az, this.azErr),
+          h('div', {class: 'answer__figure'}, this.boards?.el.el, this.elValue, this.elErr),
         ),
         this.truth,
         this.notes,
@@ -119,6 +126,8 @@ export class ResultsColumn {
     this.chip.className = 'chip chip--plain';
     setText(this.az, deg(data.est_az_deg));
     setText(this.elValue, deg(data.est_el_deg));
+    this.boards?.az.set(boardText(data.est_az_deg), `Estimated azimuth ${deg(data.est_az_deg)}`);
+    this.boards?.el.set(boardText(data.est_el_deg), `Estimated elevation ${deg(data.est_el_deg)}`);
     const azErr = angleError(data.est_az_deg, data.true_az_deg);
     const elErr = Math.abs(data.est_el_deg - data.true_el_deg);
     setText(this.azErr, `Azimuth, off by ${num(azErr, 1)}°`);
