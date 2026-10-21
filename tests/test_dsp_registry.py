@@ -202,7 +202,7 @@ def test_fir_stages_after_the_beam_sum_are_writable(tmp_path):
     assert stages["fir2"]["address"] == 311 and stages["fir2"]["writable"]
 
 
-@pytest.mark.parametrize("folder", ["SigmaStudioBank", "SigmaStudioCharacterisation",
+@pytest.mark.parametrize("folder", ["SigmaStudioBank7x7", "SigmaStudioBank", "SigmaStudioCharacterisation",
                                     "SigmaStudioExperimental", "SigmaStudioExport"])
 def test_study_writes_exactly_what_the_firmware_accepts(monkeypatch, folder):
     monkeypatch.setenv("HEIMDALL_DSP_EXPORT", folder)
