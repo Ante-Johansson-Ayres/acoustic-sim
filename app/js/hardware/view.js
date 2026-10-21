@@ -50,7 +50,8 @@ export function createView(container, {session}) {
   const prefs = {view: '3d', camera: 'behind', style: 'tiles', floor: -40, values: 'strongest', log: 'open', ...loadPrefs()};
   if (!['3d', 'map'].includes(prefs.view)) prefs.view = '3d';
   if (!STYLES.some(([key]) => key === prefs.style)) prefs.style = 'tiles';
-  const state = {visible: false, kind: null, field: null, hover: null, tab: null};
+  // build: the hidden looks' 3D build waiting to play once the 3D view is on screen ('full' the first time, 'quick' after).
+  const state = {visible: false, kind: null, field: null, hover: null, tab: null, build: null, built: false};
 
   const acoustic = new AcousticScene();
   const connection = new ConnectionPanel(session, acoustic);
@@ -104,7 +105,10 @@ export function createView(container, {session}) {
 
   // ── Field: 3D or map, with its tools in the header ────────────────────
   const viewSeg = segmented([['3d', '3D'], ['map', 'Map']], {
-    label: 'Field view', onPick: (key) => { prefs.view = key; savePrefs(prefs); layout(); render(true); },
+    label: 'Field view', onPick: (key) => {
+      if (key === '3d' && prefs.view !== '3d') want3d('quick');
+      prefs.view = key; savePrefs(prefs); layout(); render(true);
+    },
   });
   const cameraSeg = segmented([['behind', 'Behind'], ['above', 'Above'], ['side', 'Side']], {
     label: 'Camera', onPick: (key) => { prefs.camera = key; savePrefs(prefs); cameraSeg.set(key); scene3d?.setView(key); },
@@ -202,6 +206,29 @@ export function createView(container, {session}) {
     });
     if (tab) drawerBody.replaceChildren(pages[tab].el);
     render(true);
+  }
+
+  /** Ask for a 3D build in a hidden look: the first one of the visit is always full. */
+  function want3d(kind) {
+    if (!look) return;
+    state.build = state.built ? kind : 'full';
+  }
+
+  /** Play the waiting build once the 3D view is on screen with its scene loaded. */
+  function playBuild() {
+    if (!state.build || !scene3d || prefs.view !== '3d' || consoleEl.hidden) return;
+    scene3d.play(state.build);
+    state.build = null;
+    state.built = true;
+    requestAnimationFrame(countMics);
+  }
+
+  /** While a build counts the microphones in, the azimuth board shows the count (only the Source panel redraws). */
+  function countMics() {
+    if (!state.visible || !scene3d?.motion?.build) { render(); return; }
+    const channel = scene3d.buildChannel();
+    if (channel && state.answer) source.render({...state.answer, counting: channel});
+    requestAnimationFrame(countMics);
   }
 
   function ensureScene() {
@@ -364,9 +391,13 @@ export function createView(container, {session}) {
       map.render(field, {floor: prefs.floor, values: prefs.values, cellPx: cellSize(field)});
     } else {
       barTicks.replaceChildren(...[0, 0.25, 0.5, 0.75, 1].map((f) => h('li', {}, f === 0 ? '0 dBFS' : num(prefs.floor * f, 0))));
-      scene3d?.render(field, {floor: prefs.floor, session, style: prefs.style});
+      scene3d?.render(field, {floor: prefs.floor, session, style: prefs.style, idle: mode === 'idle'});
+      playBuild();
     }
-    source.render(answer);
+    // During a hidden look's build the azimuth board counts the microphones in, as the mockups.
+    state.answer = answer;
+    const channel = prefs.view === '3d' ? scene3d?.buildChannel?.() : null;
+    source.render(channel ? {...answer, counting: channel} : answer);
     audio.render(frame);
     history.render(session, {span: fieldSpan(field), force});
     if (state.tab === 'diag') pages.diag.render(mode);
@@ -384,8 +415,9 @@ export function createView(container, {session}) {
   layout();
   fold();
   return {
-    show() {
+    show({from} = {}) {
       state.visible = true;
+      if (prefs.view === '3d') want3d(from === 'exhibit' ? 'quick' : state.built ? null : 'full');
       scene3d?.start();
       ticker = setInterval(() => render(), 500);
       const refreshDsp = () => { if (session.open) dsp.load().then(() => dsp.refresh()).catch(() => {}); };

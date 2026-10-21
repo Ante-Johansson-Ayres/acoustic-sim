@@ -55,6 +55,7 @@ export function navigate(route) {
 }
 
 async function show({route, preset}) {
+  const from = current;
   const container = $('#views');
   if (!views.has(route)) {
     const section = h('section', {class: `view view--${route}`, id: `view-${route}`, 'aria-label': route});
@@ -81,7 +82,7 @@ async function show({route, preset}) {
   }
   if (!['hardware', 'exhibit'].includes(route)) session.stopMonitor();
   if (LIVE_ROUTES.has(route) && !session.open) session.discover();
-  entry.view.show?.();
+  entry.view.show?.({from: from === route ? null : from});
 }
 
 // ── Global link summary in the header ────────────────────────────────────

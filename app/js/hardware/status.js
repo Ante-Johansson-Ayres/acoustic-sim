@@ -103,11 +103,14 @@ export class SourcePanel {
     setText(this.elev.value, angle(answer.elevation));
     setText(this.elev.dir, arrow(answer.elevation, '▲', '▼'));
     if (look) {
-      const azWord = sideWord(answer.azimuth, 'right', 'left', 'ahead');
+      // During the 3D build the azimuth board counts the microphones in (answer.counting), as the mockups.
+      const counting = answer.counting;
+      const azWord = counting ? 'mic' : sideWord(answer.azimuth, 'right', 'left', 'ahead');
       const elWord = sideWord(answer.elevation, 'up', 'down', 'level');
       setText(this.az.word, azWord);
       setText(this.elev.word, elWord);
-      this.az.board.set(ledText(answer.azimuth), `Azimuth ${angle(answer.azimuth)} ${azWord}`);
+      this.az.board.set(counting ? String(counting).padStart(2, '0') : ledText(answer.azimuth),
+        counting ? `Microphone ${counting}` : `Azimuth ${angle(answer.azimuth)} ${azWord}`);
       this.elev.board.set(ledText(answer.elevation), `Elevation ${angle(answer.elevation)} ${elWord}`);
     }
     setText(this.level.value, num(answer.level, 1));
