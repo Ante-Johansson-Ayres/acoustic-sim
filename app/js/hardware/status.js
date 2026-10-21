@@ -7,7 +7,8 @@
 import { h, options, segmented, setText } from '../shared/dom.js';
 import { clockTime, deg, hz, num, signed } from '../shared/format.js';
 import { look } from '../shared/look.js';
-import { LED_COLUMNS, LED_ROWS, ledCells, ledText, sideWord } from './lookparts.js';
+import { ledBoard } from '../shared/led.js';
+import { ledText, sideWord } from './lookparts.js';
 
 export function operatingMode(session) {
   const frame = session.frame;
@@ -51,22 +52,6 @@ export function sourceAnswer(session, field, mode) {
   const tag = {target: 'LOCKED', beam: 'HOLDING'}[answer.kind] || 'STRONGEST';
   return {tag, tone: answer.kind === 'strongest' ? '' : 'accent', azimuth: answer.azimuth, elevation: answer.elevation,
     level: answer.level, margin: above(answer.level), lockedMs: answer.kind === 'target' ? session.lockedForMs : null};
-}
-
-/** A hidden look's dot-matrix angle board (lookparts.js), redrawn only when its text changes. */
-function ledBoard() {
-  const cells = Array.from({length: LED_COLUMNS * LED_ROWS}, () => h('i'));
-  const el = h('span', {class: 'lk-led', role: 'img'}, cells);
-  let shown = null;
-  return {
-    el,
-    set(text, label) {
-      el.setAttribute('aria-label', label);
-      if (text === shown) return;
-      shown = text;
-      ledCells(text).forEach((on, i) => cells[i].classList.toggle('on', on));
-    },
-  };
 }
 
 export class SourcePanel {

@@ -26,24 +26,38 @@ export const LED_ROWS = 9;
 
 const widthOf = (glyphs) => glyphs.reduce((sum, ch) => sum + GLYPH[ch][0].length, 0) + Math.max(0, glyphs.length - 1);
 
-/** Lit cells, row by row, of a 17 × 9 board showing `text` centred: digits, `d` for degrees, `-`. */
-export function ledCells(text) {
+/** Lit cells, row by row, of a `columns` × 9 board (17 by default) showing `text` centred: digits, `d` for degrees, `-`. */
+export function ledCells(text, columns = LED_COLUMNS) {
   let glyphs = [...String(text)].filter((ch) => GLYPH[ch]);
-  if (widthOf(glyphs) > LED_COLUMNS) glyphs = glyphs.filter((ch) => ch !== 'd');
-  const cells = new Array(LED_COLUMNS * LED_ROWS).fill(false);
-  let x = Math.floor((LED_COLUMNS - widthOf(glyphs)) / 2);
+  if (widthOf(glyphs) > columns) glyphs = glyphs.filter((ch) => ch !== 'd');
+  const cells = new Array(columns * LED_ROWS).fill(false);
+  let x = Math.floor((columns - widthOf(glyphs)) / 2);
   for (const ch of glyphs) {
     GLYPH[ch].forEach((line, row) => [...line].forEach((v, k) => {
-      if (v === '#' && x + k >= 0 && x + k < LED_COLUMNS) cells[(row + 1) * LED_COLUMNS + x + k] = true;
+      if (v === '#' && x + k >= 0 && x + k < columns) cells[(row + 1) * columns + x + k] = true;
     }));
     x += GLYPH[ch][0].length + 1;
   }
   return cells;
 }
 
+/** Columns a board needs to show `text` whole (at least 17). */
+export function ledColumns(text) {
+  return Math.max(LED_COLUMNS, widthOf([...String(text)].filter((ch) => GLYPH[ch] && ch !== 'd')));
+}
+
 /** What a board shows for an angle: its size in whole degrees, or dashes without one. */
 export function ledText(angle) {
   return Number.isFinite(angle) ? `${Math.round(Math.abs(angle))}d` : '--';
+}
+
+/** A signed angle for a board, as the Beam pattern and Simulator mockups: a minus leads; the degree sign only where it fits. */
+export function boardText(angle) {
+  if (!Number.isFinite(angle)) return '--';
+  const v = Math.round(angle);
+  const digits = String(Math.abs(v));
+  if (v < 0) return `-${digits}${digits.length < 2 ? 'd' : ''}`;
+  return `${digits}${digits.length < 3 ? 'd' : ''}`;
 }
 
 /** Which way an angle points, in words. */

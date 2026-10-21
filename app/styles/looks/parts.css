@@ -18,7 +18,7 @@
 .ro:has(.lk-led) { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 8px; }
 .ro:has(.lk-led) .ro__num { display: none; }
 .ro__word { color: var(--text); white-space: nowrap; }
-.lk-led { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(17, minmax(0, 1fr)); gap: 2px; }
+.lk-led { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(var(--lk-columns, 17), minmax(0, 1fr)); gap: 2px; }
 .lk-led i { display: block; aspect-ratio: 1; background: var(--lk-off); }
 .lk-led i.on { background: var(--lk-on); box-shadow: var(--lk-glow, none); }
 
@@ -60,3 +60,12 @@
 }
 @keyframes lk-blink { 50% { opacity: 0.35; } }
 @keyframes lk-chase { 0% { opacity: 1; } 35%, 100% { opacity: 0.25; } }
+
+/* Beam pattern and Simulator: the steering, each cut's −3 dB width and the estimate on boards, as the mockups. */
+.lk-boards { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.lk-boards__pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.lk-board { display: flex; flex-direction: column; gap: 4px; }
+.polar-figure figcaption:has(.lk-led) { display: flex; flex-direction: column; gap: 6px; }
+.answer:has(.lk-led) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.answer__figure:has(.lk-led) { display: flex; flex-direction: column; gap: 6px; }
+.answer__figure:has(.lk-led) .answer__value { display: none; }

@@ -225,3 +225,4 @@
 .look-panel .lk-led i { border-radius: 1px; }
 .look-panel .lk-lamps i { border-radius: 2px; }
 .look-panel .lk-standby { color: var(--ink-orange); font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; }
+.look-panel .lk-led--ink i.on { background: #111111; }

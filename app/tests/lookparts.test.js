@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { LED_COLUMNS, LED_ROWS, ditherStep, ledCells, ledText, meterFill, modeWord, scaleFill, sideWord } from '../js/hardware/lookparts.js';
+import { LED_COLUMNS, LED_ROWS, boardText, ditherStep, ledCells, ledColumns, ledText, meterFill, modeWord, scaleFill, sideWord } from '../js/hardware/lookparts.js';
 
 const rows = (cells) => Array.from({length: LED_ROWS}, (_, r) =>
   cells.slice(r * LED_COLUMNS, (r + 1) * LED_COLUMNS).map((on) => (on ? '#' : '.')).join(''));
@@ -22,6 +22,18 @@ test('the board shows dashes without an angle, and drops the degree sign when th
   const wide = rows(ledCells('100d'));
   assert.equal(wide[1], '..#....###...###.');
   assert.equal(ledCells('x').filter(Boolean).length, 0);
+});
+
+test('signed angles keep their minus, and the degree sign only where it fits', () => {
+  assert.equal(boardText(60), '60d');
+  assert.equal(boardText(355), '355');
+  assert.equal(boardText(-5), '-5d');
+  assert.equal(boardText(-45), '-45');
+  assert.equal(boardText(0.4), '0d');
+  assert.equal(boardText(NaN), '--');
+  assert.equal(ledColumns('-45'), 17);
+  assert.equal(ledColumns('-135'), 21);
+  assert.equal(ledCells('-135', 21).slice(21, 42).filter(Boolean).length, 10);
 });
 
 test('directions read in words, level within half a degree', () => {
