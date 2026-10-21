@@ -289,15 +289,37 @@ def place(nominal_az, nominal_el, distance_m):
     return distance_m
 
 
+def parse_numbers(text, count):
+    """Numbers as typed at a prompt; a decimal comma works ("72,5", "152,5 200 10")."""
+    text = text.strip()
+    parts = [text] if count == 1 else text.split() if " " in text else text.replace(";", ",").split(",")
+    values = [float(part.strip(",;").replace(",", ".")) for part in parts if part.strip(",;")]
+    if len(values) != count:
+        raise ValueError(f"expected {count} numbers, got {len(values)}")
+    return values
+
+
+def ask_numbers(prompt, count=1, optional=False):
+    """Ask until `count` numbers are typed; None for an empty answer when optional."""
+    while True:
+        text = input(prompt).strip()
+        if optional and not text:
+            return None
+        try:
+            return parse_numbers(text, count)
+        except ValueError:
+            print(f"  type {count} number{'s' if count > 1 else ''}" + (" or Enter" if optional else ""), flush=True)
+
+
 def ask_position(nominal_az, nominal_el, distance_m):
     """Tell the operator where the speaker goes; return the measured (azimuth, elevation, distance)."""
     a, e = np.radians(nominal_az), np.radians(nominal_el)
     x, z, h = distance_m * np.cos(e) * np.sin(a), distance_m * np.cos(e) * np.cos(a), distance_m * np.sin(e)
     print(f"\nSpeaker to az {nominal_az:g}, el {nominal_el:g}: driver {100 * x:.1f} cm right, {100 * z:.1f} cm "
           f"forward, {100 * h:.1f} cm up from the array centre, facing the array.", flush=True)
-    text = input("Measured right, forward, up in cm (Enter = as above): ").strip()
-    if text:
-        x, z, h = (float(v) / 100.0 for v in text.replace(",", " ").split())
+    measured = ask_numbers("Measured right, forward, up in cm (Enter = as above): ", 3, optional=True)
+    if measured:
+        x, z, h = (v / 100.0 for v in measured)
     return position_angles(x, z, h)
 
 
@@ -678,8 +700,9 @@ def r1(session, args, out, array):
             continue
         for name, centre in OCTAVES.items():
             found[name].append(decay_time(pcm[:, 1], centre))
-    text = input("\nRoom volume in m^3 for the critical distance (Enter to skip): ").strip()
-    volume = float(text) if text else None
+    answer = ask_numbers("\nRoom volume in m^3, length x width x height (for example 5 x 4 x 2.5 = 50; Enter to skip): ",
+                         optional=True)
+    volume = answer[0] if answer else None
     result = {}
     for name, values in found.items():
         times = [v["rt60_s"] for v in values if v["rt60_s"]]
@@ -695,15 +718,16 @@ def r1(session, args, out, array):
 
 
 def s1(session, args, out, array):
-    """Sensitivity of microphone channels and the beam at 1 kHz from an SPL meter, then their silent levels
-    in dB SPL. The scale is at the MCU (through the DSP and the analog link), not at the PDM output."""
+    """Sensitivity of microphone channels and the beam from an SPL meter with 1/3-octave noise at 1 kHz (with a
+    tone, room modes make the meter and each microphone read different levels), then their silent levels in dB SPL
+    and the room background. The scale is at the MCU (through the DSP and the analog link), not at the PDM output."""
     microphones = [int(m) for m in args.microphones.split(",")]
     sector = session.speaker_sector(0, 0)
     seconds = args.seconds or 3.0
-    input("\nS1: speaker on the array axis; SPL meter beside the array centre, same distance from the speaker, "
-          "Z or C weighting, slow. Enter to start the 1 kHz tone.")
-    session.sound("T1k")
-    spl = float(input("SPL meter reading with the tone (dB SPL): "))
+    input("\nS1: speaker on the array axis; SPL meter beside the array, its microphone level with the array face and "
+          "pointing at the speaker, A weighting, slow. Enter to start the noise.")
+    session.sound("B1k")
+    spl = ask_numbers("SPL meter reading with the noise, the middle of what it shows over 10 s (dB): ")[0]
     on, off = {}, {}
     with session.settings(**WINDOWS, channel=1):
         for m in microphones:
@@ -718,16 +742,21 @@ def s1(session, args, out, array):
             off[m] = session.capture("s1", f"microphone {m}, silent", sector, seconds, value=m)["mean_db"]
     with session.settings(**MCU_BEAM):
         off["beam"] = session.capture("s1", "beam, silent", sector, seconds)["mean_db"]
+    answer = ask_numbers("Meter reading now, in silence: the room background (dB(A), Enter to skip): ", optional=True)
+    background = answer[0] if answer else None
     result = {}
     for key in [*microphones, "beam"]:
         sensitivity = signal_db(on[key], off[key]) - (spl - 94.0)
         result[str(key)] = {"sensitivity_dbfs_at_94": sensitivity, "silent_dbfs": off[key],
                             "silent_db_spl": off[key] - sensitivity + 94.0}
         name = "beam" if key == "beam" else f"microphone {key}"
-        session.report.info(f"S1 {name}", f"{sensitivity:.1f} dBFS at 94 dB SPL, 1 kHz; silent level "
+        session.report.info(f"S1 {name}", f"{sensitivity:.1f} dBFS at 94 dB SPL, 1 kHz band; silent level "
                                           f"{off[key] - sensitivity + 94.0:.1f} dB SPL, so SNR re 94 dB SPL "
                                           f"{sensitivity - off[key]:.1f} dB (0.5-3.5 kHz, unweighted, includes the room)")
-    session.values["s1"] = {"meter_db_spl": spl, "channels": result}
+    if background is not None:
+        session.report.info("S1 room background", f"{background:.1f} dB(A); the noise read {spl - background:.1f} dB above "
+                            "it" + ("" if spl - background >= 10 else ", under 10 dB: turn the speaker up and repeat"))
+    session.values["s1"] = {"meter_db_spl": spl, "signal": "B1k", "background_dba": background, "channels": result}
 
 
 def figure_cuts(plots, out):

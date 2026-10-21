@@ -167,3 +167,13 @@ def test_tone_stats_and_map_hits():
     assert characterise.tone_stats([]) == {"reports": 0}
     targets = [(5, 1.0, 0.0, 12, 13), (6, 30.0, 0.0, 14, 12), (6, 2.0, 1.0, 12, 13)]
     assert characterise.map_hits(targets, (0.0, 0.0)) == {5, 6}
+
+
+def test_parse_numbers_accepts_decimal_commas():
+    assert characterise.parse_numbers("72,5", 1) == [72.5]
+    assert characterise.parse_numbers(" 50 ", 1) == [50.0]
+    for text in ("152.5 200 -10", "152,5 200 -10", "152.5, 200, -10", "152.5,200,-10", "152.5;200;-10"):
+        assert characterise.parse_numbers(text, 3) == [152.5, 200.0, -10.0], text
+    for text, count in (("152,5,200,10", 3), ("abc", 1), ("5 x 4", 1), ("", 1)):
+        with pytest.raises(ValueError):
+            characterise.parse_numbers(text, count)

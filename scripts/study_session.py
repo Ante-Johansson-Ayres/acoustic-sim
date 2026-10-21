@@ -447,7 +447,7 @@ def steering(session, args):
             for sector in range(size * size):
                 row, column = divmod(sector, size)
                 capture = session.capture(
-                    "steering", f"{azimuths[column]:.1f}, {elevations[row]:.1f}", sector, 1.0,
+                    "steering", f"{azimuths[column]:.1f}, {elevations[row]:.1f}", sector, args.steer_seconds,
                     azimuth_deg=azimuths[column], elevation_deg=elevations[row])
                 grid[row, column] = capture["mean_db"]
                 noise[row, column] = capture["std_db"] / np.sqrt(capture["n"])
@@ -549,6 +549,9 @@ def main():
     parser.add_argument("--distance", type=float, help="speaker distance in metres (recorded in the summary)")
     parser.add_argument("--microphone", type=int, default=4, help="microphone compared with the beam")
     parser.add_argument("--skip-survey", action="store_true", help="skip the 44-microphone survey")
+    parser.add_argument("--steer-seconds", type=float, default=2.0,
+                        help="capture per steering point; on a free-field theory grid at 2 kHz, 1 s gives a peak "
+                             "sigma of 0.8-1.0 deg and 2 s gives 0.55-0.75 (gate: 1 deg)")
     parser.add_argument("--out", help="folder for the signals, captures.csv and summary.json (default: temp)")
     args = parser.parse_args()
     out = args.out or os.path.join(tempfile.gettempdir(), time.strftime("heimdall_study_%Y%m%d_%H%M%S"))
