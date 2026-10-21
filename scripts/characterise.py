@@ -10,6 +10,11 @@
     python scripts/characterise.py s1     system sensitivity and equivalent noise with an SPL meter
     python scripts/characterise.py a9     path gain, directivity index (diffuse field), signal and noise gain
     python scripts/characterise.py a10    spatial aliasing: grating lobes at 5 and 8 kHz (beam FIR swapped for a high-pass)
+    python scripts/characterise.py p2     audio-path latency after a steer, and the guard_us to use
+    python scripts/characterise.py s3     linearity, and whether the DSP detector word follows amplitude or power
+    python scripts/characterise.py l5     detection margin: Live against continuous scanning, sound A in 6 dB steps
+    python scripts/characterise.py l6     two sources: drone clip on the speaker, speech or music on a phone
+    python scripts/characterise.py t1     tonal detector on silence, a 200 Hz series, the drone clip, crowd (--real-drone)
 
 The speaker tests say where to put the speaker. a3 and l1 then find it with the steered beam (--truth array,
 the default: rough placement is enough, no tape); with --truth measured they ask for the measured position.
@@ -266,16 +271,21 @@ OCTAVES = {"500 Hz": 500.0, "1 kHz": 1000.0, "2 kHz": 2000.0, "4 kHz": 4000.0}
 L1_POSITIONS = "-30,0;-22.5,0;-15,0;-7.5,0;0,0;7.5,0;15,0;22.5,0;30,0;0,-15;0,-7.5;0,7.5;0,15"
 
 
-def place(nominal_az, nominal_el, distance_m):
-    """Rough placement; the array then measures where the speaker is. Returns the nominal distance."""
+def describe(nominal_az, nominal_el, distance_m):
+    """Where a source at (az, el, distance) goes, in words for the operator."""
     a, e = np.radians(nominal_az), np.radians(nominal_el)
     right, up = distance_m * np.cos(e) * np.sin(a), distance_m * np.sin(e)
     side = (f"{abs(100 * right):.0f} cm {'right' if right >= 0 else 'left'} of the centre line (seen from behind "
             "the array)" if abs(right) >= 0.05 else "straight ahead")
     height = (f", {abs(100 * up):.0f} cm {'above' if up >= 0 else 'below'} the array centre" if abs(up) >= 0.05
               else ", at the height of the array centre")
-    input(f"\nSpeaker roughly {side}{height}, about {distance_m:g} m away, facing the array. Rest it on something "
-          "rather than holding it; close is fine, the array measures where it is. Enter when ready.")
+    return f"{side}{height}, about {distance_m:g} m away, facing the array"
+
+
+def place(nominal_az, nominal_el, distance_m):
+    """Rough placement; the array then measures where the speaker is. Returns the nominal distance."""
+    input(f"\nSpeaker roughly {describe(nominal_az, nominal_el, distance_m)}. Rest it on something rather than "
+          "holding it; close is fine, the array measures where it is. Enter when ready.")
     return distance_m
 
 
@@ -1030,8 +1040,598 @@ def figure_a10(plots, out):
     fig.savefig(os.path.join(out, "a10_aliasing.png"), dpi=150)
 
 
-TESTS = {"n1": n1, "n2": n2, "a3": a3, "a4": a4, "a8": a8, "a9": a9, "a10": a10, "l1": l1, "r1": r1, "s1": s1}
-SOUND_TESTS = {"a3", "a4", "a8", "a9", "a10", "l1", "r1", "s1"}
+# Latency, detector scale, detection margin, two sources, tones -----------------------------------
+
+AUDIO = Path(__file__).resolve().parent.parent / "audio"
+P2_GUARDS_US = (0, 250, 500, 750, 1000, 1250, 1500, 1750, 2000, 2500, 3000, 4000, 5000)
+P2_WINDOW_US = 2000
+LEVEL_STEPS_DB = (0, 6, 12, 18, 24, 30, 36, 42, 48)
+ACQUIRE_DB = float(20 * np.log10(1.5))  # the firmware's 1.5x acquisition ratio, on raw amplitude words
+TOLERANCE_DEG = 10.0
+
+
+def level_signal(step_db):
+    return "A" if step_db == 0 else f"A-{step_db}"
+
+
+def angle_off(az, el, reference):
+    return float(np.hypot(az - reference[0], el - reference[1]))
+
+
+def arrival_fraction(steered_db, on_db, off_db):
+    """Share of a window read right after a steer that already holds the new direction: 0 all old, 1 all new."""
+    on, off = power(on_db), power(off_db)
+    return (power(steered_db) - off) / (on - off)
+
+
+def arrival_fit(guards_us, fractions):
+    """Least-squares fit of f = clip((guard - start) / ramp, 0, 1): (start_us, ramp_us). From start + ramp on, a
+    window read after a steer holds only the new direction."""
+    g, f = np.asarray(guards_us, float), np.asarray(fractions, float)
+    keep = np.isfinite(f)
+    g, f = g[keep], f[keep]
+    if g.size < 3:
+        return float("nan"), float("nan")
+    starts = np.arange(-5000.0, 10000.0 + 1.0, 25.0)
+    best, best_error = (float("nan"), float("nan")), np.inf
+    for ramp in np.arange(250.0, 8000.0 + 1.0, 25.0):
+        error = np.sum((np.clip((g[None, :] - starts[:, None]) / ramp, 0.0, 1.0) - f[None, :]) ** 2, axis=1)
+        i = int(np.argmin(error))
+        if error[i] < best_error:
+            best_error, best = float(error[i]), (float(starts[i]), float(ramp))
+    return best
+
+
+def threshold_db(levels_db, rates, target=0.5):
+    """Quietest level whose detection rate still reaches `target`, interpolated in dB between steps. Returns
+    (level, censored); censored means it was still detected at the quietest level played; None if never."""
+    order = np.argsort(np.asarray(levels_db, float))[::-1]
+    x, r = np.asarray(levels_db, float)[order], np.asarray(rates, float)[order]
+    if not np.isfinite(r[0]) or r[0] < target:
+        return None, False
+    for i in range(1, len(x)):
+        if r[i] < target:
+            return float(x[i - 1] + (r[i - 1] - target) / (r[i - 1] - r[i]) * (x[i] - x[i - 1])), False
+    return float(x[-1]), True
+
+
+def scan_detects(levels_db, reference, columns, ratio_db=ACQUIRE_DB):
+    """One scan pass finds the source: its strongest sector is within one cell of `reference` and at least the
+    tracker's acquisition ratio above the pass median."""
+    flat = np.asarray(levels_db, float).ravel()
+    if not np.isfinite(flat).any():
+        return False
+    best = int(np.nanargmax(flat))
+    (r, c), (r0, c0) = divmod(best, columns), divmod(int(reference), columns)
+    return bool(abs(r - r0) <= 1 and abs(c - c0) <= 1 and flat[best] - np.nanmedian(flat) >= ratio_db)
+
+
+def scan_alarm(levels_db, ratio_db=ACQUIRE_DB):
+    """Any sector of the pass at least the acquisition ratio above the median (a target, wherever it is)."""
+    flat = np.asarray(levels_db, float).ravel()
+    return bool(np.isfinite(flat).any() and np.nanmax(flat) - np.nanmedian(flat) >= ratio_db)
+
+
+def level_slope(played_db, measured_db, errors_db):
+    """Weighted straight line of measured against played level: (slope, sigma, offset, residuals)."""
+    x, y = np.asarray(played_db, float), np.asarray(measured_db, float)
+    s = np.maximum(np.asarray(errors_db, float), 0.05)
+    (slope, offset), cov = np.polyfit(x, y, 1, w=1 / s, cov="unscaled")
+    return float(slope), float(np.sqrt(cov[0, 0])), float(offset), (y - (offset + slope * x)).tolist()
+
+
+def detector_models(played_db, measured_db, errors_db, floor_db):
+    """Fit level readings with a word that follows amplitude (signal and floor add in word^2) or power (they add
+    in the word itself). played_db is re the loudest step, measured_db and floor_db in dBFS (20 log10 word).
+    Returns {model: {"scale_db", "chi2"}}, the scale being the loudest step's signal word without the floor."""
+    x, y = np.asarray(played_db, float), np.asarray(measured_db, float)
+    s = np.maximum(np.asarray(errors_db, float), 0.05)
+    floor = 10 ** (floor_db / 20)
+    scales = np.arange(-120.0, 20.0, 0.01)
+    a = 10 ** (scales / 20)[:, None]
+    words = {"amplitude": np.sqrt((a * 10 ** (x / 20)) ** 2 + floor ** 2), "power": a * 10 ** (x / 10) + floor}
+    result = {}
+    for model, word in words.items():
+        chi2 = np.sum(((y - 20 * np.log10(word)) / s) ** 2, axis=1)
+        i = int(np.argmin(chi2))
+        result[model] = {"scale_db": float(scales[i]), "chi2": float(chi2[i])}
+    return result
+
+
+def tone_stats(reports):
+    """Summary of TONE reports [(f0, score, harmonics, level)]."""
+    if not reports:
+        return {"reports": 0}
+    f0, score, harmonics, level = (np.array(values, float) for values in zip(*reports))
+    return {"reports": len(reports), "f0_median_hz": float(np.median(f0)),
+            "f0_iqr_hz": float(np.subtract(*np.percentile(f0, [75, 25]))), "score_median_db": float(np.median(score)),
+            "score_p10_db": float(np.percentile(score, 10)), "score_p90_db": float(np.percentile(score, 90)),
+            "harmonics_median": float(np.median(harmonics)), "level_median_db": float(np.median(level))}
+
+
+def player(session, name):
+    return lambda: session.sound(name)
+
+
+def live_maps(session, listen, start=None, stop=None, quiet=2.0):
+    """Stare starts in silence (its background), then start() turns the source on. Returns the number of bank maps
+    in the next `listen` s and the BANK_TARGET records they brought: [(map, az, el, beam, second beam)]."""
+    board, targets, seen = session.board, [], [None]
+
+    def collect(state):
+        bank = state.get("bank") or {}
+        target = bank.get("target")
+        if state.get("firmware_mode") == "B" and target:
+            key = json.dumps(target, sort_keys=True)
+            if key != seen[0]:
+                seen[0] = key
+                targets.append((int(bank.get("maps") or 0), float(target["azimuth_deg"]),
+                                float(target["elevation_deg"]), int(target["beam"]), int(target["second_beam"])))
+        return False
+
+    board.stop()
+    board.command("B")
+    board.pump(quiet)
+    if start:
+        start()
+        board.pump(0.3)  # applies frames queued while start() waited
+    first = int((board.state.get("bank") or {}).get("maps") or 0)
+    board.pump(listen, collect)
+    count = int((board.state.get("bank") or {}).get("maps") or 0) - first
+    board.stop()
+    if stop:
+        stop()
+    return count, [t for t in targets if t[0] > first]
+
+
+def scan_passes(session, listen, start=None, stop=None):
+    """Continuous scan (C) for `listen` s after start(); the dB map of every completed pass."""
+    board, maps = session.board, []
+    board.stop()
+    if start:
+        start()
+    last = [int(board.state.get("scan_count") or 0)]
+
+    def collect(state):
+        count = int(state.get("scan_count") or 0)
+        if count != last[0]:
+            last[0] = count
+            maps.append(np.array([[np.nan if v is None else v for v in row] for row in state["levels_db"]], float))
+        return False
+
+    board.command("C")
+    board.pump(listen, collect)
+    board.stop()
+    if stop:
+        stop()
+    return maps
+
+
+def map_hits(targets, reference):
+    """Maps with a target within TOLERANCE_DEG of `reference`."""
+    return {t[0] for t in targets if angle_off(t[1], t[2], reference) <= TOLERANCE_DEG}
+
+
+def p2(session, args, out, array):
+    """Audio-path latency: from a quiet direction, steer onto the speaker and read a 2 ms window after a guard swept
+    from 0 to 5 ms. The guard (guard_us) has to cover the time from a steer to the new beam's sound at the MCU."""
+    place(0.0, 0.0, args.distance)
+    rng = np.random.default_rng(args.seed)
+    rows, columns = session.home[0]["rows"], session.home[0]["columns"]
+    on = session.speaker_sector(0, 0)
+    corners = sorted({0, columns - 1, (rows - 1) * columns, rows * columns - 1})
+    session.sound("A")
+    with session.settings(**MCU_BEAM, band=1):
+        steady = {s: session.capture("p2", f"steady, sector {s}", s, 1.0, value=s)["mean_db"] for s in [on, *corners]}
+    off = min(corners, key=lambda s: steady[s])
+    contrast = steady[on] - steady[off]
+    if contrast < 6.0:
+        session.sound(None)
+        session.report.add("P2 contrast between the speaker and a far direction", False,
+                           f"{contrast:.1f} dB, needs 6 dB: move the speaker closer (1 m) and repeat")
+        return
+    guards, fractions, errors = [], [], []
+    with session.settings(measure=1, band=1, channel=0, window_us=P2_WINDOW_US, guard_us=500):
+        for guard in rng.permutation(P2_GUARDS_US):
+            guard = int(guard)
+            session.set("guard_us", guard)
+            steered = []
+            for _ in range(args.steers):
+                session.read(f"S,{off}")
+                measurement = session.read(f"S,{on}")
+                if measurement:
+                    steered.append(measurement["level_db"])
+            reference = {}
+            for s in (on, off):
+                session.read(f"S,{s}")
+                reference[s] = power_mean_db([m["level_db"] for m in (session.read("M") for _ in range(20)) if m])
+            p = power(steered)
+            span = float(power(reference[on]) - power(reference[off]))
+            guards.append(guard)
+            if span > 0 and len(p) > 1:
+                fractions.append(float(arrival_fraction(power_mean_db(steered), reference[on], reference[off])))
+                errors.append(float(np.std(p, ddof=1) / np.sqrt(len(p)) / span))
+            else:
+                fractions.append(float("nan"))
+                errors.append(float("nan"))
+            print(f"  guard {guard:5d} us: {fractions[-1]:.2f} of the window is the new direction "
+                  f"(+- {errors[-1]:.2f}, {len(steered)} steers)", flush=True)
+    session.sound(None)
+    order = np.argsort(guards)
+    guards, fractions, errors = (list(np.asarray(v)[order]) for v in (guards, fractions, errors))
+    start, ramp = arrival_fit(guards, fractions)
+    arrival = start + ramp
+    session.report.info("P2 contrast", f"speaker sector {on} {steady[on]:.1f} dBFS, quietest corner {off} "
+                                       f"{steady[off]:.1f} dBFS ({contrast:.1f} dB)")
+    if not np.isfinite(arrival):
+        session.report.add("P2 arrival after a steer", False, "no usable guard step: the speaker sector was not "
+                                                              "louder than the far one; check the sound and repeat")
+        return
+    recommended = int(np.ceil(max(arrival, 0.0) / 250.0) * 250)
+    at_default = fractions[guards.index(500)]
+    session.report.info("P2 arrival after a steer", f"the new direction starts to arrive at {start:.0f} us and fills "
+                                                    f"the window from {arrival:.0f} us on (fit)")
+    session.report.add("P2 the default 500 us guard covers the audio path", 500 >= arrival,
+                       f"at 500 us the window is {at_default:.0%} new direction" if np.isfinite(at_default) else
+                       "the 500 us step was not usable")
+    session.report.info("P2 guard to use", f"SET,guard_us,{recommended}")
+    session.values["p2"] = {"speaker_sector": on, "far_sector": off, "steady_db": steady, "window_us": P2_WINDOW_US,
+                            "guards_us": guards, "fractions": fractions, "fraction_se": errors,
+                            "arrival_start_us": start, "arrival_end_us": arrival, "recommended_guard_us": recommended}
+    figure_p2(guards, fractions, errors, (start, ramp), recommended, out)
+
+
+def s3(session, args, out, array):
+    """Linearity and the detector's scale: sound A in 6 dB steps, read on the beam with MCU windows and with the DSP
+    detector. The MCU window reports RMS; the DSP detector's fit tells whether its word follows amplitude or power,
+    which sets what the 1.5x and 1.25x thresholds mean in dB."""
+    place(0.0, 0.0, args.distance)
+    sector = session.speaker_sector(0, 0)
+    seconds = args.seconds or 2.0
+    rng = np.random.default_rng(args.seed)
+    modes = {"MCU window": {**MCU_BEAM, "band": 1}, "DSP detector": {"measure": 0, "channel": 0}}
+    readings = {mode: {step: [] for step in LEVEL_STEPS_DB} for mode in modes}
+    floors = {mode: [] for mode in modes}
+    for cycle in range(args.repeats):
+        for step in [None, *(int(s) for s in rng.permutation(LEVEL_STEPS_DB))]:
+            session.sound(None if step is None else level_signal(step))
+            for mode, settings in modes.items():
+                with session.settings(**settings):
+                    label = f"{mode}, {'silent' if step is None else level_signal(step)}, cycle {cycle + 1}"
+                    level = session.capture("s3", label, sector, seconds, value=None if step is None else -step)
+                (floors[mode] if step is None else readings[mode][step]).append(level["mean_db"])
+        session.sound(None)
+    result = {}
+    for mode in modes:
+        floor = power_mean_db(floors[mode])
+        played, measured, errors = [], [], []
+        for step in LEVEL_STEPS_DB:
+            values = readings[mode][step]
+            played.append(-step)
+            measured.append(power_mean_db(values))
+            errors.append(float(np.std(values, ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.3)
+        entry = {"floor_db": floor, "played_db": played, "measured_db": measured, "se_db": errors,
+                 "models": detector_models(played, measured, errors, floor)}
+        high = [i for i, m in enumerate(measured) if m - floor >= 15.0]
+        if len(high) >= 3:
+            slope, sigma, offset, residuals = level_slope([played[i] for i in high],
+                                                          [signal_db(measured[i], floor) for i in high],
+                                                          [errors[i] for i in high])
+            entry.update(slope=slope, slope_sigma=sigma, residuals_db=residuals, steps_used=len(high))
+        result[mode] = entry
+    window, detector = result["MCU window"], result["DSP detector"]
+    if "slope" in window:
+        ok = abs(window["slope"] - 1) <= max(0.05, 3 * window["slope_sigma"]) and max(map(abs, window["residuals_db"])) <= 1.0
+        session.report.add("S3 MCU window linearity", ok,
+                           f"slope {window['slope']:.3f} +- {window['slope_sigma']:.3f} dB per dB over "
+                           f"{window['steps_used']} steps, largest residual {max(map(abs, window['residuals_db'])):.2f} "
+                           f"dB; loudest step {window['measured_db'][0] - window['floor_db']:.1f} dB above the floor")
+    else:
+        session.report.add("S3 MCU window linearity", False, "fewer than 3 steps 15 dB above the floor: louder")
+    better = min(detector["models"], key=lambda m: detector["models"][m]["chi2"])
+    other = "power" if better == "amplitude" else "amplitude"
+    meaning = ("1.5x = 3.5 dB, 1.25x = 1.9 dB" if better == "amplitude" else "1.5x = 1.8 dB, 1.25x = 1.0 dB")
+    session.report.info("S3 DSP detector word follows", f"{better} (chi2 {detector['models'][better]['chi2']:.1f} "
+                                                       f"against {detector['models'][other]['chi2']:.1f} for {other}"
+                                                       + (f"; slope {detector['slope']:.2f} +- "
+                                                          f"{detector['slope_sigma']:.2f}" if "slope" in detector else "")
+                                                       + f"), so the thresholds mean {meaning}")
+    window_model = min(window["models"], key=lambda m: window["models"][m]["chi2"])
+    session.report.add("S3 MCU window follows amplitude (sanity check of the method)", window_model == "amplitude",
+                       f"best model: {window_model}")
+    session.values["s3"] = result
+    figure_s3(result, out)
+
+
+def l5(session, args, out, array):
+    """Detection margin, the design's main claim: per-map detection rate of Live (bank) and of continuous scanning
+    (MCU windows) against the level of sound A; the margin is the difference of their 50% levels."""
+    place(0.0, 0.0, args.distance)
+    rng = np.random.default_rng(args.seed)
+    columns = int(session.home[0]["columns"])
+    base = {"measure": 0, "window_us": 5000, "band": 1, "channel": 0, "map_record": 1}
+    if args.guard is not None:
+        base["guard_us"] = args.guard
+    live = {step: [] for step in LEVEL_STEPS_DB}
+    scanned = {step: [] for step in LEVEL_STEPS_DB}
+    with session.settings(**base):
+        count, targets = live_maps(session, args.listen, player(session, "A"), player(session, None))
+        if not targets:
+            raise RuntimeError("Live reported nothing at the loudest level: raise the volume or move the speaker closer")
+        reference = (float(np.median([t[1] for t in targets])), float(np.median([t[2] for t in targets])))
+        session.set("measure", 1)
+        passes = scan_passes(session, args.listen, player(session, "A"), player(session, None))
+        strongest = [int(np.nanargmax(m)) for m in passes if np.isfinite(m).any()]
+        if not strongest:
+            raise RuntimeError("the scan completed no pass")
+        sector = int(np.bincount(strongest).argmax())
+        print(f"  reference: Live {reference[0]:+.1f}, {reference[1]:+.1f} deg; scan sector {sector}", flush=True)
+        for trial in range(args.trials):
+            for step in (int(s) for s in rng.permutation(LEVEL_STEPS_DB)):
+                for mode in (("live", "scan") if trial % 2 == 0 else ("scan", "live")):
+                    sound = player(session, level_signal(step))
+                    if mode == "live":
+                        session.set("measure", 0)
+                        count, targets = live_maps(session, args.listen, sound, player(session, None))
+                        live[step].append(len(map_hits(targets, reference)) / count if count else float("nan"))
+                    else:
+                        session.set("measure", 1)
+                        passes = scan_passes(session, args.listen, sound, player(session, None))
+                        scanned[step].append(float(np.mean([scan_detects(m, sector, columns) for m in passes]))
+                                             if passes else float("nan"))
+                print(f"  trial {trial + 1}, {level_signal(step)}: Live {live[step][-1]:.0%}, "
+                      f"scan {scanned[step][-1]:.0%}", flush=True)
+        session.set("measure", 0)
+        count, targets = live_maps(session, args.listen)
+        live_false = len({t[0] for t in targets}) / count if count else float("nan")
+        session.set("measure", 1)
+        passes = scan_passes(session, args.listen)
+        scan_false = float(np.mean([scan_alarm(m) for m in passes])) if passes else float("nan")
+    levels = [-s for s in LEVEL_STEPS_DB]
+    live_rate = [float(np.nanmean(live[s])) for s in LEVEL_STEPS_DB]
+    scan_rate = [float(np.nanmean(scanned[s])) for s in LEVEL_STEPS_DB]
+    (live_level, live_cut), (scan_level, scan_cut) = threshold_db(levels, live_rate), threshold_db(levels, scan_rate)
+
+    def text(level, cut):
+        return "never 50%" if level is None else (f"<= {level:.1f}" if cut else f"{level:.1f}") + " dB"
+
+    session.report.info("L5 50% detection level", f"Live {text(live_level, live_cut)}, scan "
+                                                  f"{text(scan_level, scan_cut)} (re sound A at the loudest step)")
+    if live_level is None or scan_level is None or (live_cut and scan_cut):
+        session.report.add("L5 Live detects at least 3 dB quieter than scanning", False,
+                           "no margin: " + ("both still detect at the quietest step, so lower the speaker volume "
+                                            "and repeat" if live_cut and scan_cut else "a mode never reached 50%"))
+        margin = None
+    else:
+        margin = scan_level - live_level
+        bound = "at least " if live_cut else ("at most " if scan_cut else "")
+        session.report.add("L5 Live detects at least 3 dB quieter than scanning", margin >= 3.0,
+                           f"margin {bound}{margin:.1f} dB (the design claims 6-7 dB)")
+    session.report.info("L5 false alarms in silence", f"Live {live_false:.0%} of maps, scan {scan_false:.0%} of passes")
+    session.values["l5"] = {"reference_live": reference, "reference_sector": sector, "levels_db": levels,
+                            "live_rates": {s: live[s] for s in LEVEL_STEPS_DB},
+                            "scan_rates": {s: scanned[s] for s in LEVEL_STEPS_DB}, "live_rate": live_rate,
+                            "scan_rate": scan_rate, "live_level_db": live_level, "live_censored": live_cut,
+                            "scan_level_db": scan_level, "scan_censored": scan_cut, "margin_db": margin,
+                            "false_alarms": {"live": live_false, "scan": scan_false}, "guard_us": args.guard}
+    figure_l5(levels, live_rate, scan_rate, live_level, scan_level, out)
+
+
+def l6(session, args, out, array):
+    """Two sources: the drone clip on the speaker, speech or music on a phone. Which one Live reports, and how often
+    it reports the phone with no drone (Live ranks by level; it has no classifier yet)."""
+    distance = place(args.drone_az, 0.0, args.distance)
+    input(f"Phone (speech or music, for example a podcast) {describe(args.phone_az, 0.0, distance)}, paused. "
+          "Enter when ready.")
+    drone, quiet = player(session, args.sound), player(session, None)
+
+    def ask(text):
+        return lambda: input(f"  {text} Enter.")
+
+    def trials(start=None, stop=None):
+        return [live_maps(session, args.listen, start, stop) for _ in range(args.trials)]
+
+    phases = {"drone only": trials(drone, quiet),
+              "phone starts after Live": trials(ask("Start the phone now, then"), ask("Pause the phone, then"))}
+    drone_hits = [t for _, targets in phases["drone only"] for t in targets]
+    phone_hits = [t for _, targets in phases["phone starts after Live"] for t in targets]
+    if not drone_hits:
+        raise RuntimeError("Live did not report the drone clip on its own: raise the volume or move the speaker closer")
+    drone_ref = (float(np.median([t[1] for t in drone_hits])), float(np.median([t[2] for t in drone_hits])))
+    phone_ref = ((float(np.median([t[1] for t in phone_hits])), float(np.median([t[2] for t in phone_hits])))
+                 if phone_hits else (args.phone_az, 0.0))
+    drone_sector, phone_sector = session.speaker_sector(*drone_ref), session.speaker_sector(*phone_ref)
+    with session.settings(**MCU_BEAM):
+        floors = {s: session.capture("l6", f"silent, sector {s}", s, 2.0)["mean_db"] for s in (drone_sector, phone_sector)}
+        drone()
+        drone_level = signal_db(session.capture("l6", "drone, its beam", drone_sector, 3.0)["mean_db"], floors[drone_sector])
+        quiet()
+    input("\nStart the phone and leave it playing through the next trials. Enter when it plays.")
+    with session.settings(**MCU_BEAM):
+        phone_level = signal_db(session.capture("l6", "phone, its beam", phone_sector, 3.0)["mean_db"], floors[phone_sector])
+    phases["phone on, drone starts"] = trials(drone, quiet)
+    phases["phone on, no drone"] = trials()
+    input("Pause the phone. Enter.")
+    result = {}
+    for name, runs in phases.items():
+        counts = {"drone": 0, "phone": 0, "other": 0, "none": 0}
+        for count, targets in runs:
+            by_map = {}
+            for t in targets:
+                by_map.setdefault(t[0], t)
+            for t in by_map.values():
+                counts["drone" if angle_off(t[1], t[2], drone_ref) <= TOLERANCE_DEG else
+                       "phone" if angle_off(t[1], t[2], phone_ref) <= TOLERANCE_DEG else "other"] += 1
+            counts["none"] += max(count - len(by_map), 0)
+        total = max(sum(counts.values()), 1)
+        result[name] = {key: value / total for key, value in counts.items()}
+        session.report.info(f"L6 {name}", ", ".join(f"{key} {value:.0%}" for key, value in result[name].items())
+                            + " of maps")
+    relative = phone_level - drone_level
+    session.report.info("L6 levels at the array", f"phone {relative:+.1f} dB re the drone clip, each in its own beam")
+    both = result["phone on, drone starts"]
+    session.report.add("L6 with the phone playing, Live reports the drone more often than the phone",
+                       both["drone"] > both["phone"], f"drone {both['drone']:.0%}, phone {both['phone']:.0%} of maps "
+                                                      f"(phone {relative:+.1f} dB re the drone)")
+    session.values["l6"] = {"drone_reference": drone_ref, "phone_reference": phone_ref, "drone_level_db": drone_level,
+                            "phone_level_db": phone_level, "phone_re_drone_db": relative, "phases": result,
+                            "sound": args.sound}
+    figure_l6(result, relative, out)
+
+
+def t1(session, args, out, array):
+    """Tonal detector: TONE reports from the beam on the speaker for silence, a synthetic 200 Hz harmonic series, the
+    drone clip and crowd noise, and a real drone with --real-drone. The DSP detector is used, so no MCU window loads
+    the core while the tonal detector runs."""
+    place(0.0, 0.0, args.distance)
+    sector = session.speaker_sector(0, 0)
+
+    def listen():
+        reports, last = [], [None]
+
+        def collect(state):
+            tone = (state.get("tones") or {}).get("0")
+            key = json.dumps(tone, sort_keys=True) if tone else None
+            if tone and key != last[0]:
+                last[0] = key
+                reports.append((tone["f0_hz"], tone["score_db"], tone["harmonics"], tone["level_db"]))
+            return False
+
+        session.board.pump(args.listen, collect)
+        return reports
+
+    reports = {}
+    with session.settings(measure=0, channel=0, tone=args.tone_ms):
+        if session.read(f"S,{sector}") is None:
+            raise RuntimeError(f"S,{sector} gave no reading ({session.board.state.get('last_error')})")
+        for name, sound in (("silence", None), ("harmonic 200 Hz", "D200"), ("drone clip", args.sound),
+                            ("crowd", "crowd")):
+            session.sound(sound)
+            reports[name] = listen()
+        session.sound(None)
+        if args.real_drone:
+            input("\nT1: hold the drone 1-2 m in front of the array with its motors running (propellers off indoors). "
+                  "Enter to listen.")
+            reports["real drone"] = listen()
+            input("Stop the motors. Enter.")
+    stats = {name: tone_stats(values) for name, values in reports.items()}
+    for name, item in stats.items():
+        session.report.info(f"T1 {name}", "no TONE reports" if not item["reports"] else
+                            f"f0 {item['f0_median_hz']:.1f} Hz (IQR {item['f0_iqr_hz']:.1f}), score "
+                            f"{item['score_median_db']:.1f} dB (10-90% {item['score_p10_db']:.1f} to "
+                            f"{item['score_p90_db']:.1f}), {item['harmonics_median']:.0f} harmonics, "
+                            f"{item['reports']} reports")
+    synthetic = stats["harmonic 200 Hz"]
+    session.report.add("T1 synthetic 200 Hz series found", bool(synthetic["reports"]) and
+                       abs(synthetic["f0_median_hz"] - 200.0) <= 2.0,
+                       f"median {synthetic.get('f0_median_hz', float('nan')):.1f} Hz")
+    crowd = stats["crowd"]
+    for name in ("drone clip", "real drone"):
+        item = stats.get(name)
+        if item and item["reports"] and crowd["reports"]:
+            session.report.add(f"T1 {name} scores above the crowd", item["score_median_db"] > crowd["score_p90_db"],
+                               f"median {item['score_median_db']:.1f} dB against the crowd's 90th percentile "
+                               f"{crowd['score_p90_db']:.1f} dB")
+    session.values["t1"] = {"sound": args.sound, "tone_ms": args.tone_ms, "stats": stats,
+                            "reports": {name: values for name, values in reports.items()}}
+    figure_t1(reports, out)
+
+
+def figure_p2(guards, fractions, errors, fit, recommended, out):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    g, f, e = (np.asarray(v, float) for v in (guards, fractions, errors))
+    ok = np.isfinite(f) & np.isfinite(e)
+    ax.errorbar(g[ok] / 1000, f[ok], yerr=e[ok], fmt="o", color="k", label="measured")
+    if np.isfinite(fit).all():
+        x = np.linspace(0, g.max(), 400)
+        ax.plot(x / 1000, np.clip((x - fit[0]) / fit[1], 0, 1), "--", label="fit")
+    ax.axvline(0.5, color="tab:red", lw=0.8, label="default guard 0.5 ms")
+    ax.axvline(recommended / 1000, color="tab:green", lw=0.8, label=f"guard to use {recommended / 1000:g} ms")
+    ax.set_xlabel("guard after the steer (ms)")
+    ax.set_ylabel("share of the new direction in the window")
+    ax.set_title(f"P2: audio-path latency ({P2_WINDOW_US / 1000:g} ms windows)")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "p2_latency.png"), dpi=150)
+
+
+def figure_s3(result, out):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    for ax, (mode, entry) in zip(axes, result.items()):
+        x = np.asarray(entry["played_db"], float)
+        ax.errorbar(x, entry["measured_db"], yerr=entry["se_db"], fmt="o", color="k", label="measured")
+        fine = np.linspace(x.min(), x.max(), 200)
+        floor = 10 ** (entry["floor_db"] / 20)
+        for model, item in entry["models"].items():
+            a = 10 ** (item["scale_db"] / 20)
+            word = np.sqrt((a * 10 ** (fine / 20)) ** 2 + floor ** 2) if model == "amplitude" else \
+                a * 10 ** (fine / 10) + floor
+            ax.plot(fine, 20 * np.log10(word), "--", label=f"follows {model} (chi2 {item['chi2']:.0f})")
+        ax.axhline(entry["floor_db"], color="gray", lw=0.8, label="silent floor")
+        ax.set_xlabel("played level re the loudest step (dB)")
+        ax.set_ylabel("reading (dBFS)")
+        ax.set_title(mode)
+        ax.legend(fontsize=8)
+    fig.suptitle("S3: linearity and the detector's scale")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "s3_levels.png"), dpi=150)
+
+
+def figure_l5(levels, live_rate, scan_rate, live_level, scan_level, out):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.plot(levels, live_rate, "o-", label="Live (bank), per map")
+    ax.plot(levels, scan_rate, "s-", label="continuous scan, per pass")
+    ax.axhline(0.5, color="gray", lw=0.8)
+    for level, color in ((live_level, "tab:blue"), (scan_level, "tab:orange")):
+        if level is not None:
+            ax.axvline(level, color=color, lw=0.8, ls=":")
+    ax.set_xlabel("level of sound A re the loudest step (dB)")
+    ax.set_ylabel("detection rate")
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_title("L5: detection margin, Live against scanning")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "l5_detection.png"), dpi=150)
+
+
+def figure_l6(result, relative, out):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    names, bottom = list(result), np.zeros(len(result))
+    for key, color in (("drone", "tab:green"), ("phone", "tab:red"), ("other", "tab:gray"), ("none", "lightgray")):
+        values = np.array([result[name][key] for name in names])
+        ax.bar(names, values, bottom=bottom, color=color, label=key)
+        bottom += values
+    ax.set_ylabel("share of bank maps")
+    ax.set_title(f"L6: what Live reports with two sources (phone {relative:+.1f} dB re the drone)")
+    ax.legend(fontsize=8)
+    ax.tick_params(axis="x", labelsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "l6_two_sources.png"), dpi=150)
+
+
+def figure_t1(reports, out):
+    import matplotlib.pyplot as plt
+    names = [name for name, values in reports.items() if values]
+    if not names:
+        return
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.boxplot([[r[1] for r in reports[name]] for name in names])
+    ax.set_xticks(range(1, len(names) + 1), names)
+    ax.set_ylabel("tonal score (dB)")
+    ax.set_title("T1: tonal detector score by source")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "t1_tones.png"), dpi=150)
+
+
+TESTS = {"n1": n1, "n2": n2, "a3": a3, "a4": a4, "a8": a8, "a9": a9, "a10": a10, "l1": l1, "l5": l5, "l6": l6,
+         "p2": p2, "r1": r1, "s1": s1, "s3": s3, "t1": t1}
+SOUND_TESTS = {"a3", "a4", "a8", "a9", "a10", "l1", "l5", "l6", "p2", "r1", "s1", "s3", "t1"}
+TEST_DEFAULTS = {"l1": {"trials": 5, "listen": 8.0}, "l5": {"trials": 3, "listen": 6.0},
+                 "l6": {"trials": 3, "listen": 8.0}, "t1": {"listen": 12.0}}
 
 
 def main():
@@ -1047,9 +1647,16 @@ def main():
     parser.add_argument("--alignment-sigma", type=float, default=0.4, help="speaker placement 1-sigma (deg)")
     parser.add_argument("--truth", choices=("array", "measured"), default="array",
                         help="a3/l1: find the speaker with the steered beam, or type in measured positions")
-    parser.add_argument("--trials", type=int, default=5, help="l1: trials per position")
-    parser.add_argument("--listen", type=float, default=8.0, help="l1: seconds of sound per trial")
-    parser.add_argument("--sound", default="A", help="l1: signal name or WAV path (e.g. audio/drone.wav)")
+    parser.add_argument("--trials", type=int, help="l1/l5/l6: trials per position, level or phase (default 5/3/3)")
+    parser.add_argument("--listen", type=float, help="l1/l5/l6/t1: seconds of sound per trial (default 8/6/8/12)")
+    parser.add_argument("--sound", default="A", help="l1/l6/t1: signal name, 'drone', 'crowd' or a WAV path "
+                                                     "(l6 and t1 default to the drone clip)")
+    parser.add_argument("--steers", type=int, default=40, help="p2: steers per guard value")
+    parser.add_argument("--guard", type=int, help="l5: guard_us for the scan's MCU windows (from p2)")
+    parser.add_argument("--drone-az", type=float, default=-15.0, help="l6: speaker azimuth (deg)")
+    parser.add_argument("--phone-az", type=float, default=15.0, help="l6: phone azimuth (deg)")
+    parser.add_argument("--tone-ms", type=int, default=100, help="t1: tonal detector report period (ms)")
+    parser.add_argument("--real-drone", action="store_true", help="t1: also listen to a real drone")
     parser.add_argument("--microphone", type=int, default=4, help="r1: microphone on Ch1")
     parser.add_argument("--microphones", default="0,4,20,24", help="s1: microphones to calibrate")
     parser.add_argument("--references", type=int, default=8, help="a9: reference microphones (seeded, spread)")
@@ -1060,10 +1667,18 @@ def main():
     args = parser.parse_args()
     if args.test == "l1" and args.positions == parser.get_default("positions"):
         args.positions = L1_POSITIONS
+    for key, value in TEST_DEFAULTS.get(args.test, {}).items():
+        if getattr(args, key) is None:
+            setattr(args, key, value)
+    if args.test in ("l6", "t1") and args.sound == parser.get_default("sound"):
+        args.sound = "drone"
     out = args.out or os.path.join(tempfile.gettempdir(), time.strftime(f"heimdall_{args.test}_%Y%m%d_%H%M%S"))
     os.makedirs(out, exist_ok=True)
     signals = make_signals(out) if args.test in SOUND_TESTS else {}
-    if args.test == "l1" and args.sound not in signals:
+    if signals:
+        signals.update({name: str(AUDIO / f"{name}.wav") for name in ("drone", "crowd")
+                        if (AUDIO / f"{name}.wav").exists()})
+    if args.test in ("l1", "l6", "t1") and args.sound not in signals:
         if not os.path.exists(args.sound):
             sys.exit(f"no signal or file {args.sound}")
         signals[args.sound] = args.sound

@@ -115,3 +115,55 @@ def test_grating_lobes_appear_at_8k_not_at_5k():
         assert bool(lobes) is expect
         if expect:
             assert all(35.0 < abs(angle) < 60.0 for angle, _ in lobes)
+
+
+def test_arrival_fraction_and_latency_fit():
+    assert characterise.arrival_fraction(-20.0, -20.0, -40.0) == pytest.approx(1.0)
+    assert characterise.arrival_fraction(-40.0, -20.0, -40.0) == pytest.approx(0.0)
+    halfway = 10 * np.log10((10 ** -2 + 10 ** -4) / 2)
+    assert characterise.arrival_fraction(halfway, -20.0, -40.0) == pytest.approx(0.5)
+    guards = np.array(characterise.P2_GUARDS_US, float)
+    fractions = np.clip((guards - 1500.0) / 2000.0, 0, 1) + np.random.default_rng(3).normal(0, 0.03, guards.size)
+    start, ramp = characterise.arrival_fit(guards, fractions)
+    assert start + ramp == pytest.approx(3500.0, abs=250.0)
+    assert np.isnan(characterise.arrival_fit(guards, np.full(guards.size, np.nan))).all()
+
+
+def test_detection_threshold_interpolates_and_flags_censoring():
+    levels = [0, -6, -12, -18, -24, -30]
+    assert characterise.threshold_db(levels, [1, 1, 0.9, 0.6, 0.3, 0.1]) == (pytest.approx(-20.0), False)
+    assert characterise.threshold_db(levels, [1, 1, 1, 1, 0.9, 0.8]) == (-30.0, True)
+    assert characterise.threshold_db(levels, [0.2, 0.1, 0, 0, 0, 0]) == (None, False)
+
+
+def test_scan_pass_detection_rule():
+    flat = np.full((7, 7), -40.0)
+    flat[3, 4] = -34.0
+    assert characterise.scan_detects(flat, 24, 7)
+    assert not characterise.scan_detects(flat, 0, 7)
+    flat[3, 4] = -38.0
+    assert not characterise.scan_detects(flat, 24, 7)
+    assert not characterise.scan_alarm(flat)
+
+
+def test_detector_models_tell_amplitude_from_power():
+    played = np.arange(0, -49, -6.0)
+    floor_db = -60.0
+    floor = 10 ** (floor_db / 20)
+    amplitude = 20 * np.log10(np.sqrt((10 ** (-20 / 20) * 10 ** (played / 20)) ** 2 + floor ** 2))
+    power_word = 20 * np.log10(10 ** (-20 / 20) * 10 ** (played / 10) + floor)
+    errors = np.full(played.size, 0.2)
+    fits = characterise.detector_models(played, amplitude, errors, floor_db)
+    assert fits["amplitude"]["chi2"] < 0.01 < fits["power"]["chi2"]
+    fits = characterise.detector_models(played, power_word, errors, floor_db)
+    assert fits["power"]["chi2"] < 0.01 < fits["amplitude"]["chi2"]
+    slope, _, _, _ = characterise.level_slope(played[:4], 20 * np.log10(0.1 * 10 ** (played[:4] / 10)), errors[:4])
+    assert slope == pytest.approx(2.0, abs=1e-6)
+
+
+def test_tone_stats_and_map_hits():
+    stats = characterise.tone_stats([(200.0, 12.0, 6, -40.0), (202.0, 14.0, 7, -41.0), (198.0, 10.0, 5, -39.0)])
+    assert stats["reports"] == 3 and stats["f0_median_hz"] == 200.0 and stats["score_median_db"] == 12.0
+    assert characterise.tone_stats([]) == {"reports": 0}
+    targets = [(5, 1.0, 0.0, 12, 13), (6, 30.0, 0.0, 14, 12), (6, 2.0, 1.0, 12, 13)]
+    assert characterise.map_hits(targets, (0.0, 0.0)) == {5, 6}

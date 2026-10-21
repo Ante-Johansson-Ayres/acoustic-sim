@@ -153,7 +153,7 @@ def make_signals(folder):
     signals = {"A": base, "B1k": band(891, 1122), "B2k": band(1782, 2245), "B3k": band(2806, 3536),
                "B5k": band(4454, 5612), "B8k": band(7127, 8980), "W": band(200, 8000),
                "T1k": rms(np.sin(2 * np.pi * 1000 * np.arange(n) / RATE), -18)}
-    signals.update({f"A-{step}": base * 10 ** (-step / 20) for step in range(6, 37, 6)})
+    signals.update({f"A-{step}": base * 10 ** (-step / 20) for step in range(6, 49, 6)})
     signals.update({f"D{f0}": harmonics(f0) for f0 in TONES_HZ})
     paths = {}
     for name, x in signals.items():
