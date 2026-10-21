@@ -8,7 +8,9 @@
 import { h, setText } from '../shared/dom.js';
 import { HATCH, inkOn, levelToUnit, rampColor, rampGradient, rgbCss } from '../shared/colormap.js';
 import { deg, num } from '../shared/format.js';
+import { look } from '../shared/look.js';
 import { gridPosition } from './field.js';
+import { ditherStep, meterFill } from './lookparts.js';
 
 const LABEL_MIN_CELL = 40;
 
@@ -36,12 +38,16 @@ export class FieldMap {
     this.truth = h('span', {class: 'fmap__truth', hidden: true});
     this.overlays = [this.cross, this.pointerX, this.pointerY, this.truth];
     this.ticks = h('ul', {class: 'fmap__ticks'});
+    // The hidden looks draw tiles in six dither steps (lookparts.js), so their scale shows the steps.
+    const ramp = look
+      ? h('div', {class: 'fmap__ramp lk-steps'}, [0, 1, 2, 3, 4, 5].map((step) => h('i', {dataset: {lkStep: String(step)}})))
+      : h('div', {class: 'fmap__ramp', style: {background: rampGradient('to top')}});
 
     this.el = h('div', {class: 'fmap'},
       h('div', {class: 'fmap__ytitle'}, h('span', {class: 'tri'}, '▲'), h('span', {class: 'fmap__ytext'}, 'ELEVATION'), h('span', {class: 'tri'}, '▼')),
       this.rowLabels,
       this.grid,
-      h('div', {class: 'fmap__bar'}, h('div', {class: 'fmap__ramp', style: {background: rampGradient('to top')}}), this.ticks),
+      h('div', {class: 'fmap__bar'}, ramp, this.ticks),
       this.colLabels,
       h('div', {class: 'fmap__xtitle'}, h('span', {class: 'tri'}, '◀'), 'AZIMUTH', h('span', {class: 'tri'}, '▶')),
     );
@@ -61,6 +67,7 @@ export class FieldMap {
     this.cellPx = cellPx;
     this.el.style.setProperty('--cell', `${cellPx}px`);
     this.el.style.setProperty('--gap', `${cellPx >= 40 ? 3 : 2}px`);
+    if (look) this.el.classList.toggle('fmap--small', cellPx < LABEL_MIN_CELL);
     this.grid.style.gridTemplateColumns = `repeat(${field.columns}, var(--cell))`;
     this.rowLabels.style.gridTemplateRows = `repeat(${field.rows}, var(--cell))`;
     this.colLabels.style.gridTemplateColumns = `repeat(${field.columns}, var(--cell))`;
@@ -72,14 +79,15 @@ export class FieldMap {
       for (let column = 0; column < field.columns; column++) {
         const index = row * field.columns + column;
         const text = h('span', {class: 'fmap__value'});
+        const meter = look ? h('span', {class: 'lk-meter', 'aria-hidden': 'true'}, h('i'), h('i'), h('i'), h('i'), h('i')) : null;
         const cell = h('button', {
           type: 'button',
           class: 'fmap__cell',
           onClick: () => this.onPick?.(index),
           onMouseenter: () => this.setHover(index),
           onFocus: () => this.setHover(index),
-        }, text);
-        this.cells[index] = {cell, text};
+        }, text, meter);
+        this.cells[index] = {cell, text, meter};
         nodes.push(cell);
       }
     }
@@ -118,15 +126,23 @@ export class FieldMap {
       if (!entry) continue;
       const measured = Number.isFinite(cell.level);
       const rgb = rampColor(levelToUnit(cell.level, floor) ?? 0);
-      const fill = rgbCss(rgb);
-      entry.cell.style.background = !measured ? 'var(--raised)' : cell.fresh ? fill : `${HATCH}, ${fill}`;
+      if (look) {
+        // A hidden look's tile: a dither step and a five-cell meter, faded when stale.
+        const step = measured ? String(ditherStep(cell.level, floor)) : '';
+        const fill = String(meterFill(cell.level, floor));
+        if (entry.cell.dataset.lkStep !== step) entry.cell.dataset.lkStep = step;
+        if (entry.meter.dataset.fill !== fill) entry.meter.dataset.fill = fill;
+      } else {
+        const fill = rgbCss(rgb);
+        entry.cell.style.background = !measured ? 'var(--raised)' : cell.fresh ? fill : `${HATCH}, ${fill}`;
+      }
       entry.cell.style.opacity = measured && !cell.fresh ? '0.55' : '1';
       entry.cell.classList.toggle('is-strongest', highlight === cell && marker?.kind !== 'beam');
       entry.cell.classList.toggle('is-held', marker?.kind === 'beam' && marker.cell === cell);
       entry.cell.classList.toggle('is-hover', this.hover === cell.index);
       const labelled = showText && measured && (values === 'all' || highlight === cell);
       setText(entry.text, labelled ? num(cell.level, 0) : '');
-      entry.text.style.color = inkOn(rgb);
+      if (!look) entry.text.style.color = inkOn(rgb);
       const place = `${field.kind === 'bank' ? 'Beam' : 'Sector'} ${cell.index}, azimuth ${deg(cell.azimuth)}, elevation ${deg(cell.elevation)}`;
       entry.cell.setAttribute('aria-label', measured ? `${place}, ${num(cell.level, 1)} dBFS` : `${place}, not measured yet`);
     }

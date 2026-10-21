@@ -220,3 +220,43 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+
+/* Hardware parts (parts.css), as the Arasaka mockup with field B: red dither on near-black tiles (the two
+   quietest steps left empty), glowing meters, and ink bracket corners round the target. */
+.look-arasaka {
+  --lk-off: rgba(242, 18, 42, 0.12);
+  --lk-on: #f2122a;
+  --lk-glow: 0 0 6px rgba(242, 18, 42, 0.6);
+  --lk-tile: #f2122a;
+  --lk-tile-off: #0e0a0b;
+  --lk-meter-on: #f2122a;
+}
+.look-arasaka .fmap__cell[data-lk-step],
+.look-arasaka .lk-steps i { border-radius: 0; box-shadow: inset 0 0 0 1px rgba(242, 18, 42, 0.24); }
+.look-arasaka :is(.fmap__cell, .lk-steps i):is([data-lk-step="4"], [data-lk-step="5"]) { background-image: none; }
+.look-arasaka :is(.fmap__cell, .lk-steps i)[data-lk-step="3"] { color: rgba(242, 18, 42, 0.55); }
+.look-arasaka .fmap__cell:is([data-lk-step="0"], [data-lk-step="1"]) { box-shadow: 0 0 14px rgba(242, 18, 42, 0.45), inset 0 0 0 1px rgba(242, 18, 42, 0.24); }
+.look-arasaka .fmap__cell.is-hover { box-shadow: inset 0 0 0 2px var(--text); }
+.look-arasaka .fmap__cell:is(.is-strongest, .is-held) { --lk-meter-on: var(--text); --lk-glow: 0 0 5px rgba(233, 227, 220, 0.6); outline: none; }
+.look-arasaka .fmap__cell:is(.is-strongest, .is-held)::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  pointer-events: none;
+  background:
+    linear-gradient(#e9e3dc, #e9e3dc) top left / 14px 2px no-repeat, linear-gradient(#e9e3dc, #e9e3dc) top left / 2px 14px no-repeat,
+    linear-gradient(#e9e3dc, #e9e3dc) top right / 14px 2px no-repeat, linear-gradient(#e9e3dc, #e9e3dc) top right / 2px 14px no-repeat,
+    linear-gradient(#e9e3dc, #e9e3dc) bottom left / 14px 2px no-repeat, linear-gradient(#e9e3dc, #e9e3dc) bottom left / 2px 14px no-repeat,
+    linear-gradient(#e9e3dc, #e9e3dc) bottom right / 14px 2px no-repeat, linear-gradient(#e9e3dc, #e9e3dc) bottom right / 2px 14px no-repeat;
+}
+.look-arasaka .lk-meter { right: 4px; top: 4px; bottom: 4px; width: 12px; background: rgba(7, 8, 10, 0.8); }
+.look-arasaka .fmap__value { left: 0; bottom: 0; padding: 2px 5px; background: var(--bg); color: var(--text); font: 400 11px/12px var(--font-mono); }
+.look-arasaka .fmap__value:empty { display: none; }
+.look-arasaka .fmap__cell:is(.is-strongest, .is-held) .fmap__value { background: var(--accent); color: var(--bg); }
+.look-arasaka .fmap__cross { width: 44px; height: 44px; }
+.look-arasaka .fmap__cross::before, .look-arasaka .fmap__cross::after { background: var(--text); box-shadow: none; }
+.look-arasaka .fmap__cross b { inset: 10px; border-radius: 0; border-color: var(--text); box-shadow: none; }
+.look-arasaka .lk-word { font-family: var(--font-display); font-size: 44px; line-height: 44px; letter-spacing: 0.04em; text-transform: uppercase; text-shadow: 0 0 12px rgba(242, 18, 42, 0.6); }
+.look-arasaka .lk-band__name { color: var(--accent); font-family: var(--font-label); font-size: 10px; letter-spacing: 0.3em; text-transform: uppercase; }
+.look-arasaka .lk-scale__ticks { color: var(--muted); font-family: var(--font-label); font-size: 10px; line-height: 10px; }
+.look-arasaka .lk-standby { color: var(--accent); font-family: var(--font-label); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }

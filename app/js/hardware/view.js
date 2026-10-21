@@ -8,7 +8,9 @@
 import { h, options, segmented, setText } from '../shared/dom.js';
 import { rampGradient } from '../shared/colormap.js';
 import { deg, num } from '../shared/format.js';
+import { look } from '../shared/look.js';
 import { FieldMap } from './map.js';
+import { modeWord, scaleFill } from './lookparts.js';
 import { HistoryCharts } from './history.js';
 import { AudioPanel, DiagnosticsPanel, EventLog, ManualBeamPanel, MeasurementPanel, SourcePanel, TonePanel, operatingMode, sourceAnswer } from './status.js';
 import { AcousticScene, AuditionPanel, ConnectionPanel } from './connection.js';
@@ -84,8 +86,21 @@ export function createView(container, {session}) {
     }}, label));
   const scanMenu = h('details', {class: 'menu'}, scanSummary, h('div', {class: 'menu__list'}, ...scanItems));
   document.addEventListener('click', (event) => { if (!scanMenu.contains(event.target)) scanMenu.open = false; });
-  const command = h('section', {class: 'command', 'aria-label': 'Commands'},
-    liveButton, stopButton, stateBox, h('div', {class: 'command__right'}, scanMenu));
+  // The hidden looks lead the band with the mode as a big word, after a row of lamps (Panel) or a
+  // scale of the level above the background (Arasaka), and keep the keys on the right.
+  const modeText = look ? h('span', {class: 'lk-word'}) : null;
+  const scaleCells = look === 'arasaka' ? Array.from({length: 8}, () => h('i')) : [];
+  const lead = {
+    panel: () => h('div', {class: 'lk-lamps', 'aria-hidden': 'true'},
+      [5, 5, 4, 3, 2, 2, 1, 1, 0, 0].map((step, i) => h('i', {dataset: {lkStep: String(step)}, style: `--i: ${i}`}))),
+    arasaka: () => h('div', {class: 'lk-band', 'aria-hidden': 'true'}, h('span', {class: 'lk-band__name'}, 'Heimdall'),
+      h('div', {class: 'lk-scale'}, scaleCells), h('div', {class: 'lk-scale__ticks'}, ['30', '20', '10', '0'].map((t) => h('span', {}, t)))),
+  }[look]?.();
+  const command = look
+    ? h('section', {class: 'command', 'aria-label': 'Commands'},
+      lead, modeText, stateBox, h('div', {class: 'command__right'}, liveButton, stopButton, scanMenu))
+    : h('section', {class: 'command', 'aria-label': 'Commands'},
+      liveButton, stopButton, stateBox, h('div', {class: 'command__right'}, scanMenu));
 
   // ── Field: 3D or map, with its tools in the header ────────────────────
   const viewSeg = segmented([['3d', '3D'], ['map', 'Map']], {
@@ -115,7 +130,8 @@ export function createView(container, {session}) {
   const bar = h('div', {class: 'well__bar', 'aria-hidden': 'true'},
     h('div', {class: 'fmap__ramp', style: {background: rampGradient('to top')}}), barTicks);
   const waiting = h('p', {class: 'well__waiting', hidden: true});
-  const well = h('div', {class: 'well'}, sceneBox, mapBox, caption, h('p', {class: 'well__hint'}, 'Drag to rotate'), bar, waiting);
+  const standby = look ? h('p', {class: 'lk-standby', 'aria-hidden': 'true'}, 'Standby') : null;
+  const well = h('div', {class: 'well'}, sceneBox, mapBox, caption, h('p', {class: 'well__hint'}, 'Drag to rotate'), bar, waiting, standby);
   const fieldSection = h('section', {class: 'hw-field', 'aria-label': 'Field'}, fieldHead, well);
 
   // ── Drawer: the less frequent tools open under the Field ──────────────
@@ -225,7 +241,14 @@ export function createView(container, {session}) {
       + (Number.isFinite(cell.level) ? ` · ${num(cell.level, 1)} dBFS` : ' · not measured yet') + action);
   }
 
-  function renderCommand(mode) {
+  function renderCommand(mode, answer) {
+    if (look) {
+      setText(modeText, modeWord(mode));
+      command.dataset.mode = mode;
+      well.dataset.mode = mode;
+      const lit = scaleFill(answer.margin);
+      scaleCells.forEach((cell, i) => cell.classList.toggle('on', i < lit));
+    }
     const ready = session.ready;
     liveButton.disabled = !ready;
     liveButton.setAttribute('aria-pressed', String(mode === 'stare'));
@@ -330,8 +353,9 @@ export function createView(container, {session}) {
     state.kind = fieldKind(frame, {previous: state.kind, monitoring: session.monitoring});
     const field = buildField(frame, state.kind, {cellAge: (row, column) => session.cellAge(row, column), staleMs: STALE_MS});
     state.field = field;
+    const answer = sourceAnswer(session, field, mode);
 
-    renderCommand(mode);
+    renderCommand(mode, answer);
     waiting.hidden = Boolean(field);
     caption.hidden = !field;
     if (!field) {
@@ -342,7 +366,7 @@ export function createView(container, {session}) {
       barTicks.replaceChildren(...[0, 0.25, 0.5, 0.75, 1].map((f) => h('li', {}, f === 0 ? '0 dBFS' : num(prefs.floor * f, 0))));
       scene3d?.render(field, {floor: prefs.floor, session, style: prefs.style});
     }
-    source.render(sourceAnswer(session, field, mode));
+    source.render(answer);
     audio.render(frame);
     history.render(session, {span: fieldSpan(field), force});
     if (state.tab === 'diag') pages.diag.render(mode);

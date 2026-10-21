@@ -7,6 +7,7 @@
 
 import '@fontsource/dotgothic16/latin-400.css';
 import '@fontsource/silkscreen/latin-400.css';
+import '../../styles/looks/parts.css';
 import '../../styles/looks/arasaka.css';
 import { currentZoom } from '../shared/scale.js';
 

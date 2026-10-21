@@ -4,4 +4,5 @@
  */
 
 import '@fontsource/dotgothic16/latin-400.css';
+import '../../styles/looks/parts.css';
 import '../../styles/looks/panel.css';

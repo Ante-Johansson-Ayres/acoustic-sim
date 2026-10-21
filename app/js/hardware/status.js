@@ -6,6 +6,8 @@
 
 import { h, options, segmented, setText } from '../shared/dom.js';
 import { clockTime, deg, hz, num, signed } from '../shared/format.js';
+import { look } from '../shared/look.js';
+import { LED_COLUMNS, LED_ROWS, ledCells, ledText, sideWord } from './lookparts.js';
 
 export function operatingMode(session) {
   const frame = session.frame;
@@ -51,16 +53,38 @@ export function sourceAnswer(session, field, mode) {
     level: answer.level, margin: above(answer.level), lockedMs: answer.kind === 'target' ? session.lockedForMs : null};
 }
 
+/** A hidden look's dot-matrix angle board (lookparts.js), redrawn only when its text changes. */
+function ledBoard() {
+  const cells = Array.from({length: LED_COLUMNS * LED_ROWS}, () => h('i'));
+  const el = h('span', {class: 'lk-led', role: 'img'}, cells);
+  let shown = null;
+  return {
+    el,
+    set(text, label) {
+      el.setAttribute('aria-label', label);
+      if (text === shown) return;
+      shown = text;
+      ledCells(text).forEach((on, i) => cells[i].classList.toggle('on', on));
+    },
+  };
+}
+
 export class SourcePanel {
   constructor() {
-    const readout = (name) => {
+    const readout = (name, title) => {
       const value = h('span', {class: 'ro__num'}, '—');
       const dir = h('span', {class: 'ro__dir'});
-      return {value, dir, el: h('div', {class: 'ro'}, h('span', {class: 'label'}, name), value, dir)};
+      const el = h('div', {class: 'ro'}, h('span', {class: 'label'}, look ? title : name), value, dir);
+      if (!look) return {value, dir, el};
+      // The hidden looks show the angle on a dot-matrix board, under its direction in words.
+      const word = h('span', {class: 'ro__word'});
+      const board = ledBoard();
+      el.append(word, board.el);
+      return {value, dir, el, word, board};
     };
     this.tag = h('span', {class: 'tag'}, 'IDLE');
-    this.az = readout('AZ');
-    this.elev = readout('EL');
+    this.az = readout('AZ', 'Azimuth');
+    this.elev = readout('EL', 'Elevation');
     this.level = stat('Level', 'dBFS');
     this.margin = stat('Above background', 'dB');
     this.locked = stat('Locked for', 's');
@@ -78,6 +102,14 @@ export class SourcePanel {
     setText(this.az.dir, arrow(answer.azimuth, '▶', '◀'));
     setText(this.elev.value, angle(answer.elevation));
     setText(this.elev.dir, arrow(answer.elevation, '▲', '▼'));
+    if (look) {
+      const azWord = sideWord(answer.azimuth, 'right', 'left', 'ahead');
+      const elWord = sideWord(answer.elevation, 'up', 'down', 'level');
+      setText(this.az.word, azWord);
+      setText(this.elev.word, elWord);
+      this.az.board.set(ledText(answer.azimuth), `Azimuth ${angle(answer.azimuth)} ${azWord}`);
+      this.elev.board.set(ledText(answer.elevation), `Elevation ${angle(answer.elevation)} ${elWord}`);
+    }
     setText(this.level.value, num(answer.level, 1));
     setText(this.margin.value, signed(answer.margin, 1));
     setText(this.locked.value, Number.isFinite(answer.lockedMs) ? (answer.lockedMs / 1000).toFixed(1) : '—');
