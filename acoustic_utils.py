@@ -702,7 +702,7 @@ def apply_codec_quantization(signals, bit_depth=CODEC_BIT_DEPTH_DEFAULT,
 # renders all K phantoms + crowd + PA in one simulate() call; Doppler and
 # direction change fall out of the differing ISM delays between chunks.
 #
-# See LIMITATIONS.md §2b for the assumptions and when this model breaks.
+# See docs/SIMULATOR.md section 3.3 for the assumptions and when this model breaks.
 
 C_SOUND = 343.0  # nominal speed of sound in m/s at 20 C
 

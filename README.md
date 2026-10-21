@@ -1,11 +1,14 @@
-# Acoustic Visualiser
+# Acoustic Visualiser (acoustic-sim)
 
-The project has one Vite frontend source under `app/` and one FastAPI backend in
-`sim_server.py`. The early comparison study (plots and the old single-file
-explorer) is archived under `docs/archive/early_comparison_study/`; the guides
-are in `docs/`.
+Host software for Heimdall: a FastAPI backend (`sim_server.py`) that talks to the MAX78002
+firmware over serial or to an emulator, and a browser GUI (`app/`, Vite and plain JavaScript).
+It also holds the characterisation scripts and an acoustic simulator. The system documentation
+lives in the parent repository ([README](../README.md)); how the backend and protocol work is
+in [REFERENCE.md section 5](../MAX78002/docs/REFERENCE.md#5-host-software-acoustic-sim).
 
 ## Setup
+
+64-bit Python 3.14, Node.js 24 and npm 11:
 
 ```powershell
 py -3.14 -m venv .venv
@@ -15,322 +18,109 @@ cd app
 npm.cmd ci
 ```
 
-Validated prerequisites are 64-bit Python 3.14, Node.js 24, and npm 11. The
-repository contains the required audio files and `app/data/srp_spectra.json`.
-PyRoomAcoustics currently installs from a Windows wheel; a C++ build toolchain
-is needed only if pip cannot obtain a compatible wheel.
+The C++ Build Tools are needed only if pip finds no wheel for pyroomacoustics.
 
-## Browser Development
-
-Start the backend:
+## Run
 
 ```powershell
-.\.venv\Scripts\python.exe sim_server.py
+.\.venv\Scripts\python.exe sim_server.py         # backend on 127.0.0.1:8766; keep it running
+cd app; npm.cmd run dev                          # second terminal; open the URL it prints
 ```
 
-Start the frontend in another terminal:
+Without Node at run time: `npm.cmd run build` once, then
+`.\.venv\Scripts\python.exe -m http.server 8080 --directory app\dist`.
 
-```powershell
-cd app
-npm.cmd run dev -- --host 127.0.0.1 --port 8080
-```
-
-Open `http://127.0.0.1:8080/`.
-
-## Screens
-
-The app has four screens in the header plus a presentation view. Each has its
-own address, so a link or a bookmark opens the right one:
-
-| Screen | Address | What it is for |
+| Screen | Address | For |
 | --- | --- | --- |
-| Beam pattern | `#beam` | Array factor of a geometry (including the deployed Heimdall layout), polar cuts with the −3 dB width, array figures. |
-| Simulator | `#sim` | One room-acoustics trial through `/simulate`: SRP map, estimate and error, audio, impulse response. Presets load from `#preset=…` links. |
-| Hardware | `#hardware` | Operator console for the MAX78002 over serial, the fast emulator, or the acoustic room emulator. |
-| Study | `#study` | DSP parameter study and measurements (see the Study section). |
-| Exhibition | `#exhibit` | Full-screen presentation of the Hardware session for a booth or a second screen. `Present` opens it; Esc returns. |
+| Beam pattern | `#beam` | Array factor of a geometry (including the deployed layout), polar cuts with the -3 dB width |
+| Simulator | `#sim` | One room-acoustics trial: SRP map, estimate and error, audio, impulse response ([docs/SIMULATOR.md](docs/SIMULATOR.md)) |
+| Hardware | `#hardware` | Operator console for the board, the fast emulator or the acoustic room emulator |
+| Study | `#study` | DSP parameter editing and guided measurements |
+| Exhibition | `#exhibit` | Full-screen view of the Hardware session for a booth; `Present` opens it, Esc returns |
 
-The Hardware connection is shared by Hardware, Exhibition and Study, and the
-header shows the link from every screen. The Realtime tab and the hidden SRP Sim
-mode were removed; the backend no longer serves `/realtime`.
+The hardware connection is shared by Hardware, Study and Exhibition.
 
-## Hardware-Free Heimdall Demo
+## Hardware
 
-The firmware emulator speaks the same parsed protocol and uses the same
-WebSocket path as serial hardware:
+Open Hardware, pick the port (`Rescan` refreshes the list; a name can be typed), choose 921600
+baud (115200 for a diagnostic firmware build) and `Connect`. No other program may hold the COM
+port. On connect the host sends `I`, and the firmware's answer sets the grid and checks the DSP
+program ([REFERENCE.md section 4.6](../MAX78002/docs/REFERENCE.md#46-records)). First-light
+checks are in [SETUP.md section 6](../MAX78002/docs/SETUP.md#6-start-and-check).
 
-```powershell
-.\.venv\Scripts\python.exe sim_server.py --emulator
-```
+The backend follows the DSP program the firmware is built for: `HEIMDALL_DSP_EXPORT`, else its
+default in `../MAX78002/project.mk`. From that folder it reads the contract
+(`beam_table_2d.json`), the SigmaStudio export (the Study register map) and `beam_table_2d.h`
+(hash check). Restart the backend after changing the selection.
 
-Open the Hardware tab and press `Live` to listen in every bank direction at
-once, or pick a sector scan under `Diagnostic scans` (`Sweep once`,
-`Continuous`, `Track`); `Stop` ends either. The Field shows the array and one
-tile per beam in 3D, with a beam to the source, or the same tiles as a flat
-`Map`. `Show` next to `Floor` draws the 3D field as tiles, or as a height field
-that bulges toward the array where the sound stands above the background: a
-smooth `Surface` in colour bands, or a `Point cloud`. The rim stays on the dome,
-colour shows the level, and the hill tops out at the source's interpolated direction. A fixed beam is in the `Manual beam` drawer. Without `--emulator`, pick `Emulator` in the
-connection panel and click `Start emulator`; its grid defaults to the deployed
-7x7 table over ±40°. The emulator supplies a moving target and is suitable for
-GUI, protocol, reconnect, and command testing.
+Using the console:
 
-Adaptive `Track` follows the firmware policy: one complete search, two local
-cross confirmations, five-sector tracking with two-pass movement hysteresis,
-three failed passes before a local 3x3 reacquisition, and a periodic global
-search after 50 tracking passes. The source trajectory only generates detector
-levels; it is not used directly to choose the tracked sector.
+- **Live** listens in every bank direction at once. **Diagnostic scans** (`Sweep once`,
+  `Continuous`, `Track`) step the fine beam; `Stop` sends `X`. The **Manual beam** drawer holds
+  one beam; `Hold beam` re-reads it at 10, 20 or 50 Hz until `Release`.
+- The **Field** shows one tile per beam in 3D (`Show`: tiles, `Surface` or `Point cloud`) or as a
+  flat `Map`. `Floor` is an absolute dBFS colour floor: frames are not normalised to their own
+  peak, so weak frames stay dark.
+- The **Source** panel tags its answer `LOCKED` (a tracked or Live target), `HOLDING` (a held
+  beam) or `STRONGEST` (the strongest cell of a scan). Hatched cells are more than 5 s old.
+  `Above background` is the level above the map's median, not a confidence. The system gives
+  direction only, not range.
+- **Diagnostics**: `Direction updates` (rate of `TARGET_UPDATED`) against `Full scans` (from
+  `TIMING`); `Freeze display` pauses the screen only (use `Stop` to stop the firmware); with an
+  emulator, the true source direction (a green cross) and, for the acoustic emulator, `Listen`.
+- **Audio**: `Record`, `Stop`, `Save WAV` (48 kHz stereo with a JSON sidecar; the GUI stops a
+  running scan first).
+- In serial mode the grid is the one the firmware reports; changing it means regenerating the
+  table and reflashing. Emulator grids can be 1-20 rows and columns.
 
-The `Diagnostics` drawer compares `Direction updates` with `Full scans`. Direction
-updates are the host-observed cadence of `TARGET_UPDATED` records; full scans
-come from the most recent firmware `TIMING` record. The displayed multiplier shows the practical
-solution-refresh advantage of local tracking. Full-scan rate is expected to
-remain nearly constant while tracking.
+## Without hardware
 
-### Emulator flight profiles
+The emulators answer the firmware commands through the same parser and WebSocket as the board.
+Their levels are not calibrated: use them for GUI, protocol and tracking work, not for range.
+Start the backend and the GUI as usual, open `#hardware` and pick a tab in the connection panel:
 
-Flight motion is generated in 3D Cartesian metres and then converted to
-azimuth, elevation, and range. The tracker receives only simulated sector
-levels. It does not receive the known trajectory coordinates.
+| Tab | Steps | Levels come from |
+| --- | --- | --- |
+| `Emulator` | Pick a flight profile and speed, then `Start emulator` | A simulated flight and a Gaussian beam model; no room acoustics |
+| `Acoustic room` | Pick a scenario, `Prepare scene` (9-94 s the first time, then cached under `.cache/heimdall_acoustic/`), then `Start acoustic emulator` | A room simulation of the 44 microphones with the deployed delays |
 
-| Profile | Nominal 1x behavior |
-| --- | --- |
-| Crossing pass | Smooth lateral pass, approximately 14 m/s and 36-60 m range. |
-| Approach and retreat | Closing/receding path, approximately 13 m/s and 16-83 m range. |
-| Orbit | Smooth offset orbit, approximately 9 m/s and 27-52 m range. |
-| Patrol | Slower multi-axis route, approximately 8 m/s and 31-68 m range. |
-| Evasive stress | Multi-frequency maneuvers up to approximately 27 m/s, wide angular motion, and a 0.9 s acoustic dropout every 17 profile seconds. |
-| Legacy angular sweep | Original fixed-range sinusoidal motion for regression comparison. |
-
-`Flight speed` scales trajectory time. At 2x, speeds double and evasive dropout
-intervals/durations halve in wall-clock time. Received pressure uses a simplified
-$1/r$ amplitude law referenced to 30 m and capped at close range. This is a
-tracking stress model, not a room-acoustics or drone-signature simulation.
-
-### Cached acoustic emulator
-
-The connection panel's `Acoustic room` tab offers the cached acoustic emulator. It replaces the fast Gaussian level provider with cached detector
-levels generated from `drone.wav`, `crowd.wav`, a 48 kHz room model, the exact
-44-microphone DSP-order geometry, the deployed beam table delays, and the
-intended 1-4 kHz detector band-pass. It still uses the same firmware-equivalent
-commands and adaptive state machine.
-
-The detector band-pass is modeled as two 129-tap linear-phase FIR stages: a
-1 kHz high-pass followed by a 4 kHz low-pass. It is applied to drone, crowd, and
-speech energy before RMS envelope generation and therefore before the MAX78002
-emulator receives detector values. The current SigmaStudio export does not
-match this intended configuration: both FIR blocks are marked bypass-enabled
-and both exported coefficient arrays are low-pass kernels. Regenerate and
-deploy the ADAU1467 project with an enabled high-pass/low-pass pair before using
-the acoustic result as exact hardware-filter parity.
-
-Available scenarios:
-
-| Scenario | Contents |
-| --- | --- |
-| Conference room · evasive 2x | 20 x 40 x 10 m, vertical array at `[10, 0.5, 1]` m, RT60 1.2 s, 30-second room-bounded evasive loop, 12-direction diffuse crowd, and an off-axis speech source at +25 degrees / 12 m / 1.5 m high. |
-| Handheld 2 m · drone only | Drone speaker follows a slow 12-second XZ figure-eight at fixed global Y=2.5 m: 2 m broadside depth, +/-0.75 m lateral travel, 1.2-2.0 m height, no crowd or speech. |
-| Handheld 2 m · crowd + speech | Identical fixed-depth handheld motion with the conference crowd field and directional speech source enabled. |
-| Stationary speaker · broadside 2 m | Drone recording only, broadside at 2 m, using its time-averaged spectrum for repeatable sequential sector comparison with the physical speaker setup. |
-
-Select a scenario and click `Prepare scene`. The first conference preparation
-took 57-88 seconds on the development machine; stationary preparation took
-9-14 seconds. The 16-waypoint handheld caches took 60 seconds drone-only and
-94 seconds mixed. Completed caches are content-addressed under
-`.cache/heimdall_acoustic/`, are approximately 1.18 MB each, and reload in tens
-of milliseconds. Preparation reports stage, overall progress, and RIR ETA and
-can be canceled between RIR calculations.
-
-Rows, columns, and azimuth/elevation FOV are adjustable from 1x1 through 20x20
-for both simulator models. The default 7x7, ±40° acoustic grid uses the exact
-deployed delay table; the footer then reads "acoustic room with the firmware
-delays". Other acoustic grids generate quantized simulation-only delays ("acoustic
-room with simulated delays"); they
-do not modify firmware or the serial Connect path. Room propagation is cached
-separately from beam projection, so changing only grid/FOV reuses the expensive
-RIR result. Measured stationary reprojection took about 0.4 s for 9x11 and 1.0 s
-for 20x20 after a 3.0 s room build.
-
-The fixed-depth handheld diagnostic preserves the real sequential sector scan.
-With the 2.8 ms emulator sector time, the completed 49-sector sweeps localized
-within one grid cell of scenario truth in 85.8% of drone-only sweeps and 79.8%
-of mixed crowd/speech sweeps. Coherent all-sector reference frames scored 98.2%
-and 91.4%, respectively. The source remained at 2 m broadside depth; its true
-slant range varied from 2.05 to 2.30 m as it moved laterally and vertically.
-In browser acceptance, 12 consecutive adaptive Track samples stayed within one
-grid cell for both variants, with median center-angle errors of 7.0 degrees
-drone-only and 8.6 degrees mixed.
-
-After the scene is ready, click `Start acoustic emulator`, then use `Live`, the
-diagnostic scans, `Stop` and the `Manual beam` drawer as usual.
-
-The Hardware view keeps grid ownership explicit. The fast kinematic emulator
-can use an arbitrary 1-20 row/column grid and FOV. Acoustic mode fixes the grid
-chosen when the scene was prepared, and the default 7x7 grid comes from the
-generated deployment contract. Serial mode is also read-only because the
-connected firmware reports the grid compiled into its beam table; changing it
-requires regenerating the table and reflashing the device.
-
-Emulators also list the true source direction in the `Diagnostics` drawer and show a green
-cross on the map (a green marker in 3D). It follows the same cache clock and interpolated room-response
-waypoints as the detector levels, together with the angular error of the
-current measured solution. This truth is emulator-only and is never fed to the
-firmware-equivalent tracker.
-
-`Listen` (Diagnostics drawer, acoustic emulator only) renders a jointly normalized 3-second comparison at the
-current scene time. Available outputs are the generated filtered mix, one room
-microphone, the unsteered 44-microphone sum, a truth-steered beam, and the
-currently selected/tracked beam. Rendering uses the cached complex microphone
-transfer data and is a simulator diagnostic; it does not claim sample-exact
-ADAU1467 output. The shared gain preserves relative loudness between clips.
-
-The room model uses native 48 kHz audio, polyphase resampling, order-2 geometric
-early reflections, and a deterministic diffuse tail calibrated to approximately
-RT60 1.2 s. It evaluates all sectors from the same acoustic scene; sectors are
-not separate virtual sources. The conference cache measured RT60 1.18 s and the
-stationary cache 1.20 s in the final build.
-
-Absolute SPL-to-ADAU1467 digital scaling remains nominal. The acoustic emulator
-is useful for relative sector ranking, reflection/interference stress, and
-tracking behavior, but it is not calibrated for detection range or probability.
-Its moving-source response interpolates cached waypoint power responses and does
-not reproduce continuous Doppler phase.
-
-The Hardware tab can also start or replace the emulator at runtime without
-restarting the backend.
-
-The `Emulator` tab of the connection panel sets 1-20 rows and columns plus
-azimuth/elevation limits. These use the same cell-center convention
-as `beamforming_mathematics/hemisphere_scan_visualizer.py`, so they are useful
-for testing candidate table layouts before generating firmware coefficients.
-
-`Hold beam` (`Manual beam` drawer) steers once and repeatedly issues `M` at 10,
-20, or 50 Hz (`Re-read`). Only the held sector updates because the beam remains
-fixed. `Release` ends it; starting Live, a scan, clicking a sector tile, or
-disconnecting also stops it.
-
-The Source panel tags the answer `LOCKED` (a tracked or Live target), `HOLDING`
-(a fixed beam) or `STRONGEST` (the strongest cell of a scan). Faded, hatched
-sector cells are more than five seconds old; an old cell is not a current
-detection. `Above background` is the level above the median of the map it came
-from, not a statistical confidence value. The system estimates direction only
-and does not estimate range.
-
-The `Floor` control is an absolute dBFS colour floor with 0 dBFS as the hot
-end of the scale. The display does not normalize every frame to its own peak;
-uniformly weak measurements and evasive-profile dropouts therefore remain dark
-instead of appearing as a false full-grid detection.
-
-`Freeze display` (Diagnostics drawer) pauses WebSocket presentation only. Firmware or emulator work
-continues; use `Stop` to send the firmware `X` command. Disconnect and transport
-replacement also attempt a best-effort `X` before closing the link.
-
-## Serial Hardware
-
-Start the backend normally, open the Hardware tab, pick the port from the list
-(filled from the read-only `/hw_ports` endpoint; `Rescan` refreshes it, and
-`Type a port name…` allows manual entry), select 921600 or 115200 baud to match
-the firmware build, and click `Connect`. No other
-serial terminal may hold that COM port. Serial transports can be replaced at
-runtime through `/hw_connect`; the simulation backend does not restart.
-
-The host sends `I` on connection so a late GUI receives:
-
-```text
-READY,2D,<rows>,<columns>,<sectors>,<microphones>
-AZIMUTH,<count>,...
-ELEVATION,<count>,...
-DSP,<program>,<per_mic|lut>,<steer_words>,<read>,<matched>,<code>
-TAPER,<sigma_milli>,<written>,<verified>,<code>
-TABLES,<words>,<written>,<verified>,<code>
-```
-
-`DSP` is the firmware's check that the ADAU1467 runs the program it was built
-for. On a mismatch it writes nothing and refuses to steer: the Hardware footer
-reports the mismatch, and the Study screen locks its writes because the register
-map does not apply. `TAPER` is the per-microphone gains it writes at boot and on
-every `I` (compiled gain times taper, read back); anything other than all 44
-verified with code 0 is flagged as "taper not in place". `TABLES` is the
-lookup-table load of a lookup-table program (`0,0,0,0` otherwise). The emulators
-print the same records for the selected program.
-
-The UI supports generated grids up to 20x20 and forwards `S/F/C/G/X/I/M/R/D` firmware
-commands over the existing `/realtime_hw` WebSocket.
-
-The Hardware Audio panel provides `Record` / `Stop` and
-`Save WAV` for serial hardware. `Save WAV` stops a running scan first, then
-downloads. Firmware captures 48 kHz stereo PCM16 through the onboard MAX9867,
-buffers up to 30 seconds in APS6404, and transfers finalized audio with exact
-byte framing and CRC32. The backend packages verified PCM as a stereo WAV with
-a JSON sidecar.
-
-### Selected DSP program
-
-The backend follows the DSP program the firmware is built for:
-`HEIMDALL_DSP_EXPORT` from the environment, else its default in
-`../MAX78002/project.mk` (a folder name inside `MAX78002`, or a path). From that
-folder it reads the beam table contract `beam_table_2d.json` (array layout,
-delays, taper, the program the emulators report), the SigmaStudio export (Study
-register map), and `beam_table_2d.h` (hash check). Restart the backend after
-changing the selection.
-
-The acoustic emulator refuses to start if the contract's recorded C-header hash
-differs from the `beam_table_2d.h` next to it (the header is LF-normalised
-before hashing, so Windows CRLF checkouts match). Regenerate both together with
-the sibling `beamforming_mathematics` generator after changing the table.
-
-To test a layout on real hardware, generate the table into the export folder,
-build and flash the firmware, and reconnect. The firmware `I` response makes the
-GUI adopt the new rows, columns, and center angles automatically.
+Both use the selected DSP export and default to the deployed 7 x 7 grid over +-40 deg.
+`sim_server.py --emulator` instead starts a generic emulator with the backend (7 x 7 over +-70
+deg azimuth and +-60 deg elevation, generic per-microphone program). Flight profiles, scenarios
+and the limits of both models are in
+[docs/SIMULATOR.md section 5](docs/SIMULATOR.md#5-hardware-free-emulators).
 
 ## Study
 
-`#study` is for characterising the array without reflashing. It has two parts.
+- **Parameters.** The backend turns the SigmaStudio export into a register map
+  (`dsp_registry.py`) served at `/dsp/registry`. Editors stage a gain taper and microphone
+  mutes, FIR presets, the scan detector's time constant, hold and decay, and single raw words.
+  Nothing is written until `Apply`, which needs the `Enable writes` switch and an idle device.
+  Writes are checked against the firmware's map hash and go out as safeloads of at most five
+  consecutive words ([REFERENCE.md section 4.12](../MAX78002/docs/REFERENCE.md#412-parameter-access-pw-pr-and-its-gates)).
+- **Measurements.** Guided procedures (microphone survey, beam cut, detector time constant,
+  steering accuracy, array gain, SNR, width, dynamic range, detection range, detector scale)
+  save their runs with the settings, map hash and grid and export CSV and JSON. They use 5 ms
+  windows and suit quick checks; the scripts below are the reference method.
 
-**Parameters.** The backend parses the SigmaStudio export of the selected
-program (see above)
-into a register map (`dsp_registry.py`, schema `heimdall-dsp-registry-v1`) and
-serves it at `/dsp/registry`. The screen lists every block, and its editors
-stage words for a gain taper and per-microphone mutes, FIR presets, the level
-detector (time constant, hold, decay) and single raw words; the firmware settle
-time is a separate `SET` setting. Nothing is written until `Apply`, which needs
-the `Enable writes` switch and an idle device. The planner batches only
-addresses that are really consecutive (at most five words per safeload
-command); SigmaStudio does not guarantee that blocks of one kind are contiguous.
-History (with Revert) lives in the session; snapshots stay in the browser. While
-the device differs from the flashed program, Hardware shows a banner.
+## Scripts
 
-**Measurements.** Guided procedures that hold a beam and poll `M`: SNR (source
-on/off), main-lobe width by moving the source, a detector scale check, dynamic
-range and a detection-range estimate. They use only existing commands. SNR,
-width and dynamic range measure with MCU windows; the scale check measures the
-DSP detector against its floor. Runs are kept in the browser and export as CSV
-with the device, register-map hash and the settings the captures used.
-
-**Device support.** The emulators implement the proposed parameter commands
-through `/dsp/write`, `/dsp/read`, `/dsp/memory` and `/dsp/set` (their levels do
-not react to the parameters yet). Serial hardware is reported as unsupported
-until the firmware implements protocol v3; the proposal is in
-`docs/study-protocol.md`.
+| Script | Purpose |
+| --- | --- |
+| `scripts/characterise.py` | The tests of the characterisation plan ([CHARACTERISATION_PLAN.md](../MAX78002/docs/CHARACTERISATION_PLAN.md)) |
+| `scripts/study_session.py` | Scripted health check (test H1) |
+| `scripts/board_regression.py` | Acceptance checks on the board, and the soak test |
+| `run_comparison.py` | Batch sweep of the acoustic simulator ([docs/SIMULATOR.md](docs/SIMULATOR.md)) |
 
 ## Tests
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q tests
-
-cd app
-npm.cmd run build
+.\.venv\Scripts\python.exe -m pytest -q
+cd app; npm.cmd test; npm.cmd run build
 ```
 
-The backend tests cover strict protocol parsing, dynamic dimensions, emulator
-commands, FastAPI lifecycle, and WebSocket frames.
+## Documents
 
-Browser mode is the supported development and hardware bring-up path because
-backend logs and failures are directly visible.
-
-If `app/dist` is already current, Node.js is not required at runtime. Serve the
-built frontend in a second terminal:
-
-```powershell
-.\.venv\Scripts\python.exe -m http.server 8080 --directory app\dist
-```
+- [docs/SIMULATOR.md](docs/SIMULATOR.md): the acoustic simulator and the emulators, what they
+  model and how far to trust them.
+- `docs/archive/`: the early geometry comparison study and old plans, kept for reference.

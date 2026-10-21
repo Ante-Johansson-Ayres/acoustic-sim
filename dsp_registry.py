@@ -10,8 +10,8 @@ are NOT guaranteed to be contiguous or to increase by one, so the planner only
 batches words whose addresses are actually consecutive, at most five per
 command (the ADAU1467 safeload block size), and otherwise writes single words.
 
-The PW/PR/SET device commands are a proposal (docs/study-protocol.md); the
-firmware does not implement them yet. The emulator does, through
+The PW/PR/SET device commands are described in MAX78002/docs/REFERENCE.md (section 4.12).
+The emulator implements them too, through
 DspParameterService, so the GUI can be developed end to end without hardware.
 """
 

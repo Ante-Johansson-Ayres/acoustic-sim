@@ -568,7 +568,7 @@ export function parametersScreen({canWrite}) {
       if (expanded) {
         if (g.writable_words === 0) {
           const reason = params[0]?.reason || 'read-only';
-          item.append(h('p', {class: 'note blocks__note'}, `Read-only: ${reason}.${g.key === 'delays' ? ' A host-steered fine sweep needs the firmware to accept delay writes while idle (see docs/study-protocol.md).' : ''}`));
+          item.append(h('p', {class: 'note blocks__note'}, `Read-only: ${reason}.${g.key === 'delays' ? ' A host-steered fine sweep needs the firmware to accept delay writes while idle.' : ''}`));
         } else {
           const rows = groupRows(g.key);
           const shown = state.showAll ? rows : rows.slice(0, 8);

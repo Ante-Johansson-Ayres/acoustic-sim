@@ -340,7 +340,7 @@ export function measurementsScreen({session}) {
     };
 
     if (!t.ready) {
-      put(body, header(t), h('p', {class: 'note is-warn'}, 'Not available yet: this procedure needs commands the firmware does not have. See docs/study-protocol.md.'));
+      put(body, header(t), h('p', {class: 'note is-warn'}, 'Not available yet: this procedure needs commands the firmware does not have. See MAX78002/docs/REFERENCE.md, section 4.5.'));
       return;
     }
 
