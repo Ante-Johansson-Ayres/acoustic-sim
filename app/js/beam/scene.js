@@ -9,6 +9,7 @@ import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
 import { deg } from '../shared/format.js';
+import { look, sceneColor } from '../shared/look.js';
 import { direction, toDb } from './pattern.js';
 
 const BR = 1.35;
@@ -26,7 +27,7 @@ export function unitOf(db) {
 
 export class PatternScene {
   constructor(container) {
-    this.viewport = new Viewport3D(container, {background: '#1a1c20', fov: 38});
+    this.viewport = new Viewport3D(container, {background: sceneColor('background', '#1a1c20'), fov: 38});
     this.labels = h('div', {class: 'scene-labels', 'aria-hidden': 'true'});
     container.append(this.labels);
     this.surface = new THREE.Group();
@@ -62,13 +63,13 @@ export class PatternScene {
       equator.push(toThree([Math.cos(a) * BR, Math.sin(a) * BR, 0]));
     }
     const ring = new THREE.Line(new THREE.BufferGeometry().setFromPoints(equator),
-      new THREE.LineDashedMaterial({color: 0x3a3f46, dashSize: 0.05, gapSize: 0.06}));
+      new THREE.LineDashedMaterial({color: sceneColor('line', 0x3a3f46), dashSize: 0.05, gapSize: 0.06}));
     ring.computeLineDistances();
     this.guides.add(ring);
     for (const [name, end] of [['x', [1.8, 0, 0]], ['y', [0, 1.8, 0]], ['z', [0, 0, 1.6]]]) {
       this.guides.add(new THREE.Line(
         new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), toThree(end)]),
-        new THREE.LineBasicMaterial({color: 0x878d94}),
+        new THREE.LineBasicMaterial({color: sceneColor('subtle', 0x878d94)}),
       ));
       this.label(name, toThree(end, 1.08), 'scene-label--muted');
     }
@@ -98,10 +99,12 @@ export class PatternScene {
     const nE = grid.el.length;
     const positions = new Float32Array(nA * nE * 3);
     const colors = new Float32Array(nA * nE * 3);
+    const units = new Float32Array(nA * nE);
     const color = new THREE.Color();
     for (let i = 0; i < nA; i++) {
       for (let j = 0; j < nE; j++) {
         const unit = unitOf(toDb(grid.values[i][j]));
+        units[i * nE + j] = unit;
         const p = toThree(direction(grid.az[i], grid.el[j]), Math.max(0.02, unit) * BR);
         const k = (i * nE + j) * 3;
         positions[k] = p.x; positions[k + 1] = p.y; positions[k + 2] = p.z;
@@ -119,11 +122,30 @@ export class PatternScene {
       }
     }
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geometry.setIndex(index);
+    if (look === 'panel') {
+      // The Panel look colours each quad flat by its mean gain, as its mockup: blended corners
+      // would smear the ink into the orange lobe.
+      const flatPositions = new Float32Array(index.length * 3);
+      const flatColors = new Float32Array(index.length * 3);
+      for (let q = 0; q < index.length; q += 6) {
+        const mean = (units[index[q]] + units[index[q + 1]] + units[index[q + 2]] + units[index[q + 5]]) / 4;
+        const rgb = rampColor(mean);
+        color.setRGB(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255, THREE.SRGBColorSpace);
+        for (let v = q; v < q + 6; v++) {
+          flatPositions.set(positions.subarray(index[v] * 3, index[v] * 3 + 3), v * 3);
+          flatColors[v * 3] = color.r; flatColors[v * 3 + 1] = color.g; flatColors[v * 3 + 2] = color.b;
+        }
+      }
+      geometry.setAttribute('position', new THREE.BufferAttribute(flatPositions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(flatColors, 3));
+    } else {
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geometry.setIndex(index);
+    }
+    // The Panel look draws the surface opaque, as its mockup: grey to ink, orange within 3 dB of the top.
     this.surface.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-      vertexColors: true, side: THREE.DoubleSide, transparent: true, opacity: 0.9,
+      vertexColors: true, side: THREE.DoubleSide, transparent: look !== 'panel', opacity: look === 'panel' ? 1 : 0.9,
     })));
 
     // Thin grid every 10° over the surface.
@@ -134,13 +156,13 @@ export class PatternScene {
     for (let i = 0; i < nA; i += stepA) for (let j = 0; j < nE - 1; j++) segments.push(vertex(i, j), vertex(i, j + 1));
     for (let j = 0; j < nE; j += stepE) for (let i = 0; i < nA - 1; i++) segments.push(vertex(i, j), vertex(i + 1, j));
     this.surface.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(segments),
-      new THREE.LineBasicMaterial({color: 0x1a1c20, transparent: true, opacity: 0.45})));
+      new THREE.LineBasicMaterial({color: sceneColor('mesh', sceneColor('background', 0x1a1c20)), transparent: true, opacity: 0.45})));
 
     let maxR = 0;
     for (const m of mics) maxR = Math.max(maxR, Math.hypot(m[0], m[1], m[2]));
     const scale = maxR > 0 ? 0.32 / maxR : 1;
     const dots = new THREE.InstancedMesh(new THREE.SphereGeometry(0.018, 10, 8),
-      new THREE.MeshBasicMaterial({color: 0xe9eaec}), mics.length);
+      new THREE.MeshBasicMaterial({color: sceneColor('text', 0xe9eaec)}), mics.length);
     const matrix = new THREE.Matrix4();
     mics.forEach((m, i) => {
       const p = toThree(m, scale);
@@ -151,8 +173,8 @@ export class PatternScene {
 
     const tip = toThree(direction(steerAz, steerEl), BR * 1.18);
     this.ray.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), tip]),
-      new THREE.LineBasicMaterial({color: 0x7aa7ff})));
-    const end = new THREE.Mesh(new THREE.SphereGeometry(0.035, 16, 12), new THREE.MeshBasicMaterial({color: 0x7aa7ff}));
+      new THREE.LineBasicMaterial({color: sceneColor('accent', 0x7aa7ff)})));
+    const end = new THREE.Mesh(new THREE.SphereGeometry(0.035, 16, 12), new THREE.MeshBasicMaterial({color: sceneColor('accent', 0x7aa7ff)}));
     end.position.copy(tip);
     this.ray.add(end);
     this.steerLabel.point = tip.clone().multiplyScalar(1.1);

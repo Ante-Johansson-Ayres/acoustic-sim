@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { levelToUnit, rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
+import { sceneColor } from '../shared/look.js';
 import { direction } from './geometry.js';
 import { cellDirection, gridDirection, gridPosition, median, surfaceUnit } from './field.js';
 import { DEPTH, PointStyle, SurfaceStyle, pinAt } from './fieldstyles.js';
@@ -34,8 +35,9 @@ export const CAMERA_VIEWS = {
   side: {yaw: 78, pitch: 8, distance: 11.5},
 };
 const COLORS = {
-  background: '#1d2025', line: '#2c3036', strong: '#3a3f47', subtle: '#80868e', text: '#eceef1',
-  accent: '#7aa7ff', ok: '#4cc38a', warn: '#e2b454',
+  background: sceneColor('background', '#1d2025'), line: sceneColor('line', '#2c3036'), strong: sceneColor('strong', '#3a3f47'),
+  subtle: sceneColor('subtle', '#80868e'), text: sceneColor('text', '#eceef1'), accent: sceneColor('accent', '#7aa7ff'),
+  ok: '#4cc38a', warn: '#e2b454', marker: sceneColor('marker', '#ffffff'),
 };
 
 const toScene = ([right, up, forward], radius = 1) => new THREE.Vector3(-right * radius, up * radius, forward * radius);
@@ -322,8 +324,8 @@ export class FieldScene {
       this.marks.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(outlinePoints(hovered.bounds, RADIUS * 0.985)),
         new THREE.LineBasicMaterial({color: COLORS.text})));
     }
-    if (tiles && marker?.cell) outline(marker.cell, marker.kind === 'beam' ? COLORS.accent : '#ffffff');
-    else if (tiles && field.strongest) outline(field.strongest, '#ffffff', 0.007);
+    if (tiles && marker?.cell) outline(marker.cell, marker.kind === 'beam' ? COLORS.accent : COLORS.marker);
+    else if (tiles && field.strongest) outline(field.strongest, COLORS.marker, 0.007);
 
     if (marker && Number.isFinite(marker.azimuth) && Number.isFinite(marker.elevation)) {
       let reach = RADIUS * 0.985;
@@ -342,9 +344,9 @@ export class FieldScene {
         mesh.position.copy(tip).multiplyScalar(0.5);
         mesh.quaternion.setFromUnitVectors(up, along);
       }
-      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 12), flat('#ffffff'));
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 12), flat(COLORS.marker));
       dot.position.copy(tip);
-      const ring = new THREE.Mesh(new THREE.RingGeometry(0.08, 0.1, 48), flat('#ffffff'));
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.08, 0.1, 48), flat(COLORS.marker));
       ring.position.copy(tip);
       ring.lookAt(0, 0, 0);
       this.marks.add(beam, cone, dot, ring);

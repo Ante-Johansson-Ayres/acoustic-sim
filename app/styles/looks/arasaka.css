@@ -1,4 +1,212 @@
-/* Arasaka look (?look=arasaka): black and red (#F2122A); Workbench, Silkscreen, Sixtyfour, DotGothic16. Loaded only with the flag. */
+/* Arasaka look (?look=arasaka): black and red (#F2122A). Workbench for titles and keys, Silkscreen
+   for small labels, DotGothic16 for text and numbers (the dotted zeros of Workbench and Sixtyfour
+   read as eights). Loaded only with the flag (js/looks/arasaka.js). It re-maps the app's tokens, then
+   dresses the existing controls as the canvas mockups: chamfered keys, red bracket corners on the
+   views, a faint red grid behind everything and a dark curved-screen edge. */
+
+/* Workbench without its digits and degree sign (its zero reads as an eight, its degree as a box):
+   those fall through to DotGothic16. */
+@font-face {
+  font-family: 'Workbench Letters';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../../node_modules/@fontsource/workbench/files/workbench-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-002F, U+003A-00AF, U+00B1-10FFFF;
+}
+
+.look-arasaka,
+.look-arasaka .theme-exhibit {
+  --bg: #07080a;
+  --surface: #171719;
+  --raised: #2b2b2c;
+  --line: rgba(233, 227, 220, 0.16);
+  --line-strong: rgba(233, 227, 220, 0.3);
+  --well: #0b0a0c;
+  --text: #e9e3dc;
+  --muted: #a19d99;
+  --subtle: #8a8682;
+  --accent: #f2122a;
+  --on-accent: #07080a;
+  --ok: #7bd88f;
+  --danger: #ff7a70;
+  --warn: #e2b454;
+  --series-2: #e9e3dc;
+  --font-sans: 'DotGothic16', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'DotGothic16', ui-monospace, monospace;
+  --font-display: 'Workbench Letters', 'DotGothic16', system-ui, sans-serif;
+  --font-label: 'Silkscreen', 'DotGothic16', monospace;
+  --radius-sm: 0;
+  --radius: 0;
+  --chamfer: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px);
+  --brackets:
+    linear-gradient(#f2122a, #f2122a) top left / 12px 2px no-repeat, linear-gradient(#f2122a, #f2122a) top left / 2px 12px no-repeat,
+    linear-gradient(#f2122a, #f2122a) top right / 12px 2px no-repeat, linear-gradient(#f2122a, #f2122a) top right / 2px 12px no-repeat,
+    linear-gradient(#f2122a, #f2122a) bottom left / 12px 2px no-repeat, linear-gradient(#f2122a, #f2122a) bottom left / 2px 12px no-repeat,
+    linear-gradient(#f2122a, #f2122a) bottom right / 12px 2px no-repeat, linear-gradient(#f2122a, #f2122a) bottom right / 2px 12px no-repeat;
+}
+
+/* Silkscreen is a bitmap face: under about 12 screen pixels its gaps fill in (LOCKED reads LOOKED).
+   arasaka.js sets this class when the 10 px labels would land that small, and they use DotGothic16. */
+.look-arasaka--small,
+.look-arasaka--small .theme-exhibit { --font-label: 'DotGothic16', monospace; }
+
+/* One weight per font: never fake bold. */
+.look-arasaka { color-scheme: dark; font-synthesis: none; }
+.look-arasaka body,
+.look-arasaka body.is-exhibit { background: #07080a; }
+
+/* The faint red grid behind the app and the dark curved-screen edge over it (static, drawn once). */
+.look-arasaka .app {
+  position: relative;
+  background-color: #07080a;
+  background-image: linear-gradient(rgba(242, 18, 42, 0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(242, 18, 42, 0.06) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.look-arasaka .app::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  border-radius: 28px / 22px;
+  box-shadow: 0 0 0 60px #000000, inset 0 0 70px 8px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(242, 18, 42, 0.18);
+}
+
+/* Header */
+.look-arasaka .app-brand { font-family: var(--font-display); font-weight: 400; letter-spacing: 0.14em; }
+.look-arasaka .app-brand small { font-family: var(--font-label); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.look-arasaka .app-nav { gap: 4px; align-self: center; }
+.look-arasaka .app-nav a {
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  clip-path: var(--chamfer);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.look-arasaka .app-nav a[aria-current="page"] { color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 400; }
+
+/* Keys: chamfered, Workbench; the one that is on is outlined red */
+.look-arasaka .btn,
+.look-arasaka .tab,
+.look-arasaka .ex-pill {
+  border: 0;
+  border-radius: 0;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  clip-path: var(--chamfer);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.look-arasaka .btn--quiet { background: transparent; box-shadow: none; color: var(--muted); }
+.look-arasaka .btn:hover:not(:disabled),
+.look-arasaka .tab:hover { filter: none; box-shadow: inset 0 0 0 1px var(--text); }
+.look-arasaka .btn[aria-pressed="true"],
+.look-arasaka .btn.is-active,
+.look-arasaka .tab[aria-pressed="true"] { background: rgba(242, 18, 42, 0.14); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); }
+.look-arasaka .btn--primary,
+.look-arasaka .ex-pill[aria-pressed="true"] { background: var(--accent); box-shadow: none; color: var(--on-accent); }
+.look-arasaka .tab::after { color: var(--muted); }
+
+/* LIVE and STOP: square keys (a glow cannot survive a chamfer clip); LIVE glows red while running */
+.look-arasaka .cmd {
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: var(--surface);
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  font-size: 15px;
+}
+.look-arasaka .cmd--live[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--on-accent); box-shadow: 0 0 16px rgba(242, 18, 42, 0.6); }
+.look-arasaka .cmd--live[aria-pressed="true"] i { box-shadow: none; }
+
+/* Segmented controls: separate outlined keys; the chosen one outlined red */
+.look-arasaka .seg { gap: 4px; padding: 0; border: 0; background: transparent; }
+.look-arasaka .hw-console .seg { padding: 0; }
+.look-arasaka .seg button { background: var(--surface); box-shadow: inset 0 0 0 1px var(--line-strong); clip-path: var(--chamfer); font-family: var(--font-display); font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+.look-arasaka .seg button[aria-pressed="true"],
+.look-arasaka .seg button[aria-selected="true"] { background: rgba(242, 18, 42, 0.14); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); }
+
+/* Fields */
+.look-arasaka .input,
+.look-arasaka .select { border-radius: 0; background: var(--bg); border-color: var(--line-strong); }
+.look-arasaka .slider__input,
+.look-arasaka .check input,
+.look-arasaka .radio-row input { accent-color: var(--accent); }
+
+/* Small labels in Silkscreen, titles in Workbench */
+.look-arasaka .hw-console .label,
+.look-arasaka .section__title,
+.look-arasaka .field > label,
+.look-arasaka .slider__head label,
+.look-arasaka .pick,
+.look-arasaka .stat__k,
+.look-arasaka .figure-label,
+.look-arasaka .line__k,
+.look-arasaka .radio-row legend,
+.look-arasaka .chip,
+.look-arasaka .tag,
+.look-arasaka .scene-label--name,
+.look-arasaka .scene-label--axis,
+.look-arasaka .fmap__ytext,
+.look-arasaka .fmap__xtitle,
+.look-arasaka .rail__vlabel {
+  font-family: var(--font-label);
+  font-weight: 400;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.look-arasaka .hw-console .label,
+.look-arasaka .section__title,
+.look-arasaka .bp-title,
+.look-arasaka .page-title { font-family: var(--font-display); font-weight: 400; font-size: 14px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text); }
+.look-arasaka .bp-title,
+.look-arasaka .page-title { font-size: 18px; }
+.look-arasaka .tag { border-radius: 0; }
+.look-arasaka .tag--accent { box-shadow: 0 0 10px rgba(242, 18, 42, 0.5); }
+.look-arasaka .ro__num { font-family: var(--font-display); font-weight: 400; color: var(--text); }
+.look-arasaka .answer__value,
+.look-arasaka .stat__v { font-weight: 400; }
+.look-arasaka .state b { font-family: var(--font-display); font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; }
+
+/* Views with red bracket corners */
+.look-arasaka .well,
+.look-arasaka .scene-box { border-radius: 0; box-shadow: inset 0 0 0 1px var(--line); }
+.look-arasaka .well::before,
+.look-arasaka .scene-box::before { content: ''; position: absolute; inset: 0; z-index: 4; pointer-events: none; background: var(--brackets); }
+.look-arasaka .menu__list { border-radius: 0; border-color: var(--accent); background: var(--surface); box-shadow: 0 0 18px rgba(242, 18, 42, 0.35); }
+.look-arasaka .menu__item { border-radius: 0; }
+.look-arasaka .well .scene-label--marker { border-radius: 0; background: rgba(7, 8, 10, 0.85); box-shadow: inset 0 0 0 1px var(--accent); color: var(--text); font-weight: 400; }
+.look-arasaka .events__item { border-left-width: 2px; }
+.look-arasaka .events__item.is-target b { text-shadow: 0 0 8px rgba(242, 18, 42, 0.6); }
+
+/* Map: outlines in red and pale ink rather than white */
+.look-arasaka .fmap__cell { border-radius: 0; }
+.look-arasaka .fmap__cell.is-strongest { box-shadow: inset 0 0 0 2px var(--text), 0 0 12px rgba(242, 18, 42, 0.6); }
+.look-arasaka .fmap__value { font-weight: 400; }
+
+/* Present (exhibit) */
+.look-arasaka .ex-title { font-family: var(--font-display); font-weight: 400; font-stretch: normal; letter-spacing: 0.14em; text-transform: uppercase; }
+.look-arasaka .ex-answer__label { font-family: var(--font-display); font-weight: 400; letter-spacing: 0.06em; text-transform: uppercase; }
+.look-arasaka .ex-answer__label.is-live { text-shadow: 0 0 10px rgba(242, 18, 42, 0.6); }
+.look-arasaka .ex-answer__big { font-family: var(--font-display); font-weight: 400; font-stretch: normal; letter-spacing: 0.02em; }
+.look-arasaka .ex-subtitle,
+.look-arasaka .ex-answer__detail { font-family: var(--font-sans); }
+.look-arasaka .ex-live { font-family: var(--font-label); font-size: 12px; font-weight: 400; letter-spacing: 0.08em; text-transform: uppercase; }
+.look-arasaka .ex-live__dot[data-state="online"] { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.look-arasaka .ex-pill { height: 56px; font-size: 19px; }
+.look-arasaka .ex-link { border-bottom-color: var(--accent); font-family: var(--font-display); font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; }
 
 .look-tag {
   display: inline-flex;
@@ -7,7 +215,7 @@
   padding: 0 8px;
   border: 1px dashed rgba(242, 18, 42, 0.5);
   color: #f2122a;
-  font-family: 'Silkscreen', monospace;
+  font-family: var(--font-label);
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;

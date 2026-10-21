@@ -18,7 +18,6 @@
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@fontsource/instrument-sans": "^5.3.0",
     "@fontsource/silkscreen": "^5.3.0",
-    "@fontsource/sixtyfour": "^5.3.0",
     "@fontsource/workbench": "^5.3.0",
     "three": "^0.184.0"
   }

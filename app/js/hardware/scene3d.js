@@ -13,6 +13,7 @@ import { Viewport3D, clearGroup } from '../shared/viewport3d.js';
 import { levelToUnit, rampColor } from '../shared/colormap.js';
 import { h, setText } from '../shared/dom.js';
 import { deg } from '../shared/format.js';
+import { sceneColor } from '../shared/look.js';
 import { angularEdges, direction } from './geometry.js';
 import { STALE_MS } from './session.js';
 
@@ -38,6 +39,13 @@ const THEMES = {
 
 const OK = new THREE.Color('#4cc38a');
 const WARN = new THREE.Color('#e2b454');
+const MARKER = sceneColor('marker', '#ffffff');
+
+/** A theme in the current look: its scene colours swapped for the look's (look.js); the ramp follows colormap.js. */
+function lookTheme(theme) {
+  return {...theme, background: sceneColor('background', theme.background), line: sceneColor('line', theme.line),
+    text: sceneColor('text', theme.text), accent: sceneColor('accent', theme.accent)};
+}
 
 function toScene(vec, radius = 1) {
   return new THREE.Vector3(-vec[0] * radius, vec[1] * radius, vec[2] * radius);
@@ -85,7 +93,7 @@ export class SectorScene {
     this.container = container;
     this.onPick = onPick;
     this.onHover = onHover;
-    this.theme = THEMES[theme] || THEMES.instrument;
+    this.theme = lookTheme(THEMES[theme] || THEMES.instrument);
     this.colors = {
       line: new THREE.Color(this.theme.line),
       text: new THREE.Color(this.theme.text),
@@ -272,18 +280,18 @@ export class SectorScene {
       const a = frame.azimuth_deg[marker.column];
       const e = frame.elevation_deg[marker.row];
       const tip = toScene(direction(a, e), RADIUS);
-      if (!steer) outline(marker.row, marker.column, new THREE.Color('#ffffff'));
+      if (!steer) outline(marker.row, marker.column, new THREE.Color(MARKER));
       const bearing = new THREE.Line(
         new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), tip]),
         new THREE.LineDashedMaterial({color: steer ? this.colors.accent : this.colors.text, dashSize: 0.06, gapSize: 0.06}),
       );
       bearing.computeLineDistances();
       this.pointer.add(bearing);
-      const dot = new THREE.Mesh(new THREE.SphereGeometry(this.theme.ring ? 0.018 : 0.022, 16, 12), new THREE.MeshBasicMaterial({color: 0xffffff}));
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(this.theme.ring ? 0.018 : 0.022, 16, 12), new THREE.MeshBasicMaterial({color: MARKER}));
       dot.position.copy(tip);
       this.pointer.add(dot);
       if (this.theme.ring) {
-        const ring = new THREE.Mesh(new THREE.RingGeometry(0.05, 0.062, 40), new THREE.MeshBasicMaterial({color: 0xffffff, side: THREE.DoubleSide}));
+        const ring = new THREE.Mesh(new THREE.RingGeometry(0.05, 0.062, 40), new THREE.MeshBasicMaterial({color: MARKER, side: THREE.DoubleSide}));
         ring.position.copy(tip);
         ring.lookAt(0, 0, 0);
         this.pointer.add(ring);
