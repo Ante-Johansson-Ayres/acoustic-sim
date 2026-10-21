@@ -1,0 +1,15 @@
+/* Panel look (?look=panel): light paper, ink, one orange (#EA5A00), DotGothic16. Loaded only with the flag. */
+
+.look-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px dashed rgba(17, 17, 17, 0.32);
+  border-radius: 6px;
+  color: #b34100;
+  font-family: 'DotGothic16', monospace;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}

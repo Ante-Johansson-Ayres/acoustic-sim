@@ -1,0 +1,14 @@
+/* Arasaka look (?look=arasaka): black and red (#F2122A); Workbench, Silkscreen, Sixtyfour, DotGothic16. Loaded only with the flag. */
+
+.look-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px dashed rgba(242, 18, 42, 0.5);
+  color: #f2122a;
+  font-family: 'Silkscreen', monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
