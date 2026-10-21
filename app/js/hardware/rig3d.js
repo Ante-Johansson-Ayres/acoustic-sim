@@ -1,7 +1,7 @@
 /**
  * rig3d.js — the Heimdall array as its real boards (arraydata.js: the hub and six petals with their silkscreen, standoffs and
  * microphones) on the CAD mount (FreeCAD Heimdall_GoPro_Mounts_V06 at true scale: the V plate on the hub's back, the 115 mm and
- * 130 mm extensions on GoPro knuckles, the V-slot block on a 2020 rail) standing on a desk, for the Hardware and Present 3D views.
+ * 130 mm extensions on GoPro knuckles, the V-slot block on a 2020 rail) on a desk top, for the Hardware and Present 3D views.
  * The app's own look draws it lit in its palette; the hidden looks (look.js) draw Panel's paper cards and Arasaka's dark hologram.
  * The parts come back grouped so build3d.js can animate them: hub, petals, microphones (in DSP channel order), the mount from
  * the plate down to the rail, the desk.
@@ -22,19 +22,19 @@ const PALETTES = {
   default: {
     lit: true, petal: '#30343b', hub: '#262a30', edge: '#80868e', edgeAlpha: 0.9, silk: '#9aa0a8', silkAlpha: 0.35,
     mic: '#eceef1', unused: '#80868e', standoff: '#9fa3a8', orange: '#e8742a', black: '#3c4048', alu: '#a3a8ae',
-    steel: '#d0d3d8', plate: '#3c4048', desk: '#3a3f47', leg: '#2c3036',
+    steel: '#d0d3d8', plate: '#3c4048', desk: '#3a3f47',
   },
   // Panel: paper cut-outs. White petals over a grey hub, a soft ink shadow behind each, faint silkscreen, ink microphones.
   panel: {
     lit: false, petal: '#ffffff', petalSide: '#c9c9c6', hub: '#d6d6d3', hubSide: '#b5b5b2', shadow: '#111111', shadowAlpha: 0.14,
     silk: '#111111', silkAlpha: 0.12, mic: '#111111', unused: '#111111', unusedAlpha: 0.35, standoff: '#a3a3a0', pen: '#111111',
-    orange: '#ea5a00', black: '#1c1c1c', alu: '#c9c9c6', steel: '#a3a3a0', plate: '#1c1c1c', desk: '#dcdcda', leg: '#b5b5b2',
+    orange: '#ea5a00', black: '#1c1c1c', alu: '#c9c9c6', steel: '#a3a3a0', plate: '#1c1c1c', desk: '#dcdcda',
   },
   // Arasaka: a dark hologram. Near-black boards with red edges, red silkscreen, pale microphones, two ghost outlines.
   arasaka: {
     lit: false, petal: '#240a0e', hub: '#16070a', edge: '#f2122a', edgeAlpha: 1, hubEdgeAlpha: 0.55, silk: '#f2122a', silkAlpha: 0.45,
     mic: '#e9e3dc', unused: '#f2122a', unusedAlpha: 0.5, standoff: '#2a0e12', ghost: '#f2122a', ghostAlpha: 0.35,
-    orange: '#f2122a', black: '#1a0a0d', alu: '#141416', steel: '#e9e3dc', plate: '#1a0a0d', desk: '#141416', leg: '#0c0c0e',
+    orange: '#f2122a', black: '#1a0a0d', alu: '#141416', steel: '#e9e3dc', plate: '#1a0a0d', desk: '#141416',
     partEdge: '#f2122a', partEdgeAlpha: 0.5,
   },
 };
@@ -66,18 +66,19 @@ export function channelOrder(positions, boardMics) {
 }
 
 /**
- * The rig for a look ('default', 'panel' or 'arasaka'), its desk standing on the floor at `floorY`. `layout` is the session's
- * array layout (contract positions in DSP order), used to number the microphones. Returns the group and its animatable parts.
+ * The rig for a look ('default', 'panel' or 'arasaka'). `layout` is the session's array layout (contract positions in DSP
+ * order), used to number the microphones; `floorY` is the scene's floor, where Arasaka's emitter lies. Returns the group and
+ * its animatable parts.
  */
 export function buildRig({look = 'default', layout = null, floorY = -2.45} = {}) {
   const C = PALETTES[look] || PALETTES.default;
   const group = new THREE.Group();
-  const own = look !== 'default';          // the hidden looks fade parts in during the build, so each part gets its own materials
+  // Every look fades the parts in during the 3D build (build3d.js), so each part has its own materials that can fade.
   const solid = (color, extra = {}) => (C.lit
-    ? new THREE.MeshLambertMaterial({color, ...extra})
-    : new THREE.MeshBasicMaterial({color, ...extra}));
-  const lambert = (color) => new THREE.MeshLambertMaterial({color, transparent: own});
-  const lineMat = (color, opacity = 1, extra = {}) => new THREE.LineBasicMaterial({color, transparent: own || opacity < 1, opacity, ...extra});
+    ? new THREE.MeshLambertMaterial({color, transparent: true, ...extra})
+    : new THREE.MeshBasicMaterial({color, transparent: true, ...extra}));
+  const lambert = (color) => new THREE.MeshLambertMaterial({color, transparent: true});
+  const lineMat = (color, opacity = 1, extra = {}) => new THREE.LineBasicMaterial({color, transparent: true, opacity, ...extra});
   const lines = (geometry, material) => new THREE.LineSegments(geometry, material);
   const edgesOf = (geometry, color, opacity, threshold = 30) => lines(new THREE.EdgesGeometry(geometry, threshold), lineMat(color, opacity));
 
@@ -97,8 +98,8 @@ export function buildRig({look = 'default', layout = null, floorY = -2.45} = {})
   const board = (parent, outline, holes, z, {cap, side, edge, edgeAlpha, dashed = false}) => {
     const geometry = new THREE.ExtrudeGeometry(shapeOf(outline, holes), {depth: 1.6 * MM, bevelEnabled: false, curveSegments: 4});
     const material = side
-      ? [new THREE.MeshBasicMaterial({color: cap, transparent: own}), new THREE.MeshBasicMaterial({color: side, transparent: own})]
-      : solid(cap, {transparent: own});
+      ? [new THREE.MeshBasicMaterial({color: cap, transparent: true}), new THREE.MeshBasicMaterial({color: side, transparent: true})]
+      : solid(cap, {transparent: true});
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.z = z;
     parent.add(mesh);
@@ -228,7 +229,7 @@ export function buildRig({look = 'default', layout = null, floorY = -2.45} = {})
   const unused = new THREE.Group();
   boardMics.forEach((m, i) => {
     if (taken.has(i)) return;
-    const r = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({color: C.unused, side: THREE.DoubleSide, transparent: own, opacity: C.unusedAlpha ?? 1}));
+    const r = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({color: C.unused, side: THREE.DoubleSide, transparent: true, opacity: C.unusedAlpha ?? 1}));
     r.position.set(-m.x * MM, m.y * MM, -0.4 * MM);
     unused.add(r);
   });
@@ -303,15 +304,13 @@ export function buildRig({look = 'default', layout = null, floorY = -2.45} = {})
   box(stages[3], 20 * MM, 20 * MM, zFront - (rz + 10 * MM), 0, deskTop + 10 * MM, (zFront + rz + 10 * MM) / 2, C.alu);   // rail forward
   group.add(...stages);
 
-  // Desk: a 0.8 × 0.5 m top, 25 mm thick, on legs down to the floor.
+  // Desk: a 0.8 × 0.5 m top, 25 mm thick, as a platform under the rail (no legs: at the scenes' floor depth they looked silly).
   const desk = new THREE.Group();
   const dz0 = -0.36;
   const dz1 = 0.16;
   const dx = 0.4;
   const top = 25 * MM;
   box(desk, 2 * dx, top, dz1 - dz0, 0, deskTop - top / 2, (dz0 + dz1) / 2, C.desk);
-  const legH = deskTop - top - floorY;
-  if (legH > 0) for (const x of [-dx + 0.03, dx - 0.03]) for (const z of [dz0 + 0.03, dz1 - 0.03]) box(desk, 0.03, legH, 0.03, x, floorY + legH / 2, z, C.leg);
   group.add(desk);
 
   // Arasaka: the emitter (the hub's octagon glowing on the floor under the desk) and the build's spark, which runs down the

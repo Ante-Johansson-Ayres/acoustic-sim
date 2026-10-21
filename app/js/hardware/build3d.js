@@ -1,6 +1,6 @@
 /**
- * build3d.js — the hidden looks' motion in the 3D views (Hardware and Present), on the canvas mockups' timelines (Main and
- * Arasaka boards, 2026-10-21), seconds from the start of the build:
+ * build3d.js — the motion in the 3D views (Hardware and Present), on the canvas mockups' timelines (Main and Arasaka boards,
+ * 2026-10-21), seconds from the start of the build:
  *
  * Panel, full (3.4 s): a pen draws the hub, then a petal every 0.11 s, and the paper lays in under each line; the mount joins
  * from the plate down to the rail from 1.15 s; the floor wakes at 1 s; the silkscreen at 1.3 s; tiles dither in column by
@@ -10,9 +10,13 @@
  * drawn at 1.3 s; then the chromatic pulse: the hologram's outline swells and splits at 2.9 s, a spark runs down the mount,
  * the floor grid lights in a ring spreading from the base at 3.08 s, the sectors flash row by row from the bottom at 3.4 s.
  *
+ * The app's own look (3.4 s) plays Arasaka's build without the chromatic pulse and without the emitter's ring: the user asked
+ * for Arasaka's animations there, minus those two (2026-10-21).
+ *
  * Quick (1 s, a tool switch: Map to 3D, or back from Present): the same steps overlapped, without the pulse.
  * Idle (nothing running): Panel's dotted sonar rings, a soft shade wave over the tiles and the microphones twinkling grey;
- * Arasaka's glow wave, the emitter's pulse ring and an occasional jitter. With prefers-reduced-motion nothing moves.
+ * Arasaka's glow wave, the emitter's pulse ring and an occasional jitter; the app's own look, Arasaka's without the ring.
+ * With prefers-reduced-motion nothing moves.
  */
 
 import * as THREE from 'three';
@@ -34,10 +38,17 @@ const ARASAKA = {
     rays: [0.3, 0.35], tips: 0.45,
     mount: [0.12, 0.12, 0.12, 0.12], mountFade: 0.3, split: null, chroma: null, spark: null, wave: null, hits: null, end: 1},
 };
+const DEFAULT = {
+  full: {...ARASAKA.full, pulse: null, split: null, chroma: null, spark: null, wave: null, hits: null, end: 3.4},
+  quick: ARASAKA.quick,
+};
+const TIMINGS = {panel: PANEL, arasaka: ARASAKA, default: DEFAULT};
 const MOTION = {
   panel: {ringPeriod: 3.2, wavePeriod: 3.2, waveAlpha: 0.14, twinkle: 5, flash: '#ea5a00', settle: '#111111', grey: '#a3a3a0'},
   arasaka: {pulsePeriod: 2.4, wavePeriod: 2.4, waveAlpha: 0.19, flash: '#f2122a', settle: '#e9e3dc', jitter: 5.3, flicker: 5},
+  default: {wavePeriod: 2.4, waveAlpha: 0.16, flash: '#7aa7ff', settle: '#eceef1', jitter: 5.3, flicker: 5},
 };
+const WHITE = new THREE.Color(0xffffff);
 const DOCK = 0.148;        // how far out a petal starts, metres (1.5 × the mockup's 34 px at its scale)
 const SPLIT = 0.017;       // the chromatic copies' sideways split, metres (6 px)
 
@@ -83,10 +94,40 @@ function fade(object, f) {
   object.visible = f > 0.001;
 }
 
-/** The floor is a shader: it fades through its own uniform. */
+/** The looks' floor is a shader that fades through its own uniform; the app's own is a grid of lines. */
 function floorFade(floor, f) {
-  floor.material.uniforms.uFade.value = f;
+  if (floor.material.uniforms) floor.material.uniforms.uFade.value = f;
+  else fade(floor, f);
   floor.visible = f > 0.001;
+}
+
+/**
+ * A tile as the motion moves it: the looks' shader tiles (look3d.js) through their uniforms, the app's own plain tiles through
+ * opacity and colour on top of what the scene last set for its data (mesh.userData.opacity and .color).
+ */
+export function tileHandle(mesh, halo = null) {
+  const u = mesh.material.uniforms;
+  const d = mesh.userData;
+  const plain = () => {
+    mesh.material.opacity = (d.opacity ?? 1) * (d.fadeIn ?? 1);
+    if (d.color) mesh.material.color.copy(d.color).lerp(WHITE, d.wave ?? 0);
+  };
+  return {
+    column: d.column,
+    row: d.row,
+    fade(f) {
+      mesh.visible = f > 0.001;
+      if (u) u.uFadeIn.value = f;
+      else { d.fadeIn = f; plain(); }
+    },
+    wave(a) {
+      if (u) u.uWave.value.w = a;
+      else { d.wave = a; plain(); }
+    },
+    mask(m) { if (u) u.uMask.value = m; },
+    flash(f) { if (u) u.uFlash.value = f; },
+    haloFade(f) { if (halo) halo.material.uniforms.uOpacity.value = f; },
+  };
 }
 
 /** Draw closed line strips on from their start: the pen (Panel) and the ghost outlines (Arasaka). */
@@ -97,8 +138,8 @@ function drawOn(object, f) {
 
 export class Motion {
   /**
-   * scene: {look, viewport, parts: () => ({rig, floor, tiles: [{material, halo, column, row}], columns, rows, marks: [Object3D],
-   * labels: [HTMLElement]}), reach: {wave, ring, pulse, jitter}} — the reaches in metres for this scene's size.
+   * scene: {look ('panel', 'arasaka' or 'default'), viewport, parts: () => ({rig, floor, tiles: [tileHandle], columns, rows,
+   * marks: [Object3D], labels: [HTMLElement]}), reach: {wave, ring, pulse, jitter}} — the reaches in metres for this scene's size.
    */
   constructor({look, viewport, parts, reach}) {
     this.look = look;
@@ -123,18 +164,23 @@ export class Motion {
   play(kind) {
     if (prefersReducedMotion()) return;
     const {renderer, scene, camera, canvas} = this.viewport;
-    const timing = (this.look === 'panel' ? PANEL : ARASAKA)[kind];
+    const timing = TIMINGS[this.look][kind];
     const hidden = [];
     scene.traverse((o) => { if (!o.visible) { hidden.push(o); o.visible = true; } });
     const materials = renderer.compile(scene, camera);
     for (const o of hidden) o.visible = false;
     canvas.style.visibility = 'hidden';
     // Wait for the programs (KHR_parallel_shader_compile), at most 0.6 s. Not three's compileAsync: the marker meshes are
-    // replaced with every data frame, and a material disposed while it waits leaves its promise unresolved.
-    const ready = () => [...materials].every((m) => {
-      const program = renderer.properties.get(m).currentProgram;
-      return !program || program.isReady();
-    });
+    // replaced with every data frame, and a material disposed while it waits leaves its promise unresolved. Only materials
+    // still in the scene are asked (a disposed one's program is gone).
+    const ready = () => {
+      const live = new Set();
+      scene.traverse((o) => { for (const m of [o.material].flat()) if (m) live.add(m); });
+      return [...materials].every((m) => {
+        const program = renderer.properties.get(m).currentProgram;
+        return !live.has(m) || !program || program.isReady();
+      });
+    };
     const asked = performance.now();
     const begin = () => {
       canvas.style.visibility = '';
@@ -162,11 +208,12 @@ export class Motion {
     return !(t >= T.m0) ? null : Math.min(count, Math.floor((t - T.m0) / T.mdt) + 1);
   }
 
-  /** Whether the view must redraw every frame: during a build, while idle, and around Arasaka's brief flickers. */
+  /** Whether the view must redraw every frame: during a build, while idle, and around the brief flickers (not Panel). */
   get running() {
     if (this.build || this.idle || this.waving) return true;
-    if (this.look !== 'arasaka' || prefersReducedMotion()) return false;
-    const phase = ((performance.now() / 1000 - this.clock0) / MOTION.arasaka.flicker) % 1;
+    const period = MOTION[this.look].flicker;
+    if (!period || prefersReducedMotion()) return false;
+    const phase = ((performance.now() / 1000 - this.clock0) / period) % 1;
     return (phase > 0.46 && phase < 0.5) || (phase > 0.7 && phase < 0.74);
   }
 
@@ -204,14 +251,13 @@ export class Motion {
     }
     if (p.floor) {
       floorFade(p.floor, 1);
-      p.floor.material.uniforms.uWave.value = 0;
+      if (p.floor.material.uniforms) p.floor.material.uniforms.uWave.value = 0;
     }
     for (const tile of p.tiles) {
-      const u = tile.material.uniforms;
-      u.uMask.value = 0;
-      u.uFadeIn.value = 1;
-      u.uFlash.value = 0;
-      if (tile.halo) tile.halo.material.uniforms.uOpacity.value = 1;
+      tile.mask(0);
+      tile.fade(1);
+      tile.flash(0);
+      tile.haloFade(1);
     }
     for (const mark of p.marks) { mark.scale.setScalar(1); fade(mark, 1); }
     for (const label of p.labels) if (label) label.style.opacity = '';
@@ -265,8 +311,8 @@ export class Motion {
     for (const tile of p.tiles) {
       const md = T.t0 + tile.column * T.dc + (p.rows - 1 - tile.row) * T.dr;
       const u = (t - md) / T.kd;
-      tile.material.uniforms.uMask.value = u < 0 ? 4 : u >= 1 ? 0 : 4 - Math.floor(u * 4);
-      if (tile.halo) tile.halo.material.uniforms.uOpacity.value = fadeIn(t, md + T.kd, 0.2);
+      tile.mask(u < 0 ? 4 : u >= 1 ? 0 : 4 - Math.floor(u * 4));
+      tile.haloFade(fadeIn(t, md + T.kd, 0.2));
     }
     this.marksAt(p, fadeIn(t, T.bm, 0.4));
   }
@@ -321,9 +367,9 @@ export class Motion {
         }
       }
     }
-    if (p.floor) {
+    if (p.floor) floorFade(p.floor, fadeIn(t, ...T.floor));
+    if (p.floor?.material.uniforms) {
       const u = p.floor.material.uniforms;
-      floorFade(p.floor, fadeIn(t, ...T.floor));
       const wave = T.wave ? (t - T.wave[0]) / T.wave[1] : -1;
       u.uWave.value = wave > 0 && wave < 1 ? (0.02 + 0.98 * wave) * this.reach.wave : 0;
       u.uWaveAlpha.value = wave < 0.04 ? wave / 0.04 : wave > 0.8 ? (1 - wave) / 0.2 : 1;
@@ -334,14 +380,14 @@ export class Motion {
     }
     const tiles = fadeIn(t, ...T.tiles);
     for (const tile of p.tiles) {
-      tile.material.uniforms.uFadeIn.value = tiles;
-      if (tile.halo) tile.halo.material.uniforms.uOpacity.value = tiles;
+      tile.fade(tiles);
+      tile.haloFade(tiles);
       let flash = 0;
       if (T.hits) {
         const u = (t - (T.hits[0] + tile.row * T.hits[1] / Math.max(1, p.rows - 1))) / T.hits[2];
         if (u > 0 && u < 1) flash = u < 0.25 ? u / 0.25 * 0.8 : u < 0.6 ? 0.8 - (u - 0.25) / 0.35 * 0.35 : 0.45 * (1 - (u - 0.6) / 0.4);
       }
-      tile.material.uniforms.uFlash.value = flash;
+      tile.flash(flash);
     }
     // Present's Beams display: the rays shoot out from the array, then their tips appear.
     if (p.rays) p.rays.scale.setScalar(Math.max(0.01, shoot(clamp((t - T.rays[0]) / T.rays[1]))));
@@ -362,8 +408,8 @@ export class Motion {
       const phase = ((t - Math.hypot(tile.column - centre[0], tile.row - centre[1]) * 0.3) / M.wavePeriod) % 1;
       return M.waveAlpha * (0.5 - 0.5 * Math.cos(2 * Math.PI * (phase < 0 ? phase + 1 : phase)));
     };
-    for (const tile of p.tiles) tile.material.uniforms.uWave.value.w = wave(tile);
-    const rings = p.floor?.material.uniforms.uRings.value;
+    for (const tile of p.tiles) tile.wave(wave(tile));
+    const rings = p.floor?.material.uniforms?.uRings.value;
     if (this.look === 'panel') {
       if (rings) {
         const ring = (k) => ((t / M.ringPeriod) + k * 0.5) % 1;
@@ -387,9 +433,12 @@ export class Motion {
       return;
     }
     // Arasaka: the emitter breathes and sends a pulse ring across the floor; the feed jitters now and then; the hologram flickers.
-    const pulse = (t / M.pulsePeriod) % 1;
-    if (rings) rings.set(idle ? (0.08 + 0.92 * easeOut(pulse)) * this.reach.pulse : 0, idle ? (pulse < 0.08 ? pulse / 0.08 : 1 - (pulse - 0.08) / 0.92) : 0, 0, 0);
-    if (parts?.emitter) fade(parts.emitter, idle ? 1 - 0.55 * (0.5 - 0.5 * Math.cos(2 * Math.PI * pulse)) : 1);
+    // The app's own look: the same without the emitter and its ring.
+    if (M.pulsePeriod) {
+      const pulse = (t / M.pulsePeriod) % 1;
+      if (rings) rings.set(idle ? (0.08 + 0.92 * easeOut(pulse)) * this.reach.pulse : 0, idle ? (pulse < 0.08 ? pulse / 0.08 : 1 - (pulse - 0.08) / 0.92) : 0, 0, 0);
+      if (parts?.emitter) fade(parts.emitter, idle ? 1 - 0.55 * (0.5 - 0.5 * Math.cos(2 * Math.PI * pulse)) : 1);
+    }
     const jitter = (t / M.jitter) % 1;
     this.viewport.scene.position.x = !idle ? 0 : jitter >= 0.89 && jitter < 0.905 ? this.reach.jitter : jitter >= 0.905 && jitter < 0.92 ? -0.75 * this.reach.jitter : 0;
     const flicker = (t / M.flicker) % 1;

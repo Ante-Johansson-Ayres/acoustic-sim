@@ -72,7 +72,7 @@ export function createView(container, {session, navigate}) {
   let visible = false;
   let miniKey = '';
   let miniCells = [];
-  let build = null;          // a hidden look plays its full 3D build every time Present opens
+  let build = null;          // the full 3D build plays every time Present opens
 
   import('../hardware/scene3d.js').then(({SectorScene}) => {
     scene = new SectorScene(stage, {theme: 'exhibit', beams: look === 'arasaka'});
@@ -179,7 +179,7 @@ export function createView(container, {session, navigate}) {
     }
   }
 
-  /** During a hidden look's build the answer counts the microphones in, in DSP channel order (an animation: no test runs). */
+  /** During the build the answer counts the microphones in, in DSP channel order (an animation: no test runs). */
   function showCount() {
     const channel = scene?.buildChannel?.();
     if (!channel) return false;
@@ -209,7 +209,7 @@ export function createView(container, {session, navigate}) {
   return {
     show() {
       visible = true;
-      if (look) build = 'full';
+      build = 'full';
       scene?.start();
       render();
     },

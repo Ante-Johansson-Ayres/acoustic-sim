@@ -33,5 +33,12 @@ test('a rig has its microphones in channel order, the 4 unused as rings, and the
     assert.equal(parts.ghosts.length, look === 'arasaka' ? 2 : 0);
     assert.equal(parts.chroma.length, look === 'arasaka' ? 3 : 0);
     assert.ok(joints.deskTop < joints.railTop && joints.railTop < joints.J3[0]);
+    // The desk is a top only: nothing of it reaches more than its 25 mm thickness below the rail.
+    parts.desk.updateMatrixWorld(true);
+    const lowest = Math.min(...parts.desk.children.filter((o) => o.isMesh).map((o) => {
+      o.geometry.computeBoundingBox();
+      return o.geometry.boundingBox.min.y + o.position.y;
+    }));
+    assert.ok(lowest > joints.deskTop - 0.026, `${look}: desk reaches ${lowest.toFixed(3)} m`);
   }
 });

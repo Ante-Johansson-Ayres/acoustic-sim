@@ -50,7 +50,7 @@ export function createView(container, {session}) {
   const prefs = {view: '3d', camera: 'behind', style: 'tiles', floor: -40, values: 'strongest', log: 'open', ...loadPrefs()};
   if (!['3d', 'map'].includes(prefs.view)) prefs.view = '3d';
   if (!STYLES.some(([key]) => key === prefs.style)) prefs.style = 'tiles';
-  // build: the hidden looks' 3D build waiting to play once the 3D view is on screen ('full' the first time, 'quick' after).
+  // build: the 3D build waiting to play once the 3D view is on screen ('full' the first time, 'quick' after).
   const state = {visible: false, kind: null, field: null, hover: null, tab: null, build: null, built: false};
 
   const acoustic = new AcousticScene();
@@ -208,9 +208,8 @@ export function createView(container, {session}) {
     render(true);
   }
 
-  /** Ask for a 3D build in a hidden look: the first one of the visit is always full. */
+  /** Ask for a 3D build: the first one of the visit is always full. */
   function want3d(kind) {
-    if (!look) return;
     state.build = state.built ? kind : 'full';
   }
 
@@ -394,7 +393,7 @@ export function createView(container, {session}) {
       scene3d?.render(field, {floor: prefs.floor, session, style: prefs.style, idle: mode === 'idle'});
       playBuild();
     }
-    // During a hidden look's build the azimuth board counts the microphones in, as the mockups.
+    // During a build the hidden looks' azimuth board counts the microphones in, as the mockups.
     state.answer = answer;
     const channel = prefs.view === '3d' ? scene3d?.buildChannel?.() : null;
     source.render(channel ? {...answer, counting: channel} : answer);

@@ -19,7 +19,7 @@ import { STALE_MS } from './session.js';
 import { buildRig } from './rig3d.js';
 import { HALO_OUTSET, floorMesh, haloMaterial, setHalo, setTile, tileMaterial } from './look3d.js';
 import { ditherStep, meterFill } from './lookparts.js';
-import { Motion, prefersReducedMotion } from './build3d.js';
+import { Motion, prefersReducedMotion, tileHandle } from './build3d.js';
 
 const RADIUS = 1.25;
 const TARGET = new THREE.Vector3(0, 0, 0.7);
@@ -145,15 +145,13 @@ export class SectorScene {
     this.labelNodes = [];
     this.markerLabel = null;
 
-    // The hidden looks' startup and idle motion (build3d.js); reaches scaled to this dome (1.25 m against Hardware's 3.5 m).
+    // Startup and idle motion in every look (build3d.js); reaches scaled to this dome (1.25 m against Hardware's 3.5 m).
     this.grid = {columns: 1, rows: 1};
-    this.motion = look ? new Motion({look, viewport: this.viewport, parts: () => this.motionParts(),
-      reach: {wave: 2.25, ring: 1.34, pulse: 0.68, jitter: 0.013}}) : null;
+    this.motion = new Motion({look: look || 'default', viewport: this.viewport, parts: () => this.motionParts(),
+      reach: {wave: 2.25, ring: 1.34, pulse: 0.68, jitter: 0.013}});
     this.sway = null;
-    if (this.motion) {
-      const building = this.viewport.animating;
-      this.viewport.animating = () => building() || this.swaying();
-    }
+    const building = this.viewport.animating;
+    this.viewport.animating = () => building() || this.swaying();
     this.viewport.onFrame = () => {
       if (this.swaying()) this.swayStep();
       this.motion?.apply();
@@ -182,7 +180,7 @@ export class SectorScene {
   start() { this.viewport.start(); }
   stop() { this.viewport.stop(); }
 
-  /** Play a hidden look's build: 'full' or 'quick'. Nothing in the app's own look. */
+  /** Play the 3D build: 'full' or 'quick'. */
   play(kind) { this.motion?.play(kind); }
 
   /** The microphone the build has reached (1–44), or null outside a build. */
@@ -194,7 +192,7 @@ export class SectorScene {
     return {
       rig: this.rig,
       floor: this.floorMesh,
-      tiles: this.tileMeshes.map((mesh, i) => ({material: mesh.material, halo: this.halos?.[i], column: mesh.userData.column, row: mesh.userData.row})),
+      tiles: this.tileMeshes.map((mesh, i) => tileHandle(mesh, this.halos?.[i])),
       columns: this.grid.columns,
       rows: this.grid.rows,
       marks: [this.pointer, this.highlights],
@@ -209,10 +207,10 @@ export class SectorScene {
     this.viewport.orbitTo(TARGET, {...view, distance: DISTANCE});
   }
 
-  /** Place the camera; in a hidden look it then sways slowly round that place until the view is dragged. */
+  /** Place the camera; it then sways slowly round that place until the view is dragged (Present's motion). */
   setOrbit(yaw, pitch, distance = DISTANCE) {
     this.viewport.orbitTo(TARGET, {yaw, pitch, distance});
-    if (this.motion) this.sway = {yaw, pitch, distance, t0: performance.now() / 1000, manual: false};
+    this.sway = {yaw, pitch, distance, t0: performance.now() / 1000, manual: false};
   }
 
   buildFloor() {
@@ -234,10 +232,11 @@ export class SectorScene {
       const z = near + i * ((far - near) / steps);
       points.push(new THREE.Vector3(-half, y, z), new THREE.Vector3(half, y, z));
     }
-    this.floor.add(new THREE.LineSegments(
-      new THREE.BufferGeometry().setFromPoints(points),
-      new THREE.LineBasicMaterial({color: this.colors.line}),
-    ));
+    // Fades in during the build, so transparent; drawn first, as when it was opaque.
+    this.floorMesh = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({color: this.colors.line, transparent: true}));
+    this.floorMesh.renderOrder = -1;
+    this.floor.add(this.floorMesh);
   }
 
   /** The array as its real boards on the CAD mount and desk (rig3d.js), standing on this scene's floor. */
@@ -273,7 +272,7 @@ export class SectorScene {
           tileGeometry(a0, a1, e0, e1, RADIUS),
           look ? tileMaterial(look) : new THREE.MeshBasicMaterial({color: this.colors.line, transparent: true, opacity: 0.95, side: THREE.DoubleSide}),
         );
-        mesh.userData = {row, column, sector: row * cfg.columns + column};
+        mesh.userData = {row, column, sector: row * cfg.columns + column, opacity: 0.95};
         this.tiles.add(mesh);
         this.tileMeshes.push(mesh);
         if (look) {
@@ -402,8 +401,11 @@ export class SectorScene {
         if (beams) this.halos[i].visible = false;
         return;
       }
-      mesh.material.color.copy(measured ? srgb(rampColor(levelToUnit(level, floor), this.theme.ramp)) : this.colors.line);
-      mesh.material.opacity = measured ? (fresh ? 0.96 : 0.38) : 0.35;
+      // Kept on the tile too: the build's fade and the idle glow wave go on top of them (build3d.js tileHandle).
+      mesh.userData.color = measured ? srgb(rampColor(levelToUnit(level, floor), this.theme.ramp)) : this.colors.line.clone();
+      mesh.userData.opacity = measured ? (fresh ? 0.96 : 0.38) : 0.35;
+      mesh.material.color.copy(mesh.userData.color);
+      mesh.material.opacity = mesh.userData.opacity;
     });
 
     clearGroup(this.highlights);

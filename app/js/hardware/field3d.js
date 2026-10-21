@@ -19,7 +19,7 @@ import { direction } from './geometry.js';
 import { buildRig } from './rig3d.js';
 import { HALO_OUTSET, floorMesh, haloMaterial, setHalo, setTile, tileMaterial } from './look3d.js';
 import { ditherStep, meterFill } from './lookparts.js';
-import { Motion } from './build3d.js';
+import { Motion, tileHandle } from './build3d.js';
 import { cellDirection, gridDirection, gridPosition, median, surfaceUnit } from './field.js';
 import { DEPTH, PointStyle, SurfaceStyle, pinAt } from './fieldstyles.js';
 
@@ -144,9 +144,9 @@ export class FieldScene {
     this.markerPoint = null;
     this.arrayPoint = new THREE.Vector3(-0.32, -0.12, 0);
 
-    // The hidden looks' startup and idle motion (build3d.js); reaches are metres in this scene (dome radius 3.5 m).
-    this.motion = look ? new Motion({look, viewport: this.viewport, parts: () => this.motionParts(),
-      reach: {wave: 6.3, ring: 3.75, pulse: 1.9, jitter: 0.036}}) : null;
+    // Startup and idle motion in every look (build3d.js); reaches are metres in this scene (dome radius 3.5 m).
+    this.motion = new Motion({look: look || 'default', viewport: this.viewport, parts: () => this.motionParts(),
+      reach: {wave: 6.3, ring: 3.75, pulse: 1.9, jitter: 0.036}});
     this.viewport.onFrame = () => {
       this.motion?.apply();
       this.placeLabels();
@@ -159,7 +159,7 @@ export class FieldScene {
   start() { this.viewport.start(); }
   stop() { this.viewport.stop(); }
 
-  /** Play a hidden look's build: 'full' or 'quick'. Nothing in the app's own look. */
+  /** Play the 3D build: 'full' or 'quick'. */
   play(kind) { this.motion?.play(kind); }
 
   /** The microphone the build has reached (1–44), or null outside a build. */
@@ -169,8 +169,7 @@ export class FieldScene {
     return {
       rig: this.rig,
       floor: this.floor,
-      tiles: this.tileMeshes.map((mesh) => ({material: mesh.material, halo: this.halos?.[mesh.userData.index],
-        column: mesh.userData.column, row: mesh.userData.row})),
+      tiles: this.tileMeshes.map((mesh) => tileHandle(mesh, this.halos?.[mesh.userData.index])),
       columns: this.field?.columns ?? 1,
       rows: this.field?.rows ?? 1,
       marks: [this.marks],
@@ -198,8 +197,11 @@ export class FieldScene {
       points.push(new THREE.Vector3(x, FLOOR_Y, -0.8), new THREE.Vector3(x, FLOOR_Y, 4.0),
         new THREE.Vector3(-3.2, FLOOR_Y, z), new THREE.Vector3(3.2, FLOOR_Y, z));
     }
-    this.room.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),
-      new THREE.LineBasicMaterial({color: COLORS.line})));
+    // Fades in during the build, so transparent; drawn first, as when it was opaque.
+    this.floor = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({color: COLORS.line, transparent: true}));
+    this.floor.renderOrder = -1;
+    this.room.add(this.floor);
   }
 
   /** The array as its real boards on the CAD mount and desk (rig3d.js), microphones numbered in the layout's DSP order. */
@@ -229,7 +231,7 @@ export class FieldScene {
         ? {...b, u0: b.u0 + gap / 2, u1: b.u1 - gap / 2, v0: b.v0 + gap / 2, v1: b.v1 - gap / 2}
         : {...b, a0: b.a0 + 0.6, a1: b.a1 - 0.6, e0: b.e0 + 0.6, e1: b.e1 - 0.6};
       const mesh = new THREE.Mesh(tileGeometry(inset), look ? tileMaterial(look) : flat(COLORS.line, {transparent: true, opacity: 0.95}));
-      mesh.userData = {index: cell.index, column: cell.column, row: cell.row};
+      mesh.userData = {index: cell.index, column: cell.column, row: cell.row, opacity: 0.95};
       this.tiles.add(mesh);
       this.tileMeshes.push(mesh);
       if (look) {
@@ -343,8 +345,11 @@ export class FieldScene {
       for (const mesh of this.tileMeshes) {
         const cell = field.cells[mesh.userData.index];
         const measured = Number.isFinite(cell.level);
-        mesh.material.color.copy(measured ? srgb(rampColor(levelToUnit(cell.level, floor))) : new THREE.Color(COLORS.line));
-        mesh.material.opacity = measured ? (cell.fresh ? 0.96 : 0.38) : 0.35;
+        // Kept on the tile too: the build's fade and the idle glow wave go on top of them (build3d.js tileHandle).
+        mesh.userData.color = measured ? srgb(rampColor(levelToUnit(cell.level, floor))) : new THREE.Color(COLORS.line);
+        mesh.userData.opacity = measured ? (cell.fresh ? 0.96 : 0.38) : 0.35;
+        mesh.material.color.copy(mesh.userData.color);
+        mesh.material.opacity = mesh.userData.opacity;
       }
     } else {
       this.styles[this.style].build(field);
