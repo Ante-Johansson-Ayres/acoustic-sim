@@ -15,7 +15,7 @@
  *
  * Quick (1 s, a tool switch: Map to 3D, or back from Present): the same steps overlapped, without the pulse.
  * Idle (nothing running): Panel's dotted sonar rings, a soft shade wave over the tiles and the microphones twinkling grey;
- * Arasaka's glow wave, the emitter's pulse ring and an occasional jitter; the app's own look, Arasaka's without the ring.
+ * Arasaka's glow wave, the emitter's pulse ring, an occasional jitter and a brief flicker; the app's own look, the glow wave only.
  * With prefers-reduced-motion nothing moves.
  */
 
@@ -46,7 +46,7 @@ const TIMINGS = {panel: PANEL, arasaka: ARASAKA, default: DEFAULT};
 const MOTION = {
   panel: {ringPeriod: 3.2, wavePeriod: 3.2, waveAlpha: 0.14, twinkle: 5, flash: '#ea5a00', settle: '#111111', grey: '#a3a3a0'},
   arasaka: {pulsePeriod: 2.4, wavePeriod: 2.4, waveAlpha: 0.19, flash: '#f2122a', settle: '#e9e3dc', jitter: 5.3, flicker: 5},
-  default: {wavePeriod: 2.4, waveAlpha: 0.16, flash: '#7aa7ff', settle: '#eceef1', jitter: 5.3, flicker: 5},
+  default: {wavePeriod: 2.4, waveAlpha: 0.16, flash: '#7aa7ff', settle: '#eceef1'},
 };
 const WHITE = new THREE.Color(0xffffff);
 const DOCK = 0.148;        // how far out a petal starts, metres (1.5 × the mockup's 34 px at its scale)
@@ -433,17 +433,19 @@ export class Motion {
       return;
     }
     // Arasaka: the emitter breathes and sends a pulse ring across the floor; the feed jitters now and then; the hologram flickers.
-    // The app's own look: the same without the emitter and its ring.
+    // The app's own look: the glow wave only (the user had the ring, the jitter and the flicker left out, 2026-10-21).
     if (M.pulsePeriod) {
       const pulse = (t / M.pulsePeriod) % 1;
       if (rings) rings.set(idle ? (0.08 + 0.92 * easeOut(pulse)) * this.reach.pulse : 0, idle ? (pulse < 0.08 ? pulse / 0.08 : 1 - (pulse - 0.08) / 0.92) : 0, 0, 0);
       if (parts?.emitter) fade(parts.emitter, idle ? 1 - 0.55 * (0.5 - 0.5 * Math.cos(2 * Math.PI * pulse)) : 1);
     }
-    const jitter = (t / M.jitter) % 1;
-    this.viewport.scene.position.x = !idle ? 0 : jitter >= 0.89 && jitter < 0.905 ? this.reach.jitter : jitter >= 0.905 && jitter < 0.92 ? -0.75 * this.reach.jitter : 0;
-    const flicker = (t / M.flicker) % 1;
-    const holo = flicker >= 0.47 && flicker < 0.49 ? 0.7 : flicker >= 0.71 && flicker < 0.73 ? 0.9 : 1;
-    if (parts) {
+    if (M.jitter) {
+      const jitter = (t / M.jitter) % 1;
+      this.viewport.scene.position.x = !idle ? 0 : jitter >= 0.89 && jitter < 0.905 ? this.reach.jitter : jitter >= 0.905 && jitter < 0.92 ? -0.75 * this.reach.jitter : 0;
+    }
+    if (M.flicker && parts) {
+      const flicker = (t / M.flicker) % 1;
+      const holo = flicker >= 0.47 && flicker < 0.49 ? 0.7 : flicker >= 0.71 && flicker < 0.73 ? 0.9 : 1;
       fade(parts.hub, holo);
       for (const petal of parts.petals) fade(petal, holo);
     }
