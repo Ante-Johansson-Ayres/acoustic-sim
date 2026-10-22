@@ -177,3 +177,12 @@ def test_parse_numbers_accepts_decimal_commas():
     for text, count in (("152,5,200,10", 3), ("abc", 1), ("5 x 4", 1), ("", 1)):
         with pytest.raises(ValueError):
             characterise.parse_numbers(text, count)
+
+
+def test_real_drift_ignores_reading_scatter():
+    rng = np.random.default_rng(1)
+    flagged = sum(characterise.real_drift(rng.normal(0.0, 0.3, 6), [0.3] * 6) for _ in range(2000))
+    assert flagged / 2000 < 0.02
+    assert characterise.real_drift(np.linspace(0.0, -1.0, 6), [0.1] * 6)
+    assert not characterise.real_drift(np.linspace(0.0, -0.4, 6), [0.01] * 6)
+    assert not characterise.real_drift([0.0], [0.1])

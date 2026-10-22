@@ -341,6 +341,18 @@ def axis_spec(axis, centre_az, centre_el, step, half):
     return centre_az, centre_az, 1, centre_el - half, centre_el + half, count
 
 
+def real_drift(values_db, errors_db, limit_db=0.5, z=2.326):
+    """True when reference readings change by more than limit_db and by more than their scatter explains.
+
+    Chi-square of the readings about their mean against the 99% point (Wilson-Hilferty, z = 2.326)."""
+    values, errors = np.asarray(values_db, float), np.maximum(np.asarray(errors_db, float), 1e-3)
+    if len(values) < 2 or np.ptp(values) <= limit_db:
+        return False
+    dof = len(values) - 1
+    chi2 = float(np.sum(((values - np.average(values, weights=errors ** -2)) / errors) ** 2))
+    return chi2 > dof * (1 - 2 / (9 * dof) + z * np.sqrt(2 / (9 * dof))) ** 3
+
+
 def measure_cut(session, axis, centre, step, half, signal, repeats, seconds, rng, label):
     """One silent pass, then shuffled repeats with the speaker on and the centre re-measured every 10
     points (its drift is corrected and reported). Signal = on minus off, in power."""
@@ -356,16 +368,18 @@ def measure_cut(session, axis, centre, step, half, signal, repeats, seconds, rng
     session.sound(None)
     off = np.array([capture(s, "silent", 0.5)["mean_db"] for s in range(n)])
     session.sound(signal)
-    levels, errors, drifts = [], [], []
+    levels, errors, drifts, real = [], [], [], []
     for repeat in range(repeats):
         order = [int(s) for s in rng.permutation(n)]
-        on, refs = {}, [(0, capture(middle, "reference", seconds)["mean_db"])]
+        on, refs = {}, [(0, capture(middle, "reference", seconds))]
         for i, s in enumerate(order):
             on[s] = capture(s, f"repeat {repeat + 1}", seconds)
             if (i + 1) % 10 == 0 or i + 1 == n:
-                refs.append((i + 1, capture(middle, "reference", seconds)["mean_db"]))
-        steps, values = zip(*refs)
+                refs.append((i + 1, capture(middle, "reference", seconds)))
+        steps = [i for i, _ in refs]
+        values = [c["mean_db"] for _, c in refs]
         drifts.append(float(max(values) - min(values)))
+        real.append(real_drift(values, [c["std_db"] / np.sqrt(c["n"]) for _, c in refs]))
         place = {s: i + 0.5 for i, s in enumerate(order)}
         levels.append([on[s]["mean_db"] - (np.interp(place[s], steps, values) - np.mean(values)) for s in range(n)])
         errors.append([on[s]["std_db"] / np.sqrt(on[s]["n"]) for s in range(n)])
@@ -379,7 +393,7 @@ def measure_cut(session, axis, centre, step, half, signal, repeats, seconds, rng
         mean = np.nanmean(runs, axis=0)
     snr = np.array([snr_db(np.mean(np.array(levels)[:, s]), off[s]) for s in range(n)])
     return {"angles": angles, "signal_db": mean, "se_db": np.fmax(within, np.nan_to_num(between)),
-            "snr_db": snr, "repeats_db": runs, "drift_db": drifts, "silent_db": off,
+            "snr_db": snr, "repeats_db": runs, "drift_db": drifts, "drift_real": real, "silent_db": off,
             "on_db": np.mean(np.array(levels), axis=0)}
 
 
@@ -472,6 +486,7 @@ def a3(session, args, out, array):
                 psl = sidelobe_bound(cut, centre_value, rel_model, db_model)
                 name = f"{band} {axis}"
                 results[name] = {"fit": fit, "sidelobe_bound_db": psl, "drift_db": cut["drift_db"],
+                                 "drift_real": cut["drift_real"],
                                  "angles": cut["angles"], "signal_db": cut["signal_db"], "se_db": cut["se_db"],
                                  "snr_db": cut["snr_db"]}
                 plots.append((name, cut, centre_value, rel_model, db_model, fit))
@@ -485,8 +500,9 @@ def a3(session, args, out, array):
                 session.report.info(f"A3 {name} peak", f"{fit['shift_deg']:+.2f} +- {fit['shift_sigma_deg']:.2f} deg "
                                     f"from the speaker; drift {max(cut['drift_db']):.2f} dB"
                                     + ("" if psl is None else f"; sidelobes <= {psl:.1f} dB (room-limited)"))
-                if max(cut["drift_db"]) > 0.5:
-                    session.report.info(f"A3 {name} drift", "over 0.5 dB: repeat this cut")
+                if any(cut["drift_real"]):
+                    session.report.info(f"A3 {name} drift", "over 0.5 dB and more than the reading scatter: "
+                                                            "repeat this cut")
     session.values["a3"] = {"speaker": {"azimuth_deg": az, "elevation_deg": el, "distance_m": distance},
                             "cuts": results}
     figure_cuts(plots, out)
