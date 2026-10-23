@@ -14,6 +14,7 @@ import { fileStamp } from '../shared/format.js';
 import { activeGrid, directionGridCommand, directionGridFailure, directionGridReady, gridMatches } from './dirgrid.js';
 import { median } from './field.js';
 import { outputReplyCode } from './replies.js';
+import { bandWav } from './listenfilter.js';
 
 export const STALE_MS = 5000;
 export const HISTORY_WINDOW_S = 30;
@@ -57,6 +58,7 @@ export class HardwareSession extends EventTarget {
     this.downloadRequested = false;
     this.downloadCommandSent = false;
     this.downloadStopSent = false;
+    this.bandCopy = false;            // also save the recording through the detector band
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
     this.lastMoveLogged = 0;
@@ -464,10 +466,17 @@ export class HardwareSession extends EventTarget {
       if (!audioResponse.ok) throw new Error(await audioResponse.text());
       if (!metadataResponse.ok) throw new Error(await metadataResponse.text());
       const stamp = fileStamp();
-      download(await audioResponse.blob(), `heimdall-${stamp}.wav`);
+      const audio = await audioResponse.blob();
+      download(audio, `heimdall-${stamp}.wav`);
+      if (this.bandCopy) {
+        download(new Blob([bandWav(await audio.arrayBuffer())], {type: 'audio/wav'}),
+          `heimdall-${stamp}-band-0.5-3.5kHz.wav`);
+      }
       download(new Blob([JSON.stringify(await metadataResponse.json(), null, 2) + '\n'],
         {type: 'application/json'}), `heimdall-${stamp}.json`);
-      this.addEvent('AUDIO', 'WAV and metadata saved and checksum-verified');
+      this.addEvent('AUDIO', this.bandCopy
+        ? 'WAV, detector-band copy and metadata saved and checksum-verified'
+        : 'WAV and metadata saved and checksum-verified');
     } catch (error) {
       this.addEvent('ERROR', `Saving the recording failed: ${error.message}`, 'error');
     }

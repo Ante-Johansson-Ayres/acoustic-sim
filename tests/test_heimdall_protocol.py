@@ -498,6 +498,7 @@ def test_emulator_detector_decays_only_for_the_settle_time_after_a_steer():
         parameter_service=service, program=DeployedProgram(level_time_constant_ms=10.0),
         clock=lambda: now[0],
     )
+    service.set(emulator, "measure", 0)
     service.set(emulator, "settle_us", 5000)
     emulator._measurement_level(0)
     now[0] = 1.0

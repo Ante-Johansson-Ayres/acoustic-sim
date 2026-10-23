@@ -118,6 +118,11 @@ export class AudioPanel {
     this.recLabel = h('span', {}, 'Record');
     this.recButton = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => session.toggleRecording()}, this.recIcon, this.recLabel);
     this.saveButton = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => session.requestDownload()}, 'Save WAV');
+    const bandBox = h('input', {type: 'checkbox', checked: session.bandCopy,
+      onChange: () => { session.bandCopy = bandBox.checked; }});
+    this.bandCopy = h('label', {class: 'check',
+      title: 'The beam outputs are full band (they feed the tonal detector and classification). The copy is ' +
+        'filtered as the detectors hear: 0.5-3.5 kHz.'}, bandBox, 'Also save a 0.5-3.5 kHz copy (as the detectors hear)');
     this.recText = h('p', {class: 'note'});
     this.recProgress = h('progress', {max: 1, value: 0, hidden: true});
     this.el = h('section', {class: 'panel audio', 'aria-labelledby': 'hw-audio-title'},
@@ -125,6 +130,7 @@ export class AudioPanel {
       h('div', {class: 'audio__body'},
         this.listen,
         h('div', {class: 'line'}, h('span', {class: 'line__k'}, 'Record'), this.recButton, this.saveButton),
+        this.bandCopy,
         this.recProgress,
         this.recText));
   }
