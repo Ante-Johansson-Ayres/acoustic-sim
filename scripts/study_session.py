@@ -209,7 +209,7 @@ class Session:
         board = self.board
         board.stop()
         columns = board.state["configuration"]["columns"]
-        # S's own reading starts 0.5 ms after the steer, inside the audio path's latency.
+        # S's own reading is not used: with a short guard it starts inside the audio path's latency.
         if self.read(f"S,{sector}") is None:
             raise RuntimeError(f"S,{sector} gave no reading ({board.state.get('last_error')})")
         levels, end = [], time.monotonic() + seconds

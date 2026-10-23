@@ -398,7 +398,8 @@ The fast emulator ([heimdall_transport.py](../heimdall_transport.py); `sim_serve
 or `Emulator` in the connection panel) calculates detector levels from a simulated flight. The
 levels come from a Gaussian beam response (σ = 18°) around the target direction, plus a little
 random noise. The amplitude is proportional to 1/r, referenced to 30 m, with a cap at close range.
-Each sector takes 2.8 ms. The grid can be 1×1 to 20×20 with any limits, with the cell-centre
+Each sector takes the guard plus the window (7 ms by default, because `measure` is 1), or with
+`measure` 0 the larger of 2.8 ms and `settle_us`. The grid can be 1×1 to 20×20 with any limits, with the cell-centre
 convention of `beamforming_mathematics/hemisphere_scan_visualizer.py`. The connection panel uses
 the deployed 7×7 grid over ±40° by default, and shows the selected DSP export. `--emulator` starts
 with 7×7 over ±70° azimuth and ±60° elevation, and a generic per-microphone program. The tracker
@@ -423,8 +424,8 @@ The acoustic emulator ([heimdall_acoustic.py](../heimdall_acoustic.py); `Acousti
 `drone.wav` and `crowd.wav` at 48 kHz in a pyroomacoustics room. The room has order-2 reflections,
 plus a deterministic diffuse tail calibrated to RT60 1.2 s (measured 1.18-1.20 s). The model uses
 the 44 microphones in DSP order, the deployed beam-table delays and a 1-4 kHz detector band-pass.
-This band-pass has two 129-tap linear-phase FIR stages. It is the intended detector band, not
-necessarily the filter in the deployed DSP program. All sectors come from one acoustic scene. The
+This band-pass has two 129-tap linear-phase FIR stages. It exists only in this emulator: the
+hardware measures 0.5-3.5 kHz. All sectors come from one acoustic scene. The
 levels are drone 78, crowd 67 and speech 72 dB SPL, with 30 dB SPL microphone noise.
 
 | Scenario | Contents |

@@ -1335,17 +1335,21 @@ def p2(session, args, out, array):
                                                               "louder than the far one; check the sound and repeat")
         return
     recommended = int(np.ceil(max(arrival, 0.0) / 250.0) * 250)
-    at_default = fractions[guards.index(500)]
+    current = int(session.settings_before.get("guard_us", 2000))
+    usable = np.isfinite(fractions)
+    at_current = float(np.interp(current, np.asarray(guards)[usable], np.asarray(fractions)[usable])) \
+        if usable.any() else float("nan")
     session.report.info("P2 arrival after a steer", f"the new direction starts to arrive at {start:.0f} us and fills "
                                                     f"the window from {arrival:.0f} us on (fit)")
-    session.report.add("P2 the default 500 us guard covers the audio path", 500 >= arrival,
-                       f"at 500 us the window is {at_default:.0%} new direction" if np.isfinite(at_default) else
-                       "the 500 us step was not usable")
+    session.report.add(f"P2 the board's {current} us guard covers the audio path", current >= arrival,
+                       f"at {current} us the window is {at_current:.0%} new direction" if np.isfinite(at_current) else
+                       f"no usable step near {current} us")
     session.report.info("P2 guard to use", f"SET,guard_us,{recommended}")
     session.values["p2"] = {"speaker_sector": on, "far_sector": off, "steady_db": steady, "window_us": P2_WINDOW_US,
                             "guards_us": guards, "fractions": fractions, "fraction_se": errors,
-                            "arrival_start_us": start, "arrival_end_us": arrival, "recommended_guard_us": recommended}
-    figure_p2(guards, fractions, errors, (start, ramp), recommended, out)
+                            "arrival_start_us": start, "arrival_end_us": arrival, "recommended_guard_us": recommended,
+                            "board_guard_us": current}
+    figure_p2(guards, fractions, errors, (start, ramp), recommended, current, out)
 
 
 def s3(session, args, out, array):
@@ -1656,7 +1660,7 @@ def t1(session, args, out, array):
     figure_t1(reports, out)
 
 
-def figure_p2(guards, fractions, errors, fit, recommended, out):
+def figure_p2(guards, fractions, errors, fit, recommended, current, out):
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(7, 4.5))
     g, f, e = (np.asarray(v, float) for v in (guards, fractions, errors))
@@ -1665,7 +1669,7 @@ def figure_p2(guards, fractions, errors, fit, recommended, out):
     if np.isfinite(fit).all():
         x = np.linspace(0, g.max(), 400)
         ax.plot(x / 1000, np.clip((x - fit[0]) / fit[1], 0, 1), "--", label="fit")
-    ax.axvline(0.5, color="tab:red", lw=0.8, label="default guard 0.5 ms")
+    ax.axvline(current / 1000, color="tab:red", lw=0.8, label=f"guard on the board {current / 1000:g} ms")
     ax.axvline(recommended / 1000, color="tab:green", lw=0.8, label=f"guard to use {recommended / 1000:g} ms")
     ax.set_xlabel("guard after the steer (ms)")
     ax.set_ylabel("share of the new direction in the window")
