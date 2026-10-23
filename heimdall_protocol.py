@@ -15,7 +15,7 @@ class ProtocolError(ValueError):
 # Firmware runtime settings (MAX78002 heimdall_settings.c): name -> (minimum, maximum, default).
 FIRMWARE_SETTINGS = {
     "settle_us": (50, 20000, 1250),
-    "guard_us": (0, 20000, 500),
+    "guard_us": (0, 20000, 2000),
     "window_us": (1000, 100000, 5000),
     "measure": (0, 1, 0),
     "band": (0, 1, 1),

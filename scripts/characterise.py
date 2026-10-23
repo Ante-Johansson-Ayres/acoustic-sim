@@ -44,6 +44,7 @@ from array_theory import (band_directivity_index_db, band_frequencies, diffuse_p
                           first_null_half_width, fit_cut, steered_response, steering_cut_db)
 from board_regression import WS_URL, Board, connect, http, play, record  # noqa: E402
 from heimdall_acoustic import default_contract_path, load_beam_contract  # noqa: E402
+from live_log import analyse as live_log_analyse, save_log  # noqa: E402
 from study_session import (FIELDS, MCU_BEAM, WINDOWS, Results, Session, make_signals, power,  # noqa: E402
                            power_mean_db, refine_peak_2d, signal_db, snr_db)
 
@@ -1198,12 +1199,25 @@ def player(session, name):
     return lambda: session.sound(name)
 
 
-def live_maps(session, listen, start=None, stop=None, quiet=2.0):
+def live_maps(session, listen, start=None, stop=None, quiet=2.0, log=None, during=None):
     """Stare starts in silence (its background), then start() turns the source on. Returns the number of bank maps
-    in the next `listen` s and the BANK_TARGET records they brought: [(map, az, el, beam, second beam)]."""
+    in the next `listen` s and the BANK_TARGET records they brought: [(map, az, el, beam, second beam)].
+    With a `log` dict, it also keeps the levels of every map from the start (for live_log.py); `during(state)`
+    runs on every frame of the listening time."""
     board, targets, seen = session.board, [], [None]
 
+    def keep(state):
+        bank = state.get("bank") or {}
+        maps = int(bank.get("maps") or 0)
+        if log is not None and state.get("firmware_mode") == "B" and bank.get("levels_raw") and \
+                maps > log["start_maps"] and (not log["maps"] or maps != log["maps"][-1]):
+            log["maps"].append(maps)
+            log["t"].append(time.monotonic())
+            log["levels"].append(list(bank["levels_raw"]))
+        return False
+
     def collect(state):
+        keep(state)
         bank = state.get("bank") or {}
         target = bank.get("target")
         if state.get("firmware_mode") == "B" and target:
@@ -1215,13 +1229,18 @@ def live_maps(session, listen, start=None, stop=None, quiet=2.0):
         return False
 
     board.stop()
+    if log is not None:
+        log.update(start_maps=int((board.state.get("bank") or {}).get("maps") or 0), maps=[], t=[], levels=[],
+                   targets=targets, events=log.get("events", {}))
     board.command("B")
-    board.pump(quiet)
+    board.pump(quiet, collect)
     if start:
         start()
-        board.pump(0.3)  # applies frames queued while start() waited
+        board.pump(0.3, collect)  # applies frames queued while start() waited
     first = int((board.state.get("bank") or {}).get("maps") or 0)
-    board.pump(listen, collect)
+    if log is not None:
+        log["events"]["sound_maps"] = first
+    board.pump(listen, (lambda s: collect(s) or during(s)) if during else collect)
     count = int((board.state.get("bank") or {}).get("maps") or 0) - first
     board.stop()
     if stop:
@@ -1397,10 +1416,18 @@ def l5(session, args, out, array):
     base = {"measure": 0, "window_us": 5000, "band": 1, "channel": 0, "map_record": 1}
     if args.guard is not None:
         base["guard_us"] = args.guard
-    live = {step: [] for step in LEVEL_STEPS_DB}
-    scanned = {step: [] for step in LEVEL_STEPS_DB}
+    steps = level_steps(args)
+    live = {step: [] for step in steps}
+    scanned = {step: [] for step in steps}
+    logs = []
+
+    def logged(label):
+        logs.append({"label": label, "events": {}})
+        return logs[-1]
+
     with session.settings(**base):
-        count, targets = live_maps(session, args.listen, player(session, "A"), player(session, None))
+        count, targets = live_maps(session, args.listen, player(session, "A"), player(session, None),
+                                   log=logged("level 0 dB, reference"))
         if not targets:
             raise RuntimeError("Live reported nothing at the loudest level: raise the volume or move the speaker closer")
         reference = (float(np.median([t[1] for t in targets])), float(np.median([t[2] for t in targets])))
@@ -1412,12 +1439,13 @@ def l5(session, args, out, array):
         sector = int(np.bincount(strongest).argmax())
         print(f"  reference: Live {reference[0]:+.1f}, {reference[1]:+.1f} deg; scan sector {sector}", flush=True)
         for trial in range(args.trials):
-            for step in (int(s) for s in rng.permutation(LEVEL_STEPS_DB)):
+            for step in (int(s) for s in rng.permutation(steps)):
                 for mode in (("live", "scan") if trial % 2 == 0 else ("scan", "live")):
                     sound = player(session, level_signal(step))
                     if mode == "live":
                         session.set("measure", 0)
-                        count, targets = live_maps(session, args.listen, sound, player(session, None))
+                        count, targets = live_maps(session, args.listen, sound, player(session, None),
+                                                   log=logged(f"level {-step} dB, trial {trial + 1}"))
                         live[step].append(len(map_hits(targets, reference)) / count if count else float("nan"))
                     else:
                         session.set("measure", 1)
@@ -1427,14 +1455,15 @@ def l5(session, args, out, array):
                 print(f"  trial {trial + 1}, {level_signal(step)}: Live {live[step][-1]:.0%}, "
                       f"scan {scanned[step][-1]:.0%}", flush=True)
         session.set("measure", 0)
-        count, targets = live_maps(session, args.listen)
+        count, targets = live_maps(session, args.listen, log=logged("silent"))
         live_false = len({t[0] for t in targets}) / count if count else float("nan")
         session.set("measure", 1)
         passes = scan_passes(session, args.listen)
         scan_false = float(np.mean([scan_alarm(m) for m in passes])) if passes else float("nan")
-    levels = [-s for s in LEVEL_STEPS_DB]
-    live_rate = [float(np.nanmean(live[s])) for s in LEVEL_STEPS_DB]
-    scan_rate = [float(np.nanmean(scanned[s])) for s in LEVEL_STEPS_DB]
+    save_log(os.path.join(out, "l5_maps.npz"), logs)
+    levels = [-s for s in steps]
+    live_rate = [float(np.nanmean(live[s])) for s in steps]
+    scan_rate = [float(np.nanmean(scanned[s])) for s in steps]
     (live_level, live_cut), (scan_level, scan_cut) = threshold_db(levels, live_rate), threshold_db(levels, scan_rate)
 
     def text(level, cut):
@@ -1454,12 +1483,54 @@ def l5(session, args, out, array):
                            f"margin {bound}{margin:.1f} dB (the design claims 6-7 dB)")
     session.report.info("L5 false alarms in silence", f"Live {live_false:.0%} of maps, scan {scan_false:.0%} of passes")
     session.values["l5"] = {"reference_live": reference, "reference_sector": sector, "levels_db": levels,
-                            "live_rates": {s: live[s] for s in LEVEL_STEPS_DB},
-                            "scan_rates": {s: scanned[s] for s in LEVEL_STEPS_DB}, "live_rate": live_rate,
+                            "live_rates": {s: live[s] for s in steps},
+                            "scan_rates": {s: scanned[s] for s in steps}, "live_rate": live_rate,
                             "scan_rate": scan_rate, "live_level_db": live_level, "live_censored": live_cut,
                             "scan_level_db": scan_level, "scan_censored": scan_cut, "margin_db": margin,
                             "false_alarms": {"live": live_false, "scan": scan_false}, "guard_us": args.guard}
     figure_l5(levels, live_rate, scan_rate, live_level, scan_level, out)
+
+
+def level_steps(args):
+    """l5 level steps in dB below sound A: --steps, or the 6 dB default."""
+    if not args.steps:
+        return LEVEL_STEPS_DB
+    return tuple(sorted({int(s) for s in args.steps.split(",")}))
+
+
+def l7(session, args, out, array):
+    """Live log: --trials new Live starts (B) of --listen s each, with the levels of every bank map. With --burst,
+    sound A plays at the loudest step for that many seconds, --burst-at s into each start. live_log.py replays
+    the firmware's detector on the log: target rate after a start and after the loud sound, their directions, and
+    the same for other detector settings."""
+    logs = []
+    for trial in range(args.trials):
+        log = {"label": f"start {trial + 1}", "events": {}}
+        burst = {"on": None, "off": None}
+
+        def sound_control(state, log=log, burst=burst):
+            elapsed = time.monotonic() - log["t"][0] if log.get("t") else 0.0
+            if args.burst > 0 and burst["on"] is None and elapsed >= args.burst_at:
+                play(session.signals["A"], loop=True)
+                burst["on"] = log["events"]["burst_on"] = time.monotonic()
+            elif burst["on"] is not None and burst["off"] is None and time.monotonic() - burst["on"] >= args.burst:
+                play(None)
+                burst["off"] = log["events"]["burst_off"] = time.monotonic()
+            return False
+
+        live_maps(session, args.listen, quiet=0.0, log=log, during=sound_control)
+        play(None)
+        if burst["on"] is not None and burst["off"] is None:
+            log["events"]["burst_off"] = time.monotonic()
+        logs.append(log)
+        print(f"  start {trial + 1}: {len(log['maps'])} maps logged, {len(log['targets'])} target reports", flush=True)
+    save_log(os.path.join(out, "l7_maps.npz"), logs)
+    session.values["l7"] = live_log_analyse(out).get("l7", {})
+    for run in session.values["l7"].get("runs", []):
+        session.report.info(f"L7 {run['label']}", f"{run['maps']}/{run['expected']} maps; the replay agrees with "
+                                                  f"{run['replay_agrees']:.0%} of {run['board_targets']} targets")
+    for label, values in session.values["l7"].get("settings", {}).items():
+        session.report.info(f"L7 {label}", ", ".join(f"{k} {v:.2g}" for k, v in values.items()))
 
 
 def l6(session, args, out, array):
@@ -1673,10 +1744,10 @@ def figure_t1(reports, out):
 
 
 TESTS = {"n1": n1, "n2": n2, "a3": a3, "a4": a4, "a8": a8, "a9": a9, "a10": a10, "l1": l1, "l5": l5, "l6": l6,
-         "p2": p2, "r1": r1, "s1": s1, "s3": s3, "t1": t1}
-SOUND_TESTS = {"a3", "a4", "a8", "a9", "a10", "l1", "l5", "l6", "p2", "r1", "s1", "s3", "t1"}
+         "l7": l7, "p2": p2, "r1": r1, "s1": s1, "s3": s3, "t1": t1}
+SOUND_TESTS = {"a3", "a4", "a8", "a9", "a10", "l1", "l5", "l6", "l7", "p2", "r1", "s1", "s3", "t1"}
 TEST_DEFAULTS = {"l1": {"trials": 5, "listen": 8.0}, "l5": {"trials": 3, "listen": 6.0},
-                 "l6": {"trials": 3, "listen": 8.0}, "t1": {"listen": 12.0}}
+                 "l6": {"trials": 3, "listen": 8.0}, "l7": {"trials": 5, "listen": 60.0}, "t1": {"listen": 12.0}}
 
 
 def main():
@@ -1692,12 +1763,17 @@ def main():
     parser.add_argument("--alignment-sigma", type=float, default=0.4, help="speaker placement 1-sigma (deg)")
     parser.add_argument("--truth", choices=("array", "measured"), default="array",
                         help="a3/l1: find the speaker with the steered beam, or type in measured positions")
-    parser.add_argument("--trials", type=int, help="l1/l5/l6: trials per position, level or phase (default 5/3/3)")
-    parser.add_argument("--listen", type=float, help="l1/l5/l6/t1: seconds of sound per trial (default 8/6/8/12)")
+    parser.add_argument("--trials", type=int, help="l1/l5/l6/l7: trials per position, level or phase, or Live "
+                                                   "starts (default 5/3/3/5)")
+    parser.add_argument("--listen", type=float, help="l1/l5/l6/l7/t1: seconds of sound per trial (default "
+                                                     "8/6/8/60/12)")
     parser.add_argument("--sound", default="A", help="l1/l6/t1: signal name, 'drone', 'crowd' or a WAV path "
                                                      "(l6 and t1 default to the drone clip)")
     parser.add_argument("--steers", type=int, default=40, help="p2: steers per guard value")
     parser.add_argument("--guard", type=int, help="l5: guard_us for the scan's MCU windows (from p2)")
+    parser.add_argument("--steps", help="l5: level steps in dB below sound A, comma list (default 0,6,...,48)")
+    parser.add_argument("--burst", type=float, default=0.0, help="l7: seconds of loud sound A in each start (0: none)")
+    parser.add_argument("--burst-at", type=float, default=20.0, help="l7: seconds into each start for the burst")
     parser.add_argument("--drone-az", type=float, default=-15.0, help="l6: speaker azimuth (deg)")
     parser.add_argument("--phone-az", type=float, default=15.0, help="l6: phone azimuth (deg)")
     parser.add_argument("--tone-ms", type=int, default=100, help="t1: tonal detector report period (ms)")
@@ -1719,7 +1795,7 @@ def main():
         args.sound = "drone"
     out = args.out or os.path.join(tempfile.gettempdir(), time.strftime(f"heimdall_{args.test}_%Y%m%d_%H%M%S"))
     os.makedirs(out, exist_ok=True)
-    signals = make_signals(out) if args.test in SOUND_TESTS else {}
+    signals = make_signals(out, level_steps(args) if args.test == "l5" else ()) if args.test in SOUND_TESTS else {}
     if signals:
         signals.update({name: str(AUDIO / f"{name}.wav") for name in ("drone", "crowd")
                         if (AUDIO / f"{name}.wav").exists()})

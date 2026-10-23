@@ -1,0 +1,242 @@
+"""Live (bank) logs: save, load, replay the firmware's detector with other settings, and analyse.
+
+    python scripts/live_log.py <folder>     analyses l7_maps.npz and/or l5_maps.npz in the folder; writes live_log.json
+
+A run is the maps of one Live start (B). The replay is exact only when the log has every map from the start (the
+first map primes the backgrounds); the analysis checks this against the targets that the board reported.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from fractions import Fraction
+from pathlib import Path
+
+import numpy as np
+
+ROWS = COLUMNS = 7
+MAP_S = 0.05  # HEIMDALL_BANK_PERIOD_US
+SETTINGS = {
+    "firmware (1.5x, shift 5/9, integer background)": {},
+    "background with 8 fraction bits": {"frac_bits": 8},
+    "ratio 2x": {"ratio": (2, 1)},
+    "ratio 3x": {"ratio": (3, 1)},
+    "2 maps in a row": {"confirm": 2},
+    "3 maps in a row": {"confirm": 3},
+    "slow rise (shift 9 up, 5 down)": {"rise_shift": 9},
+    "absolute floor 4 words": {"floor": 4},
+    "8 fraction bits and floor 4 words": {"frac_bits": 8, "floor": 4},
+}
+
+
+def save_log(path, runs):
+    """runs: dicts with label, start_maps, maps, t, levels, targets [(maps, az, el, beam, second)], events {}."""
+    meta = [{"label": r["label"], "start_maps": r["start_maps"], "events": r.get("events", {})} for r in runs]
+    run = np.concatenate([np.full(len(r["maps"]), i, np.int32) for i, r in enumerate(runs)] or [np.zeros(0, np.int32)])
+    targets = [(i, *t) for i, r in enumerate(runs) for t in r["targets"]]
+    np.savez_compressed(
+        path, meta=np.array(json.dumps(meta)), run=run,
+        maps=np.concatenate([np.asarray(r["maps"], np.int64) for r in runs] or [np.zeros(0, np.int64)]),
+        t=np.concatenate([np.asarray(r["t"], float) for r in runs] or [np.zeros(0)]),
+        levels=np.concatenate([np.asarray(r["levels"], np.int64).reshape(-1, ROWS * COLUMNS) for r in runs]
+                              or [np.zeros((0, ROWS * COLUMNS), np.int64)]),
+        targets=np.asarray(targets, float).reshape(-1, 6))
+
+
+def load_log(path):
+    data = np.load(path)
+    runs = []
+    for i, meta in enumerate(json.loads(str(data["meta"]))):
+        keep = data["run"] == i
+        own = data["targets"][data["targets"][:, 0] == i]
+        runs.append({**meta, "maps": data["maps"][keep], "t": data["t"][keep], "levels": data["levels"][keep],
+                     "targets": [(int(m), az, el, int(b), int(s)) for _, m, az, el, b, s in own]})
+    return runs
+
+
+class Detector:
+    """MAX78002/beam_bank.c with its settings as parameters. With the defaults it is the firmware, bit for bit.
+    frac_bits keeps the backgrounds with extra fraction bits; confirm reports a target only when a candidate was
+    found in that many maps in a row, each within one row and column of the one before; rise_shift makes a quiet
+    beam's background rise more slowly than it falls; floor is HEIMDALL_LEVEL_ABSOLUTE_FLOOR (a level must be above
+    it)."""
+
+    def __init__(self, ratio=(3, 2), shift=5, held_shift=9, frac_bits=0, confirm=1, rise_shift=None, floor=0):
+        self.num, self.den = ratio
+        self.shift, self.held_shift, self.frac, self.confirm = shift, held_shift, frac_bits, confirm
+        self.rise_shift = shift if rise_shift is None else rise_shift
+        self.floor = floor
+        self.background = None
+        self.streak, self.last = 0, -1
+
+    def above(self, levels, reference):
+        """level >= ratio x reference, reference in the background's scale."""
+        return (levels > self.floor) & (levels * self.den * (1 << self.frac) >= reference * self.num)
+
+    def update(self, levels):
+        """One map; returns (best beam or -1 when no target is reported, the candidates' raw best beam or -1)."""
+        levels = np.asarray(levels, np.int64)
+        if self.background is None:
+            self.background = levels << self.frac
+            return -1, -1
+        field = int(np.sort(levels)[len(levels) // 2]) << self.frac
+        above = self.above(levels, self.background) & self.above(levels, field)
+        grid = levels.reshape(ROWS, COLUMNS)
+        best, best_ratio = -1, None
+        for beam in np.flatnonzero(above):
+            r, c = divmod(int(beam), COLUMNS)
+            if any(0 <= r + dr < ROWS and 0 <= c + dc < COLUMNS and grid[r + dr, c + dc] > grid[r, c]
+                   for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))):
+                continue
+            ratio = Fraction(int(levels[beam]), max(1, int(self.background[beam])))
+            if best_ratio is None or ratio > best_ratio:
+                best, best_ratio = int(beam), ratio
+        difference = (levels << self.frac) - self.background
+        shift = np.where(above, self.held_shift, np.where(difference > 0, self.rise_shift, self.shift))
+        self.background = self.background + np.where(difference >= 0, difference >> shift, -((-difference) >> shift))
+        near = best >= 0 and self.last >= 0 and all(abs(a - b) <= 1 for a, b in zip(divmod(best, COLUMNS),
+                                                                                   divmod(self.last, COLUMNS)))
+        self.streak = 0 if best < 0 else (self.streak + 1 if near or self.streak == 0 else 1)
+        self.last = best
+        return (best if self.streak >= self.confirm else -1), best
+
+    def threshold(self):
+        """Per beam: the level a new sound must reach (ratio x background), in raw level words."""
+        return self.background * self.num / self.den / (1 << self.frac)
+
+
+def replay(run, **settings):
+    """Targets (best beam or -1) and thresholds for every logged map of a run."""
+    detector = Detector(**settings)
+    best, thresholds = [], []
+    for levels in run["levels"]:
+        best.append(detector.update(levels)[0])
+        thresholds.append(detector.threshold())
+    return np.asarray(best), np.asarray(thresholds)
+
+
+def complete(run):
+    """True when the log has every map from the priming map on."""
+    maps = np.asarray(run["maps"])
+    return maps.size > 0 and maps[0] == run["start_maps"] + 1 and bool(np.all(np.diff(maps) == 1))
+
+
+def agreement(run, best):
+    """Share of the board's target reports that the replay also reports, on the same map with the same beam."""
+    index = {int(m): i for i, m in enumerate(run["maps"])}
+    hits = [best[index[m]] == beam for m, _, _, beam, _ in run["targets"] if m in index]
+    return (float(np.mean(hits)) if hits else float("nan")), len(hits)
+
+
+def rate(best, keep):
+    keep = np.asarray(keep, bool)
+    return float(np.mean(best[keep] >= 0)) if keep.any() else float("nan")
+
+
+def analyse(folder):
+    folder = Path(folder)
+    result = {}
+    for name in ("l7", "l5"):
+        path = folder / f"{name}_maps.npz"
+        if path.exists():
+            result[name] = analyse_runs(name, load_log(path))
+    (folder / "live_log.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return result
+
+
+def analyse_runs(name, runs):
+    print(f"{name}: {len(runs)} runs")
+    out = {"runs": [], "settings": {}}
+    for run in runs:
+        best, _ = replay(run)
+        share, count = agreement(run, best)
+        full = complete(run)
+        expected = int(run["maps"][-1] - run["start_maps"]) if len(run["maps"]) else 0
+        out["runs"].append({"label": run["label"], "maps": len(run["maps"]), "expected": expected,
+                            "complete": full, "board_targets": count, "replay_agrees": share})
+        print(f"  {run['label']}: {len(run['maps'])}/{expected} maps, complete {full}, replay agrees with "
+              f"{share:.0%} of {count} board targets")
+    for label, settings in SETTINGS.items():
+        out["settings"][label] = summary(name, runs, settings)
+        print(f"  {label}: " + ", ".join(f"{k} {v:.3g}" if isinstance(v, float) else f"{k} {v}"
+                                         for k, v in out["settings"][label].items() if not isinstance(v, (list, dict))))
+    out["directions"] = directions(runs)
+    print("  most frequent target beams (firmware): " + ", ".join(
+        f"beam {d['beam']} ({d['azimuth_deg']:+.0f}, {d['elevation_deg']:+.0f} deg) {d['share']:.0%}"
+        for d in out["directions"][:6]))
+    return out
+
+
+def summary(name, runs, settings):
+    """l7: target rate by time since the start and since the burst, and the threshold rise after the burst.
+    l5: per level, the share of maps with a target within one beam of the speaker; in silence, with any target."""
+    if name == "l7":
+        bins = ((0, 2), (2, 10), (10, 30), (30, 1e9))
+        since_start = {f"{a:g}-{b:g} s": [] for a, b in bins}
+        after = {f"{a:g}-{b:g} s": [] for a, b in ((0, 2), (2, 5), (5, 10), (10, 20), (20, 1e9))}
+        rise, recovery = [], []
+        for run in runs:
+            best, thresholds = replay(run, **settings)
+            t = np.asarray(run["t"]) - run["t"][0]
+            on, off = run["events"].get("burst_on"), run["events"].get("burst_off")
+            quiet = np.ones(len(t), bool) if on is None else (t < on - run["t"][0])
+            for (a, b), key in zip(bins, since_start):
+                since_start[key].append(rate(best, quiet & (t >= a) & (t < b)))
+            if on is None:
+                continue
+            ts = t - (off - run["t"][0])
+            for key in after:
+                a, b = (float(v) for v in key[:-2].split("-"))
+                after[key].append(rate(best, (ts >= a) & (ts < b)))
+            before = np.median(thresholds[quiet & (t >= 2)], axis=0)
+            excess = 20 * np.log10(np.median(thresholds / np.maximum(before, 1), axis=1))
+            during = np.flatnonzero(t >= on - run["t"][0])
+            if during.size == 0:
+                continue
+            peak = during[int(np.argmax(excess[during]))]
+            rise.append(float(excess[peak]))
+            back = np.flatnonzero((np.arange(len(t)) > peak) & (excess <= 1.0))
+            recovery.append(float(ts[back[0]]) if back.size else float("nan"))
+        return {**{f"rate {k} after start": float(np.nanmean(v)) for k, v in since_start.items()},
+                **{f"rate {k} after the burst": float(np.nanmean(v)) for k, v in after.items() if v},
+                **({"threshold rise after the burst (dB)": float(np.nanmean(rise)),
+                    "back within 1 dB after (s)": float(np.nanmean(recovery))} if rise else {})}
+    reference = reference_beam(runs)
+    rates = {}
+    for run in runs:
+        best, _ = replay(run, **settings)
+        start = run["events"].get("sound_maps")
+        keep = np.asarray(run["maps"]) > (start if start is not None else run["start_maps"] + 40)
+        label = run["label"].split(",")[0]
+        if label == "silent" or reference < 0:
+            rates.setdefault(f"any target, {label}", []).append(rate(best, keep))
+        else:
+            r0, c0 = divmod(reference, COLUMNS)
+            hit = np.array([b >= 0 and abs(b // COLUMNS - r0) <= 1 and abs(b % COLUMNS - c0) <= 1 for b in best])
+            rates.setdefault(f"speaker found, {label}", []).append(float(np.mean(hit[keep])) if keep.any() else
+                                                                  float("nan"))
+    return {k: float(np.nanmean(v)) for k, v in rates.items()}
+
+
+def reference_beam(runs):
+    """The beam that the board reported most often in the runs at the loudest level (label 'level 0 dB')."""
+    beams = [t[3] for run in runs if run["label"].startswith("level 0 dB") for t in run["targets"]]
+    return int(np.bincount(beams).argmax()) if beams else -1
+
+
+def directions(runs):
+    beams, az, el = {}, {}, {}
+    for run in runs:
+        for _, a, e, beam, _ in run["targets"]:
+            beams[beam] = beams.get(beam, 0) + 1
+            az.setdefault(beam, []).append(a)
+            el.setdefault(beam, []).append(e)
+    total = sum(beams.values()) or 1
+    return [{"beam": b, "share": n / total, "azimuth_deg": float(np.mean(az[b])), "elevation_deg": float(np.mean(el[b]))}
+            for b, n in sorted(beams.items(), key=lambda kv: -kv[1])]
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    analyse(sys.argv[1])
