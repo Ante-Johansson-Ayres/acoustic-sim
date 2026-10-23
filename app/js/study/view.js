@@ -28,7 +28,7 @@ export function createView(container, {session}) {
   );
 
   const missing = h('div', {class: 'placeholder', hidden: true});
-  const params = parametersScreen({canWrite: () => state.writes});
+  const params = parametersScreen({canWrite: () => state.writes, session});
   const measure = measurementsScreen({session});
   const footer = h('footer', {class: 'app-footer'}, h('span', {id: 'st-footer-left'}), h('span', {}, 'Device commands (protocol v3): MAX78002/docs/REFERENCE.md, section 4.5'));
   container.append(bar, missing, params.el, measure.el, footer);

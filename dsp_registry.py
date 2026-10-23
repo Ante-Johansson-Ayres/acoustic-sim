@@ -48,11 +48,17 @@ GROUPS = {
     "mutes": "Channel mutes",
     "detector": "Level detector",
     "output": "Output level",
+    "bank_band": "Bank band-pass (Live detectors)",
+    "bank_alias": "Bank anti-alias low-pass",
+    "bank_ch1": "Bank Ch1 low-pass",
+    "bank_detector": "Bank level detectors",
     "delays": "Fractional delays",
     "steering": "Lookup-table steering",
     "system": "Safeload registers",
     "other": "Other parameters",
 }
+WRITABLE_GROUPS = ("gains", "fir1", "fir2", "mutes", "detector", "output", "bank_band", "bank_alias",
+                   "bank_ch1", "bank_detector")
 
 TYPES = {"FixPoint8d24": "8.24", "Integer32": "int32"}
 
@@ -118,13 +124,22 @@ def _classify(algo: str, param: str, scan_detector: str | None) -> tuple[str, in
         return "detector", None, 1
     if algo.startswith("Beamformer_Output_Gain") or algo.startswith("SingleVolumeControl"):
         return "output", None, None
+    if re.fullmatch(r"Bank_BandPass_\d+_\d+", algo):
+        return "bank_band", None, None
+    match = re.fullmatch(r"Bank_LowPass_DSP(\d+)", algo)
+    if match:
+        return "bank_alias", int(match.group(1)), None
+    if algo == "Bank_Ch1_LowPass":
+        return "bank_ch1", None, None
+    if re.fullmatch(r"Bank_Beam_\d+_\d+", algo):
+        return "bank_detector", None, None
     if algo == "Safeload":
         return "system", None, None
     return "other", None, None
 
 
 def _policy(group: str, param: str, beam: int | None) -> tuple[bool, str]:
-    if group in ("gains", "fir1", "fir2", "mutes", "detector", "output"):
+    if group in WRITABLE_GROUPS:
         return True, ""
     if group == "delays":
         if param == "MaxDelay":
@@ -144,6 +159,24 @@ def _policy(group: str, param: str, beam: int | None) -> tuple[bool, str]:
 def _words(data: str) -> list[int]:
     raw = [int(item, 16) for item in data.split(",") if item.strip()] if data else []
     return [int.from_bytes(bytes(raw[i:i + 4]), "big", signed=True) for i in range(0, len(raw) - 3, 4)]
+
+
+def _signed_8_24(value: float) -> int:
+    """An 8.24 word as the generator rounds it (beam_bank.to_8_24), signed."""
+    word = int(round(float(value) * (1 << 24))) & 0xFFFFFFFF
+    return word - (1 << 32) if word >= (1 << 31) else word
+
+
+def _boot_words(contract: dict) -> tuple[dict[int, int], list[int]]:
+    """({address: word} of the gains the firmware writes at boot and on I (the taper), the bank
+    band-pass taps it loads with its tables). Both differ from the compiled export when the
+    generator chose so; they are what "flashed" means for these words."""
+    gains = {}
+    addresses, words = contract.get("gain_addresses"), contract.get("gain_fixpt_8_24")
+    if isinstance(addresses, list) and isinstance(words, list) and len(addresses) == len(words):
+        gains = {int(a): (int(w) - (1 << 32) if int(w) >= (1 << 31) else int(w)) for a, w in zip(addresses, words)}
+    band_pass = ((contract.get("bank") or {}).get("band_pass")) or []
+    return gains, [_signed_8_24(v) for v in band_pass]
 
 
 def load_registry(path: str | Path | None = None) -> dict[str, Any]:
@@ -181,6 +214,12 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
             if param.get("Name") == "TCONST" and rms is not None:
                 detectors[str(module.get("AlgoName", ""))] = int(rms["Address"])
     scan_detector = _scan_detector(sorted(detectors), contract.get("level_detector"))
+    boot_gains, boot_band_pass = _boot_words(contract)
+    allowed = None
+    try:
+        allowed = {start + k for start, count in contract["study"]["writable_ranges"] for k in range(int(count))}
+    except (KeyError, TypeError, ValueError):
+        pass
 
     parameters = []
     for module in modules:
@@ -189,7 +228,17 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
             group, mic, beam = _classify(algo, str(param.get("Name", "")), scan_detector)
             writable, reason = _policy(group, str(param.get("Name", "")), beam)
             words = max(1, int(param.get("Size", 4)) // 4)
+            address = int(param["Address"])
+            if writable and allowed is not None and not all(address + k in allowed for k in range(words)):
+                writable, reason = False, "not in the firmware's allow-list (regenerate the export's table)"
             defaults = _words(str(param.get("Data", "")))
+            defaults = defaults[:words] + [0] * max(0, words - len(defaults))
+            compiled = list(defaults)
+            boot = None
+            if group == "bank_band" and len(boot_band_pass) == words:
+                defaults, boot = list(boot_band_pass), "tables"
+            elif group == "gains" and words == 1 and address in boot_gains:
+                defaults, boot = [boot_gains[address]], "taper"
             parameters.append({
                 "block": algo,
                 "caption": module.get("Caption"),
@@ -197,10 +246,12 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
                 "group": group,
                 "mic": mic,
                 "beam": beam,
-                "address": int(param["Address"]),
+                "address": address,
                 "words": words,
                 "type": TYPES.get(param.get("DataType"), str(param.get("DataType"))),
-                "default_words": defaults[:words] + [0] * max(0, words - len(defaults)),
+                "default_words": defaults,
+                "compiled_words": compiled if compiled != defaults else None,
+                "boot": boot,
                 "writable": writable,
                 "reason": reason,
             })
@@ -251,6 +302,10 @@ def load_registry(path: str | Path | None = None) -> dict[str, Any]:
         "groups": groups,
         "writable_words": sum(item["words"] for item in parameters if item["writable"]),
         "level_readback_address": detectors.get(scan_detector),
+        "bank": None if not contract.get("bank") else {
+            key: contract["bank"].get(key) for key in ("rows", "columns", "sample_rate_hz", "band_hz",
+                                                       "level_time_constant_ms")},
+        "level_time_constant_ms": contract.get("level_time_constant_ms"),
     }
 
 
@@ -309,6 +364,13 @@ def plan_writes(writes: list[dict[str, int]], registry: dict[str, Any], baud: in
     }
 
 
+def setting_order(current: dict[str, int], changes: dict[str, int]) -> list[tuple[str, int]]:
+    """The changes in an order that keeps band_low_hz below band_high_hz after each SET."""
+    high_first = changes.get("band_low_hz", 0) >= current.get("band_high_hz", 3500)
+    first = "band_high_hz" if high_first else "band_low_hz"
+    return sorted(changes.items(), key=lambda item: item[0] != first)
+
+
 class DspParameterService:
     """Parameter memory and settings per transport.
 
@@ -322,6 +384,8 @@ class DspParameterService:
         "window_us": (1000, 100000, 5000),
         "measure": (0, 1, 1),
         "band": (0, 1, 1),
+        "band_low_hz": (100, 5000, 500),
+        "band_high_hz": (500, 12000, 3500),
         "channel": (0, 1, 0),
         "map_record": (0, 1, 0),
         "tone": (0, 10000, 0),
@@ -335,6 +399,8 @@ class DspParameterService:
         self._memory: dict[int, int] = {}
         self._settings = self._default_settings()
         self._owner = None
+        self._marks = (0, 0)
+        self._lost: dict[int, int] = {}
 
     @classmethod
     def _default_settings(cls) -> dict[str, int]:
@@ -355,11 +421,35 @@ class DspParameterService:
         if transport is not self._owner:
             self._owner = transport
             self._memory = {}
+            self._lost = {}
+            self._marks = self._reload_marks(transport)
             self._settings = self._default_settings()
             registry = self.registry()
             for item in registry["parameters"]:
                 for offset, word in enumerate(item["default_words"]):
                     self._memory[item["address"] + offset] = word
+            return
+        marks = self._reload_marks(transport)
+        if marks != self._marks:
+            # A program load puts back every word; I puts back the taper and the tables.
+            everything = marks[1] != self._marks[1]
+            self._marks = marks
+            for item in self.registry()["parameters"]:
+                if not item["writable"] or not (everything or item.get("boot")):
+                    continue
+                for offset, word in enumerate(item["default_words"]):
+                    address = item["address"] + offset
+                    if self._memory.get(address, word) != word:
+                        self._lost[address] = self._memory[address]
+                        self._memory[address] = word
+
+    @staticmethod
+    def _reload_marks(transport) -> tuple[int, int]:
+        try:
+            snapshot = transport.snapshot()
+        except Exception:  # a transport without state cannot report reloads
+            return 0, 0
+        return int(snapshot.get("boot_checks") or 0), int(snapshot.get("dsp_loads") or 0)
 
     def supports(self, transport) -> tuple[bool, str]:
         if transport is None:
@@ -400,9 +490,19 @@ class DspParameterService:
                 self._bind(transport)
                 result["modified_words"] = self._modified_count()
                 result["settings"] = dict(self._settings)
+                result["lost"] = self.lost()
             if str(getattr(transport, "transport_name", "")).startswith("serial:"):
                 result["settings"].update(snapshot.get("settings") or {})
         return result
+
+    def lost(self) -> list[dict[str, int]]:
+        """Edited words that a boot check (I) or a program load put back, with the edited value."""
+        with self._lock:
+            return [{"address": address, "word": word} for address, word in sorted(self._lost.items())]
+
+    def forget_lost(self) -> None:
+        with self._lock:
+            self._lost = {}
 
     def _modified_count(self) -> int:
         count = 0
@@ -463,6 +563,8 @@ class DspParameterService:
             with self._lock:
                 self._bind(transport)
                 self._memory.update(readback)
+                for address in readback:
+                    self._lost.pop(address, None)
                 plan["modified_words"] = self._modified_count()
             plan["readback"] = readback
             return plan
@@ -471,6 +573,7 @@ class DspParameterService:
             for write in writes:
                 word = int(write["word"])
                 self._memory[int(write["address"])] = word - (1 << 32) if word >= (1 << 31) else word
+                self._lost.pop(int(write["address"]), None)
             readback = {int(w["address"]): self._memory[int(w["address"])] for w in writes}
             plan["modified_words"] = self._modified_count()
         plan["readback"] = readback
@@ -484,6 +587,12 @@ class DspParameterService:
         setting = int(round(float(value)))
         if not minimum <= setting <= maximum:
             raise ValueError(f"{key} must be between {minimum} and {maximum}")
+        current = self.settings(transport)
+        if str(getattr(transport, "transport_name", "")).startswith("serial:"):
+            current.update(transport.snapshot().get("settings") or {})
+        if (key == "band_low_hz" and setting >= current.get("band_high_hz", 3500)) or (
+                key == "band_high_hz" and setting <= current.get("band_low_hz", 500)):
+            raise ValueError("band_low_hz must stay below band_high_hz; change the other corner first")
         if str(getattr(transport, "transport_name", "")).startswith("serial:"):
             response = transport.request(f"SET,{key},{setting}", {"set_ok"})
             if response["key"] != key or response["value"] != setting:

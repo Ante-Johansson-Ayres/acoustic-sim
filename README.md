@@ -86,18 +86,35 @@ profiles, the scenarios and the limits of both models are in
 ## Study
 
 - **Parameters.** The backend makes a register map from the SigmaStudio export (`dsp_registry.py`)
-  and serves it at `/dsp/registry`. The editors prepare a gain taper and microphone mutes, FIR
-  presets, the time constant, hold and decay of the scan detector, and single raw words. Nothing
+  and serves it at `/dsp/registry`. The editors prepare a gain taper and microphone mutes, the
+  filters, the detectors, and single raw words. Nothing
   goes to the DSP until you click `Apply`. `Apply` needs the `Enable writes` switch and an idle
   board. The backend checks the writes against the map hash of the firmware. It sends them as
   safeloads of five consecutive words or fewer
   ([REFERENCE.md section 4.12](../MAX78002/docs/REFERENCE.md#412-parameter-access-pw-pr-and-its-gates)).
+  - `Filters` lists each filter of the signal chain: the steered beam FIR (Ch0), the bank band-pass,
+    the bank anti-alias low-pass, the bank Ch1 low-pass, the MCU window band (`band_low_hz`,
+    `band_high_hz`) and the listening copy. For each one: where it is, what it changes, a warning,
+    and its response as flashed, on the board now, as designed and as proposed. The designer
+    (`app/js/study/filters.js`) makes windowed-sinc FIR filters with the generator's arithmetic; for
+    the flashed bank band-pass it gives the same words.
+  - `Level detector` has presets for the scan detector (as flashed, fast 2 ms, like the bank), a
+    button that stages the settle time it needs (3 tau, 20 ms at most), and presets for the 49 bank
+    detectors (as flashed, 17 ms, 70 ms or a time constant you enter).
+  - An `I` puts back the flashed taper and bank band-pass. The changes column then shows the edits
+    that it removed, with `Stage them again` (`lost` in `/dsp/status`).
+  - The listening copy (Hardware, Audio): `Save WAV` can also save a copy through the MCU window
+    band, the bank's filters (anti-alias low-pass, then the band-pass at 12 kHz), a drone band or
+    your own corners. The file name gets a suffix. The recording itself does not change.
 - **Measurements.** The tests of the characterisation plan
   ([CHARACTERISATION_PLAN.md section 3.2](../MAX78002/docs/CHARACTERISATION_PLAN.md#32-where-you-start-the-tests-and-the-notes)),
   in its order. The backend (`study_runner.py`) runs the scripts below, one at a time, and writes
   each run to `MAX78002/docs/data/bench_<date>/<test>` with `run.json` and `run_log.txt`. The screen
   shows the plan's text, the options (from the scripts' own parsers, `scripts/catalogue.py`), the
   output, the questions of the script, and the checks and figures of each result folder.
+  - Two tests are not in the plan: `Detector time constant` (`characterise.py d1`, with the
+    speaker: it measures how fast the scan detector reading falls after a steer, and compares it
+    with the words on the device) and `Board regression`.
   - `Flashed` sets the Study edits and the settings to their flashed values for the test, and puts
     them back after it. `Current edits` keeps them: the script writes the edits again after each `I`,
     because `I` puts back the flashed taper and tables.

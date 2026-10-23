@@ -35,7 +35,7 @@ class DspStore extends EventTarget {
     this.status = null;
     this.memory = new Map();
     this.pending = new Map();        // address → {word, label}
-    this.setting = null;             // {key, value, label} staged firmware setting
+    this.settings = new Map();       // key → {value, label}: staged firmware settings
     this.history = [];
     this.snapshots = this.loadSnapshots();
     this.plan = null;
@@ -123,13 +123,32 @@ class DspStore extends EventTarget {
 
   stageSetting(key, value, label) {
     const current = this.status?.settings?.[key];
-    this.setting = Number(value) === Number(current) ? null : {key, value: Number(value), label};
+    if (Number(value) === Number(current)) this.settings.delete(key);
+    else this.settings.set(key, {value: Number(value), label});
     this.pendingChanged();
+  }
+
+  unstageSetting(key) {
+    this.settings.delete(key);
+    this.pendingChanged();
+  }
+
+  /** A setting as it will be after Apply. */
+  proposedSetting(key, fallback) {
+    return this.settings.get(key)?.value ?? this.status?.settings?.[key] ?? fallback;
+  }
+
+  /** Staged settings in an order the firmware accepts: band_low_hz stays below band_high_hz. */
+  settingWrites() {
+    const writes = [...this.settings].map(([key, {value}]) => ({key, value}));
+    const highFirst = Number(this.settings.get('band_low_hz')?.value) >= Number(this.status?.settings?.band_high_hz ?? 3500);
+    const rank = (key) => (key === 'band_high_hz' ? (highFirst ? 0 : 2) : key === 'band_low_hz' ? 1 : 3);
+    return writes.sort((a, b) => rank(a.key) - rank(b.key));
   }
 
   discard() {
     this.pending.clear();
-    this.setting = null;
+    this.settings.clear();
     this.pendingChanged();
   }
 
@@ -180,17 +199,18 @@ class DspStore extends EventTarget {
   async apply(label) {
     const writes = this.pendingWrites();
     const previous = writes.map(({address}) => ({address, word: this.deviceWord(address)}));
-    const setting = this.setting;
-    const previousSetting = setting ? {key: setting.key, value: this.status?.settings?.[setting.key]} : null;
+    const settings = this.settingWrites();
+    const previousSettings = settings.map(({key}) => ({key, value: this.status?.settings?.[key]}))
+      .filter((s) => s.value !== undefined).reverse();
     let result = null;
     if (writes.length) result = await apiJson('/dsp/write', {method: 'POST', body: {writes}});
-    if (setting) await apiJson('/dsp/set', {method: 'POST', body: {key: setting.key, value: setting.value}});
+    for (const setting of settings) await apiJson('/dsp/set', {method: 'POST', body: setting});
     this.history.unshift({
       time: new Date(), label, words: writes.length, commands: result?.command_count ?? 0,
-      previous, previousSetting, reverted: false,
+      previous, previousSettings, reverted: false,
     });
     this.pending.clear();
-    this.setting = null;
+    this.settings.clear();
     await this.refresh();
     this.pendingChanged();
     return result;
@@ -198,11 +218,33 @@ class DspStore extends EventTarget {
 
   async revert(entry) {
     if (entry.previous.length) await apiJson('/dsp/write', {method: 'POST', body: {writes: entry.previous}});
-    if (entry.previousSetting?.value !== undefined) {
-      await apiJson('/dsp/set', {method: 'POST', body: entry.previousSetting});
-    }
+    for (const setting of entry.previousSettings || []) await apiJson('/dsp/set', {method: 'POST', body: setting});
     entry.reverted = true;
     await this.refresh();
+  }
+
+  /** Stage again the edits that a boot check (I) or a program load put back, then forget them. */
+  async stageLost() {
+    const lost = this.status?.lost || [];
+    this.stage(lost.map(({address, word}) => ({address, word})), 'Put back by a boot check (I)');
+    await this.forgetLost();
+  }
+
+  async forgetLost() {
+    try { await apiJson('/dsp/lost/forget', {method: 'POST'}); } catch (_) { /* the next refresh shows it again */ }
+    await this.refresh();
+  }
+
+  /** Float taps of one block on the device (export default when the device is unknown). */
+  blockTaps(param) {
+    return Array.from({length: param.words}, (_, k) => this.deviceWord(param.address + k) / ONE);
+  }
+
+  /** The bank's anti-alias low-pass and band-pass on the device, for the listening copy; null without a bank. */
+  bankListenTaps() {
+    const antiAlias = (this.byGroup.get('bank_alias') || [])[0];
+    const bandPass = (this.byGroup.get('bank_band') || [])[0];
+    return antiAlias && bandPass ? {antiAlias: this.blockTaps(antiAlias), bandPass: this.blockTaps(bandPass)} : null;
   }
 
   /** Stage every writable word back to the export default. */
@@ -243,6 +285,9 @@ class DspStore extends EventTarget {
     }
     this.stage(writes, `Snapshot: ${snapshot.name}`);
     if (snapshot.settings?.settle_us) this.stageSetting('settle_us', snapshot.settings.settle_us, `Snapshot: ${snapshot.name}`);
+    for (const key of ['band_low_hz', 'band_high_hz']) {
+      if (snapshot.settings?.[key]) this.stageSetting(key, snapshot.settings[key], `Snapshot: ${snapshot.name}`);
+    }
   }
 
   deleteSnapshot(snapshot) {

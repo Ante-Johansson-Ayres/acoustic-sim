@@ -1,6 +1,7 @@
 """The tests that the Study screen offers, in the order of the characterisation plan, printed as JSON.
 
-Each entry is one command of MAX78002/docs/CHARACTERISATION_PLAN.md section 5, or the board regression:
+Each entry is one command of MAX78002/docs/CHARACTERISATION_PLAN.md section 5, a check outside the plan (the
+detector time constant), or the board regression:
 the script, its test, the options the operator can change (taken from the scripts' own parsers) and the
 plan's text for the test. tests/test_study_runner.py checks the entries against the plan's commands.
 
@@ -48,12 +49,13 @@ ENTRIES = [
     ("live-drone", "5.16", "characterise.py", "l1",
      {"sound": "drone", "distance": 1.5, "positions": "0,0;15,0;-15,0;30,0;-30,0"}),
     ("pointing", "5.17", "characterise.py", "a4", {}),
+    ("detector-time", None, "characterise.py", "d1", {}),
     ("regression", None, "board_regression.py", None, {}),
 ]
 # Entries that share a plan section take part of its text: from the paragraph that starts with the first
 # marker, up to the paragraph that starts with the second.
 TEXT_SPLIT = {"detection": (None, "**Live log"), "live-log": ("**Live log", None)}
-TITLES = {"live-log": "Live log", "regression": "Board regression"}
+TITLES = {"live-log": "Live log", "detector-time": "Detector time constant", "regression": "Board regression"}
 PARSERS = {"characterise.py": characterise.build_parser, "study_session.py": study_session.build_parser,
            "board_regression.py": board_regression.build_parser}
 # The runner sets --out; paths and the seed keep their defaults.

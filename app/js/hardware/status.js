@@ -9,6 +9,7 @@ import { clockTime, deg, hz, num, signed } from '../shared/format.js';
 import { look } from '../shared/look.js';
 import { ledBoard } from '../shared/led.js';
 import { ledText, sideWord } from './lookparts.js';
+import { LISTEN_PRESETS } from './session.js';
 
 export function operatingMode(session) {
   const frame = session.frame;
@@ -118,11 +119,18 @@ export class AudioPanel {
     this.recLabel = h('span', {}, 'Record');
     this.recButton = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => session.toggleRecording()}, this.recIcon, this.recLabel);
     this.saveButton = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => session.requestDownload()}, 'Save WAV');
-    const bandBox = h('input', {type: 'checkbox', checked: session.bandCopy,
-      onChange: () => { session.bandCopy = bandBox.checked; }});
-    this.bandCopy = h('label', {class: 'check',
-      title: 'The beam outputs are full band (they feed the tonal detector and classification). The copy is ' +
-        'filtered as the detectors hear: 0.5-3.5 kHz.'}, bandBox, 'Also save a 0.5-3.5 kHz copy (as the detectors hear)');
+    const bandBox = h('input', {type: 'checkbox', checked: session.listenCopy.enabled,
+      onChange: () => session.setListenCopy({enabled: bandBox.checked})});
+    const preset = h('select', {class: 'select select--sm', 'aria-label': 'Filter of the copy',
+      onChange: () => session.setListenCopy({preset: preset.value})},
+    Object.entries(LISTEN_PRESETS).map(([key, label]) => h('option', {value: key}, label)));
+    this.bandBox = bandBox;
+    this.preset = preset;
+    this.bandCopy = h('div', {class: 'line', title: 'The beam outputs are full band (they feed the tonal detector and ' +
+      'classification). The copy is filtered as you choose; set custom corners in Study, Parameters, Filters.'},
+    h('label', {class: 'check'}, bandBox, 'Also save a copy through'), preset);
+    session.addEventListener('listen', () => this.renderListen());
+    this.renderListen();
     this.recText = h('p', {class: 'note'});
     this.recProgress = h('progress', {max: 1, value: 0, hidden: true});
     this.el = h('section', {class: 'panel audio', 'aria-labelledby': 'hw-audio-title'},
@@ -133,6 +141,14 @@ export class AudioPanel {
         this.bandCopy,
         this.recProgress,
         this.recText));
+  }
+
+  renderListen() {
+    const {enabled, preset, low, high} = this.session.listenCopy;
+    this.bandBox.checked = enabled;
+    this.preset.value = preset;
+    const custom = this.preset.querySelector('option[value="custom"]');
+    if (custom) custom.textContent = `Custom band ${low / 1000}-${high / 1000} kHz`;
   }
 
   build(frame) {

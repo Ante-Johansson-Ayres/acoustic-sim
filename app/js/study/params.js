@@ -10,6 +10,8 @@ import { h, options, s, segmented, setText } from '../shared/dom.js';
 import { MINUS, clockTime, num } from '../shared/format.js';
 import { HEIMDALL_POSITIONS_MM } from '../shared/heimdall-array.js';
 import { ONE, dsp, hexWord, toFloat, toWord } from './dsp.js';
+import { alphaFor, tauMs } from './filters.js';
+import { filtersPanel } from './filterstab.js';
 
 const FS = 48000;
 const R_MAX = Math.max(...HEIMDALL_POSITIONS_MM.map(([x, y]) => Math.hypot(x, y)));
@@ -59,22 +61,13 @@ function cutMetrics(db, weights) {
   return {width: edge(1) + edge(-1), sidelobe: side, wng: s2 ? 10 * Math.log10(s1 * s1 / s2) : NaN};
 }
 
-function firResponseDb(t1, t2, f) {
-  const mag = (taps) => {
-    let re = 0; let im = 0;
-    taps.forEach((v, k) => { const p = -2 * Math.PI * f * k / FS; re += v * Math.cos(p); im += v * Math.sin(p); });
-    return Math.hypot(re, im);
-  };
-  return 20 * Math.log10(Math.max(mag(t1) * mag(t2), 1e-6));
-}
-
 const tauFromAlpha = (alpha) => (alpha > 0 && alpha < 1 ? -1000 / (FS * Math.log(1 - alpha)) : NaN);
 const alphaFromTau = (ms) => 1 - Math.exp(-1 / (ms * FS / 1000));
 const NO_DETECTOR = 'The register map has no scan level detector, so this cannot be written. Check level_detector in the export\'s beam_table_2d.json.';
 
-export function parametersScreen({canWrite}) {
+export function parametersScreen({canWrite, session}) {
   const state = {editor: 'taper', group: 'gains', showAll: false, query: '', taper: null, norm: 'level', freq: 2000, sel: 17,
-    firPreset: null, firStages: 'both', rawAddr: '1179', rawVal: '', reads: [], snapName: ''};
+    rawAddr: '1179', rawVal: '', reads: [], snapName: ''};
 
   // ── Block browser ──────────────────────────────────────────────────────
   const query = h('input', {type: 'search', class: 'input', placeholder: 'Name or address', 'aria-label': 'Filter blocks by name or address',
@@ -94,12 +87,17 @@ export function parametersScreen({canWrite}) {
   // ── Editors ────────────────────────────────────────────────────────────
   const tabs = segmented([['taper', 'Taper and mutes'], ['filter', 'Filters'], ['detector', 'Level detector'], ['raw', 'Raw register']],
     {label: 'Editors', role: 'tablist', onPick: (key) => { state.editor = key; render(); }});
-  const panels = {taper: taperPanel(), filter: filterPanel(), detector: detectorPanel(), raw: rawPanel()};
+  const panels = {taper: taperPanel(), filter: filtersPanel({session}), detector: detectorPanel(), raw: rawPanel()};
   const centre = h('section', {class: 'st-editor', 'aria-label': 'Editor'}, tabs.el, ...Object.values(panels).map((p) => p.el));
 
   // ── Changes ────────────────────────────────────────────────────────────
   const pendingList = h('ul', {class: 'pending'});
   const pendingCount = h('span', {class: 'mono note'});
+  const lostText = h('span', {class: 'note note--body'});
+  const lostBox = h('div', {class: 'ft-lost', role: 'status', hidden: true}, lostText,
+    h('div', {class: 'toolbar toolbar--tight'},
+      h('button', {type: 'button', class: 'btn btn--sm', onClick: () => dsp.stageLost()}, 'Stage them again'),
+      h('button', {type: 'button', class: 'btn btn--sm btn--quiet', onClick: () => dsp.forgetLost()}, 'Dismiss')));
   const summary = h('p', {class: 'pending__summary'});
   const precondition = h('p', {class: 'note'});
   const applyButton = h('button', {type: 'button', class: 'btn btn--primary btn--lg', onClick: () => apply()}, 'Apply');
@@ -111,7 +109,7 @@ export function parametersScreen({canWrite}) {
   const changes = h('aside', {class: 'st-changes', 'aria-label': 'Changes'},
     h('section', {class: 'section'},
       h('div', {class: 'section__row'}, h('h2', {class: 'section__title'}, 'Pending changes'), pendingCount),
-      pendingList, summary, precondition,
+      lostBox, pendingList, summary, precondition,
       h('div', {class: 'toolbar toolbar--tight'}, applyButton, discardButton),
       message,
     ),
@@ -132,8 +130,7 @@ export function parametersScreen({canWrite}) {
   const el = h('div', {class: 'st-params'}, browser, centre, changes);
 
   async function apply() {
-    const labels = dsp.pendingGroups().map((g) => g.label);
-    if (dsp.setting) labels.push(dsp.setting.label);
+    const labels = [...new Set([...dsp.pendingGroups().map((g) => g.label), ...[...dsp.settings.values()].map((s) => s.label)])];
     applyButton.disabled = true;
     setText(message, 'Writing…');
     try {
@@ -249,88 +246,6 @@ export function parametersScreen({canWrite}) {
     return {el, render};
   }
 
-  // ── Filters ────────────────────────────────────────────────────────────
-  function filterPanel() {
-    const presets = segmented([['flashed', 'As flashed'], ['unity', 'Flashed shape at 0 dB'], ['bypass', 'Bypass']], {
-      label: 'Filter', onPick: (key) => { state.firPreset = key; stageFir(); }});
-    const stages = segmented([['stage1', 'Stage 1'], ['stage2', 'Stage 2'], ['both', 'Both']], {
-      label: 'Stages', onPick: (key) => { state.firStages = key; if (state.firPreset) stageFir(); else render(); }});
-    const response = s('svg', {viewBox: '0 0 520 250', class: 'chart', role: 'img'});
-    const readouts = h('div', {class: 'readouts'});
-    const taps = h('div', {class: 'taps'});
-    const lede = h('p', {class: 'lede'});
-    const caption = h('figcaption', {class: 'figure-caption'});
-    const missing = h('p', {class: 'field__error', role: 'alert'});
-    const el = h('div', {class: 'st-panel', role: 'tabpanel'},
-      h('div', {class: 'st-panel__head'}, h('h2', {class: 'page-title'}, 'FIR filters'), lede),
-      h('div', {class: 'toolbar'}, presets.el, stages.el),
-      missing,
-      h('figure', {class: 'st-figure'}, caption, response,
-        h('div', {class: 'chart-legend'}, h('span', {class: 'lg-line lg-line--device'}), 'On the device now', h('span', {class: 'lg-line lg-line--proposed'}), 'Proposed')),
-      readouts, taps,
-      h('p', {class: 'note'}, 'Assumes coefficient k sits at the block address + k; the flashed taps are symmetric, so confirm the order with the DSP owner before writing asymmetric taps. Eleven taps at 48 kHz cannot make a sharp edge.'),
-    );
-
-    function presetTaps(defaults) {
-      if (state.firPreset === 'bypass') return defaults.map((_, k) => (k === Math.floor(defaults.length / 2) ? 1 : 0));
-      if (state.firPreset === 'unity') { const total = sum(defaults); return defaults.map((v) => (total ? v / total : v)); }
-      return defaults.slice();
-    }
-
-    function stageFir() {
-      dsp.unstage((address, entry) => entry.label.startsWith('FIR'));
-      const which = state.firStages === 'both' ? ['fir1', 'fir2'] : [state.firStages === 'stage1' ? 'fir1' : 'fir2'];
-      const writes = [];
-      for (const group of which) {
-        for (const param of dsp.byGroup.get(group) || []) {
-          const defaults = param.default_words.map((w) => w / ONE);
-          presetTaps(defaults).forEach((v, k) => writes.push({address: param.address + k, word: toWord(v, '8.24')}));
-        }
-      }
-      const stageText = which.length === 2 ? 'stages 1 and 2' : which[0] === 'fir1' ? 'stage 1' : 'stage 2';
-      dsp.stage(writes, `FIR ${stageText}, ${{flashed: 'as flashed', unity: 'flashed shape at 0 dB', bypass: 'bypass'}[state.firPreset]}`);
-    }
-
-    function render() {
-      presets.set(state.firPreset);
-      stages.set(state.firStages);
-      // One block per microphone, or one after the beam sum (mic null).
-      const p1 = dsp.param('fir1', 0) ?? dsp.param('fir1', null);
-      const p2 = dsp.param('fir2', 0) ?? dsp.param('fir2', null);
-      const afterSum = p1?.mic === null;
-      setText(lede, afterSum
-        ? 'The steered beam passes through two FIR stages after the sum: they shape Continuous, Track and the beam audio. Stare reads the bank, which has its own band-pass and is not changed here.'
-        : 'Every microphone has two FIR stages. Presets apply to all 44 microphones.');
-      setText(caption, `Response of both stages together (${afterSum ? 'after the beam sum' : 'DSP00'})`);
-      setText(missing, p1 && p2 ? '' : 'The register map has no FIR_Stage1/FIR_Stage2 blocks, so there is nothing to edit.');
-      if (!p1 || !p2) { response.replaceChildren(); readouts.replaceChildren(); taps.replaceChildren(); return; }
-      const words = (param, fn) => Array.from({length: param.words}, (_, k) => fn(param.address + k) / ONE);
-      const dev = [words(p1, (a) => dsp.deviceWord(a)), words(p2, (a) => dsp.deviceWord(a))];
-      const pro = [words(p1, (a) => dsp.proposedWord(a)), words(p2, (a) => dsp.proposedWord(a))];
-      const fx = (f) => 56 + Math.log10(f / 50) / Math.log10(24000 / 50) * 444;
-      const fy = (d) => 16 + (6 - Math.max(-60, Math.min(6, d))) / 66 * 200;
-      const path = (t) => Array.from({length: 121}, (_, i) => { const f = 50 * Math.pow(480, i / 120); return `${i ? 'L' : 'M'}${fx(f).toFixed(1)} ${fy(firResponseDb(t[0], t[1], f)).toFixed(1)}`; }).join(' ');
-      response.replaceChildren(
-        ...[0, -20, -40, -60].flatMap((d) => [s('line', {class: 'grid', x1: 56, x2: 500, y1: fy(d), y2: fy(d)}), s('text', {class: 'tick', x: 48, y: fy(d) + 4, 'text-anchor': 'end'}, num(d, 0))]),
-        ...[[100, '100'], [300, '300'], [1000, '1k'], [3000, '3k'], [10000, '10k'], [20000, '20k']].map(([f, t]) => s('text', {class: 'tick', x: fx(f), y: 236, 'text-anchor': 'middle'}, t)),
-        s('text', {class: 'tick', x: 500, y: 250, 'text-anchor': 'end'}, 'Hz'),
-        s('path', {d: path(dev), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.5, 'stroke-dasharray': '5 4'}),
-        s('path', {d: path(pro), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2}),
-      );
-      readouts.replaceChildren(...[[500, 'At 500 Hz'], [2000, 'At 2 kHz'], [6000, 'At 6 kHz']].map(([f, label]) =>
-        h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, label),
-          h('span', {class: 'mono'}, `${num(firResponseDb(dev[0], dev[1], f), 1)} → ${num(firResponseDb(pro[0], pro[1], f), 1)} dB`))));
-      const cells = [h('span', {class: 'taps__head'}, 'Tap'), ...dev[0].map((_, k) => h('span', {class: 'taps__head'}, String(k)))];
-      [['Stage 1, device', dev[0], null], ['Stage 1, proposed', pro[0], dev[0]], ['Stage 2, device', dev[1], null], ['Stage 2, proposed', pro[1], dev[1]]].forEach(([label, values, base]) => {
-        cells.push(h('span', {class: 'taps__label'}, label));
-        values.forEach((v, k) => cells.push(h('span', {class: `mono ${base && Math.abs(v - base[k]) > 1e-9 ? 'is-changed' : base ? '' : 'is-muted'}`}, v.toFixed(4))));
-      });
-      taps.style.gridTemplateColumns = `124px repeat(${dev[0].length}, minmax(0, 1fr))`;
-      taps.replaceChildren(...cells);
-    }
-    return {el, render};
-  }
-
   // ── Level detector ─────────────────────────────────────────────────────
   function detectorPanel() {
     const fields = {};
@@ -344,21 +259,71 @@ export function parametersScreen({canWrite}) {
     };
     const chart = s('svg', {viewBox: '0 0 520 236', class: 'chart', role: 'img'});
     const readouts = h('div', {class: 'readouts'});
+    const scanPresets = segmented([['flashed', 'As flashed'], ['fast', 'Fast, 2 ms'], ['banklike', 'Like the bank']],
+      {label: 'Scan detector presets', onPick: (key) => stageScanPreset(key)});
+    const settleNote = h('span', {class: 'note'});
+    const settleButton = h('button', {type: 'button', class: 'btn btn--sm', onClick: () => stageSettle()}, 'Stage the settle time it needs (3 τ)');
+    const bankPresets = segmented([['flashed', 'As flashed'], ['faster', 'Faster, 17 ms'], ['slower', 'Slower, 70 ms']],
+      {label: 'Bank detector presets', onPick: (key) => stageBank(key)});
+    const bankInput = h('input', {class: 'input input--mono input--sm', inputmode: 'decimal', style: {width: '120px'}, 'aria-label': 'Bank time constant (ms)',
+      onChange: () => stageBank('custom')});
+    const bankError = h('span', {class: 'field__error', role: 'alert'});
+    const bankReadouts = h('div', {class: 'readouts'});
+    const bankSection = h('section', {class: 'section ft-section', hidden: true},
+      h('h3', {class: 'st-mic__title'}, 'Bank level detectors (Live)'),
+      h('p', {class: 'note note--body'}, 'One for each bank beam, at 12 kHz, after its band-pass. Live reads all of them 20 times each second. A shorter time constant follows short sounds better and scatters more.'),
+      h('p', {class: 'ft-warning'}, 'Live compares each level with its slow background (1.5 times), and the Live log replay (live_log.py) uses the flashed 34.66 ms. Measure Live again after a change. I keeps these words; a reset puts back the flashed value.'),
+      h('div', {class: 'toolbar'}, bankPresets.el, h('span', {class: 'inline-field'}, h('label', {}, 'Time constant (ms)'), bankInput)),
+      bankError, bankReadouts);
     const el = h('div', {class: 'st-panel', role: 'tabpanel'},
       h('div', {class: 'st-panel__head'}, h('h2', {class: 'page-title'}, 'Level detector'),
         h('p', {class: 'lede'}, 'The level detector measures the summed beam. For every sector the firmware steers, waits the settle time, then reads this level.')),
+      h('div', {class: 'toolbar'}, h('span', {class: 'note'}, 'Presets'), scanPresets.el),
       h('div', {class: 'field-grid'},
         field('tau', 'Time constant (ms)', ''),
         field('hold', 'Hold (samples)', ''),
         field('decay', 'Decay (per sample)', ''),
         field('settle', 'Firmware settle before each read (µs)', 'A firmware setting sent with SET, not a DSP register.'),
       ),
+      h('div', {class: 'toolbar toolbar--tight'}, settleButton, settleNote),
       h('figure', {class: 'st-figure'}, h('figcaption', {class: 'figure-caption'}, 'How far a level step has settled when the firmware reads it'), chart,
         h('div', {class: 'chart-legend'}, h('span', {class: 'lg-line lg-line--device'}), 'On the device now', h('span', {class: 'lg-line lg-line--proposed'}), 'Proposed')),
       readouts,
+      bankSection,
     );
 
     const detectorParam = (name) => dsp.param('detector', undefined, name);
+    const bankTconst = () => (dsp.byGroup.get('bank_detector') || []).filter((p) => p.name === 'TCONST' && p.writable);
+    const bankRate = () => dsp.registry?.bank?.sample_rate_hz || 12000;
+    const bankFlashedMs = () => dsp.registry?.bank?.level_time_constant_ms ?? 34.66;
+
+    function stageScanPreset(key) {
+      const tc = detectorParam('TCONST');
+      if (!tc) return;
+      const word = key === 'flashed' ? tc.default_words[0] : toWord(alphaFromTau(key === 'fast' ? 2 : bankFlashedMs()), '8.24');
+      dsp.stage([{address: tc.address, word}], `Detector ${tc.name}`);
+    }
+
+    function settleFor(tau) {
+      return Math.max(50, Math.min(20000, Math.round(3 * tau * 1000)));
+    }
+
+    function stageSettle() {
+      const tc = detectorParam('TCONST');
+      if (!tc) return;
+      dsp.stageSetting('settle_us', settleFor(tauFromAlpha(dsp.proposedWord(tc.address) / ONE)), 'Firmware settle time');
+    }
+
+    function stageBank(key) {
+      setText(bankError, '');
+      let ms = {faster: 17, slower: 70}[key];
+      if (key === 'custom') {
+        ms = Number(String(bankInput.value).replace(MINUS, '-'));
+        if (!(ms >= 1 && ms <= 1000)) { setText(bankError, 'Enter a time from 1 to 1000 ms.'); return; }
+      }
+      const writes = bankTconst().map((p) => ({address: p.address, word: key === 'flashed' ? p.default_words[0] : toWord(alphaFor(ms, bankRate()), '8.24')}));
+      dsp.stage(writes, 'Bank detectors, time constant');
+    }
 
     function stageDetector(key, text) {
       const value = Number(String(text).replace(MINUS, '-'));
@@ -393,7 +358,14 @@ export function parametersScreen({canWrite}) {
       const tauDev = tauFromAlpha(dsp.deviceWord(tc.address) / ONE);
       const tauNew = tauFromAlpha(dsp.proposedWord(tc.address) / ONE);
       const settleDev = (dsp.status?.settings?.settle_us ?? 1250) / 1000;
-      const settleNew = (dsp.setting?.key === 'settle_us' ? dsp.setting.value : dsp.status?.settings?.settle_us ?? 1250) / 1000;
+      const settleNew = dsp.proposedSetting('settle_us', 1250) / 1000;
+      const tcWord = dsp.proposedWord(tc.address);
+      scanPresets.set(tcWord === tc.default_words[0] ? 'flashed' : tcWord === toWord(alphaFromTau(2), '8.24') ? 'fast'
+        : tcWord === toWord(alphaFromTau(bankFlashedMs()), '8.24') ? 'banklike' : null);
+      const need = settleFor(tauNew);
+      setText(settleNote, need >= 20000 && 3 * tauNew > 20
+        ? `3 τ is ${num(3 * tauNew, 1)} ms; the firmware waits 20 ms at most, so a reading has ${Math.round(100 * (1 - Math.exp(-20 / tauNew)))}% of a step.`
+        : `3 τ is ${num(need / 1000, 2)} ms.`);
       const focused = document.activeElement;
       const setField = (key, value) => { if (focused !== fields[key].input) fields[key].input.value = value; };
       setField('tau', tauNew.toFixed(2));
@@ -427,6 +399,31 @@ export function parametersScreen({canWrite}) {
         h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, 'Settled when read'), h('span', {class: 'mono'}, `${Math.round(rDev * 100)}% → ${Math.round(rNew * 100)}%`)),
         h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, 'Full-scan rate (36 sectors, estimate)'), h('span', {class: 'mono'}, `${rate(settleDev).toFixed(1)} → ${rate(settleNew).toFixed(1)} Hz`)),
         h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, 'Settle needed for 95%'), h('span', {class: 'mono'}, `${(3 * tauNew).toFixed(1)} ms`)),
+      );
+      renderBank();
+    }
+
+    function renderBank() {
+      const params = bankTconst();
+      bankSection.hidden = !params.length;
+      if (!params.length) return;
+      const rate = bankRate();
+      const tau = (word) => tauMs(word / ONE, rate);
+      const first = params[0];
+      const device = tau(dsp.deviceWord(first.address));
+      const proposed = tau(dsp.proposedWord(first.address));
+      const edited = params.filter((p) => dsp.deviceWord(p.address) !== p.default_words[0]).length;
+      const unequal = params.some((p) => dsp.deviceWord(p.address) !== dsp.deviceWord(first.address));
+      const word = dsp.proposedWord(first.address);
+      bankPresets.set(word === first.default_words[0] ? 'flashed' : word === toWord(alphaFor(17, rate), '8.24') ? 'faster'
+        : word === toWord(alphaFor(70, rate), '8.24') ? 'slower' : null);
+      if (document.activeElement !== bankInput) bankInput.value = proposed.toFixed(2);
+      const inMap = (t) => Math.round(100 * (1 - Math.exp(-50 / t)));
+      bankReadouts.replaceChildren(
+        h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, 'Time constant'), h('span', {class: 'mono'}, `${num(device, 2)} → ${num(proposed, 2)} ms`)),
+        h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, 'A step, after one Live map (50 ms)'), h('span', {class: 'mono'}, `${inMap(device)}% → ${inMap(proposed)}%`)),
+        h('div', {class: 'readout-item'}, h('span', {class: 'figure-label'}, 'Differ from flashed'),
+          h('span', {class: `mono ${unequal ? 'is-warn' : ''}`}, `${edited} of ${params.length}${unequal ? ' (not all equal)' : ''}`)),
       );
     }
     return {el, render};
@@ -543,7 +540,8 @@ export function parametersScreen({canWrite}) {
     const q = state.query;
     const qNum = /^\d+$/.test(q) ? Number(q) : /^0x[0-9a-f]+$/.test(q) ? parseInt(q, 16) : NaN;
     const visible = groups.filter((g) => !q || (Number.isFinite(qNum) ? dsp.index.get(qNum)?.param.group === g.key : g.label.toLowerCase().includes(q) || g.key.includes(q)));
-    const editorFor = {gains: 'taper', mutes: 'taper', fir1: 'filter', fir2: 'filter', detector: 'detector'};
+    const editorFor = {gains: 'taper', mutes: 'taper', fir1: 'filter', fir2: 'filter', detector: 'detector',
+      bank_band: 'filter', bank_alias: 'filter', bank_ch1: 'filter', bank_detector: 'detector'};
     groupList.replaceChildren(...visible.map((g) => {
       const params = dsp.byGroup.get(g.key) || [];
       const words = params.flatMap((p) => Array.from({length: p.words}, (_, k) => p.address + k));
@@ -598,22 +596,27 @@ export function parametersScreen({canWrite}) {
         h('span', {class: 'note'}, span),
         change ? h('span', {class: 'mono pending__change'}, change) : null);
     });
-    if (dsp.setting) {
+    for (const [key, {value, label}] of dsp.settings) {
+      const unit = key.endsWith('_hz') ? ' Hz' : key.endsWith('_us') ? ' µs' : '';
       items.push(h('li', {class: 'pending__item'},
-        h('span', {class: 'pending__title'}, dsp.setting.label),
-        h('button', {type: 'button', class: 'btn btn--sm btn--quiet', 'aria-label': 'Remove the setting change', onClick: () => { dsp.setting = null; dsp.pendingChanged(); }}, '×'),
-        h('span', {class: 'note'}, 'Firmware setting · SET,settle_us'),
-        h('span', {class: 'mono pending__change'}, `${dsp.status?.settings?.settle_us ?? 1250} → ${dsp.setting.value} µs`)));
+        h('span', {class: 'pending__title'}, label),
+        h('button', {type: 'button', class: 'btn btn--sm btn--quiet', 'aria-label': `Remove the ${key} change`, onClick: () => dsp.unstageSetting(key)}, '×'),
+        h('span', {class: 'note'}, `Firmware setting · SET,${key}`),
+        h('span', {class: 'mono pending__change'}, `${dsp.status?.settings?.[key] ?? '?'} → ${value}${unit}`)));
     }
+    const lost = dsp.status?.lost || [];
+    lostBox.hidden = !lost.length;
+    setText(lostText, `A boot check (I) or a program load put back ${lost.length} edited ${lost.length === 1 ? 'word' : 'words'} (the bank band-pass and the taper come back with every I).`);
     pendingList.replaceChildren(...(items.length ? items : [h('li', {class: 'note'}, 'Nothing pending. Edits wait here until you apply them.')]));
     setText(pendingCount, items.length ? String(items.length) : '');
     const plan = dsp.plan;
-    if (!dsp.pending.size && !dsp.setting) setText(summary, '');
+    const settingCount = dsp.settings.size;
+    if (!dsp.pending.size && !settingCount) setText(summary, '');
     else if (plan?.error) setText(summary, plan.error);
-    else if (plan) setText(summary, `${plan.word_count} words in ${plan.command_count} commands${dsp.setting ? ' and one setting' : ''}, about ${Math.max(1, Math.round(plan.estimate_ms))} ms at 921600 baud`);
+    else if (plan) setText(summary, `${plan.word_count} words in ${plan.command_count} commands${settingCount ? ` and ${settingCount} ${settingCount === 1 ? 'setting' : 'settings'}` : ''}, about ${Math.max(1, Math.round(plan.estimate_ms))} ms at 921600 baud`);
     const status = dsp.status;
     const ok = canWrite();
-    const any = dsp.pending.size > 0 || Boolean(dsp.setting);
+    const any = dsp.pending.size > 0 || settingCount > 0;
     let text = 'Written with safeload, up to five consecutive words per command, then read back.';
     if (!status || status.offline) text = 'The backend is not reachable.';
     else if (!status.supported) text = `${status.reason} You can browse and plan changes here.`;

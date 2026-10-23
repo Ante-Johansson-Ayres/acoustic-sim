@@ -8,7 +8,7 @@ import zlib
 import pytest
 
 from dsp_registry import DspParameterService
-from heimdall_protocol import HeimdallState, ProtocolError, parse_line
+from heimdall_protocol import FIRMWARE_SETTINGS, HeimdallState, ProtocolError, parse_line
 from heimdall_transport import (
     DeployedProgram,
     EmulatorHeimdallTransport,
@@ -254,6 +254,8 @@ def test_command_validation():
     assert validate_command("R,0") == "R,0"
     assert validate_command("D") == "D"
     assert validate_command("SET,window_us,5000") == "SET,window_us,5000"
+    for key in FIRMWARE_SETTINGS:
+        assert validate_command(f"SET,{key},800") == f"SET,{key},800"
     pw_body = "PW,1134,01000000,FFFFFFFF"
     checked_pw = validate_command(pw_body)
     assert checked_pw.startswith(f"{pw_body}*")
@@ -271,6 +273,8 @@ def test_command_validation():
         validate_command("PR,1134,17")
     with pytest.raises(ValueError):
         validate_command("DG,-4000,4000,8,-3000,3000,7", sectors=49)
+    with pytest.raises(ValueError):
+        validate_command("SET,band_mid_hz,1000")
 
 
 def test_recording_and_audio_transfer_records():

@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from array_theory import theory_cut
 from heimdall_transport import DeployedProgram, EmulatorHeimdallTransport, SerialHeimdallTransport
-from dsp_registry import DspParameterService, plan_writes
+from dsp_registry import DspParameterService, plan_writes, setting_order
 from study_runner import StudyRunner
 from heimdall_acoustic import (
     AcousticCacheLevelProvider,
@@ -1290,6 +1290,12 @@ def dsp_set(request: DspSetRequest):
     return _dsp_call(lambda: {"settings": _dsp_service.set(_current_transport(), request.key, request.value)})
 
 
+@app.post("/dsp/lost/forget")
+def dsp_lost_forget():
+    _dsp_service.forget_lost()
+    return {"lost": []}
+
+
 # ── Study: the characterisation tests, run by study_runner.py ────────────────
 
 class StudyRunRequest(BaseModel):
@@ -1354,8 +1360,8 @@ def _run_prepare(configuration):
         if edits:
             _dsp_service.write(transport, [{"address": e["address"], "word": e["default"]} for e in edits])
             messages.append(f"Flashed run: {len(edits)} edited DSP words are at their flashed values during the test.")
-        for key in changed:
-            _dsp_service.set(transport, key, defaults[key])
+        for key, value in setting_order(settings, {key: defaults[key] for key in changed}):
+            _dsp_service.set(transport, key, value)
         if changed:
             messages.append("Flashed run: settings at their defaults during the test (" + ", ".join(
                 f"{key} {value} to {defaults[key]}" for key, value in changed.items()) + ").")
@@ -1378,7 +1384,8 @@ def _run_finish(context):
     if edits:
         _dsp_service.write(transport, [{"address": e["address"], "word": e["word"]} for e in edits])
         messages.append(f"The Study's {len(edits)} edited DSP words are back on the board.")
-    for key, value in (changed or {}).items():
+    current = dict(_dsp_service.status(transport).get("settings") or {})
+    for key, value in setting_order(current, changed or {}):
         _dsp_service.set(transport, key, value)
     if changed:
         messages.append("The settings are back: " + ", ".join(f"{key} {value}" for key, value in changed.items()) + ".")

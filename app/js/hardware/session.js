@@ -14,7 +14,27 @@ import { fileStamp } from '../shared/format.js';
 import { activeGrid, directionGridCommand, directionGridFailure, directionGridReady, gridMatches } from './dirgrid.js';
 import { median } from './field.js';
 import { outputReplyCode } from './replies.js';
-import { bandWav } from './listenfilter.js';
+import { BAND_HIGH_HZ, BAND_LOW_HZ, listenSuffix, listenWav } from './listenfilter.js';
+import { dsp } from '../study/dsp.js';
+
+const LISTEN_KEY = 'heimdall.listenCopy';
+/** The listening copy of a saved recording: the band filter of the MCU window, the bank's own filters, or others. */
+export const LISTEN_PRESETS = {
+  mcu: 'MCU window band (as the board measures now)',
+  bank: 'Live detectors (the bank filters)',
+  drone: 'Drone band 0.1-4 kHz',
+  custom: 'Custom band',
+};
+
+function loadListenCopy() {
+  const fallback = {enabled: false, preset: 'mcu', low: BAND_LOW_HZ, high: BAND_HIGH_HZ};
+  try {
+    const saved = JSON.parse(localStorage.getItem(LISTEN_KEY));
+    return saved && LISTEN_PRESETS[saved.preset] ? {...fallback, ...saved} : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
 
 export const STALE_MS = 5000;
 export const HISTORY_WINDOW_S = 30;
@@ -58,7 +78,7 @@ export class HardwareSession extends EventTarget {
     this.downloadRequested = false;
     this.downloadCommandSent = false;
     this.downloadStopSent = false;
-    this.bandCopy = false;            // also save the recording through the detector band
+    this.listenCopy = loadListenCopy(); // {enabled, preset, low, high}: the filtered copy that Save WAV adds
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
     this.lastMoveLogged = 0;
@@ -271,6 +291,28 @@ export class HardwareSession extends EventTarget {
     return true;
   }
 
+  /** {enabled, preset, low, high}; saved in this browser. */
+  setListenCopy(patch) {
+    this.listenCopy = {...this.listenCopy, ...patch};
+    try { localStorage.setItem(LISTEN_KEY, JSON.stringify(this.listenCopy)); } catch (_) { /* storage unavailable */ }
+    this.emit('listen');
+  }
+
+  /** The filter of the listening copy: {kind: 'band', low, high} or {kind: 'bank', antiAlias, bandPass}. */
+  async listenFilter() {
+    const {preset, low, high} = this.listenCopy;
+    if (preset === 'bank') {
+      await dsp.load();
+      const taps = dsp.bankListenTaps();
+      if (!taps) throw new Error('this DSP program has no bank');
+      return {kind: 'bank', ...taps};
+    }
+    if (preset === 'drone') return {kind: 'band', low: 100, high: 4000};
+    if (preset === 'custom') return {kind: 'band', low, high};
+    const settings = this.latest?.settings || {};
+    return {kind: 'band', low: settings.band_low_hz ?? BAND_LOW_HZ, high: settings.band_high_hz ?? BAND_HIGH_HZ};
+  }
+
   // ── Commands ───────────────────────────────────────────────────────────
 
   command(command) {
@@ -473,14 +515,17 @@ export class HardwareSession extends EventTarget {
       const stamp = fileStamp();
       const audio = await audioResponse.blob();
       download(audio, `heimdall-${stamp}.wav`);
-      if (this.bandCopy) {
-        download(new Blob([bandWav(await audio.arrayBuffer())], {type: 'audio/wav'}),
-          `heimdall-${stamp}-band-0.5-3.5kHz.wav`);
+      let copy = null;
+      if (this.listenCopy.enabled) {
+        const filter = await this.listenFilter();
+        copy = listenSuffix(filter);
+        download(new Blob([listenWav(await audio.arrayBuffer(), filter)], {type: 'audio/wav'}),
+          `heimdall-${stamp}-${copy}.wav`);
       }
       download(new Blob([JSON.stringify(await metadataResponse.json(), null, 2) + '\n'],
         {type: 'application/json'}), `heimdall-${stamp}.json`);
-      this.addEvent('AUDIO', this.bandCopy
-        ? 'WAV, detector-band copy and metadata saved and checksum-verified'
+      this.addEvent('AUDIO', copy
+        ? `WAV, ${copy} copy and metadata saved and checksum-verified`
         : 'WAV and metadata saved and checksum-verified');
     } catch (error) {
       this.addEvent('ERROR', `Saving the recording failed: ${error.message}`, 'error');

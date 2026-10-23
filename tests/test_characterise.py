@@ -1,8 +1,10 @@
 """scripts/characterise.py: the noise models behind N1 and N2 (no hardware)."""
 from __future__ import annotations
 
+import argparse
 import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -186,3 +188,94 @@ def test_real_drift_ignores_reading_scatter():
     assert characterise.real_drift(np.linspace(0.0, -1.0, 6), [0.1] * 6)
     assert not characterise.real_drift(np.linspace(0.0, -0.4, 6), [0.01] * 6)
     assert not characterise.real_drift([0.0], [0.1])
+
+
+@pytest.mark.parametrize("scale", ["power", "amplitude"])
+def test_d1_fit_finds_the_time_constant_and_the_scale(scale):
+    tau, delay, loud, floor = 8.665, 0.4, 0.05, 0.0005
+    e = characterise.D1_SCALES[scale]
+    t = np.asarray(characterise.D1_SETTLES_US) / 1000
+    words = (floor ** e + (loud ** e - floor ** e) * np.exp(-np.maximum(t - delay, 0) / tau)) ** (1 / e)
+    fits = {name: characterise.fit_decay(t, words, loud, floor, k) for name, k in characterise.D1_SCALES.items()}
+    assert fits[scale]["tau_ms"] == pytest.approx(tau, rel=1e-6)
+    assert fits[scale]["delay_ms"] == pytest.approx(delay, abs=1e-6)
+    other = next(name for name in fits if name != scale)
+    assert fits[other] is None or fits[other]["residual"] > 10 * fits[scale]["residual"]
+
+
+def test_d1_settle_within_interpolates_and_reports_none():
+    t, excess = [1.0, 2.0, 4.0, 8.0], [20.0, 10.0, 4.0, 2.0]
+    assert characterise.settle_within(t, excess, 3.0) == pytest.approx(6.0)
+    assert characterise.settle_within(t, excess, 25.0) == 1.0
+    assert characterise.settle_within(t, excess, 1.0) is None
+    assert characterise.fit_decay(t, [0.05] * 4, 0.05, 0.0005, 1) is None
+
+
+class ModelDetector:
+    """A board whose scan detector word moves toward the steered sector's level with time constant tau."""
+
+    def __init__(self, tau_ms, on, loud=0.05, floor=0.0005):
+        self.tau, self.on, self.loud, self.floor = tau_ms, on, loud, floor
+        self.clock, self.settle, self.sector, self.start, self.steered = 0.0, 1.25, None, floor, 0.0
+
+    def word(self):
+        target = self.loud if self.sector == self.on else self.floor
+        return target + (self.start - target) * np.exp(-(self.clock - self.steered) / self.tau)
+
+    def pump(self, seconds, until=None):
+        self.clock += seconds * 1000
+
+    def read(self, command):
+        if command.startswith("S,"):
+            self.start, self.sector, self.steered = self.word(), int(command[2:]), self.clock
+            self.clock += self.settle
+        return {"raw_level": int(self.word() * 2 ** 24)}
+
+
+class ModelSession:
+    def __init__(self, board):
+        import csv
+        import io
+        from study_session import FIELDS, Results
+        self.board, self.home, self.values, self.report = board, ({"rows": 7, "columns": 7},), {}, Results()
+        self.writer = csv.DictWriter(io.StringIO(), FIELDS)
+
+    def speaker_sector(self, azimuth, elevation):
+        return 24
+
+    def sound(self, name):
+        pass
+
+    def read(self, command):
+        return self.board.read(command)
+
+    def set(self, key, value):
+        if key == "settle_us":
+            self.board.settle = value / 1000
+
+    @contextmanager
+    def settings(self, **changes):
+        for key, value in changes.items():
+            self.set(key, value)
+        yield
+
+
+def test_d1_runs_on_a_model_detector(monkeypatch, tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    board = ModelDetector(8.665, on=24)
+    words = {3739: 0x9D61, 3740: 0, 3741: 0x0E39}
+    registry = {"parameters": [{"group": "detector", "name": name, "address": address}
+                               for name, address in (("TCONST", 3739), ("hold", 3740), ("decay", 3741))]}
+    monkeypatch.setattr(characterise, "place", lambda *a: None)
+    monkeypatch.setattr(characterise, "http", lambda method, path, body=None: (200, registry))
+    monkeypatch.setattr(characterise, "read_words", lambda address, count: [words[address]])
+    monkeypatch.setattr(characterise, "time", type("Clock", (), {"monotonic": staticmethod(lambda: board.clock / 1000)}))
+    session = ModelSession(board)
+    characterise.d1(session, argparse.Namespace(distance=2.0, seed=1, repeats=2), str(tmp_path), None)
+    result = session.values["d1"]
+    assert result["expected_tau_ms"] == pytest.approx(8.665, abs=0.01)
+    assert result["fits"]["power"]["tau_ms"] == pytest.approx(8.665, rel=0.02)
+    assert ("D1 time constant against the TCONST word", True) in [row[:2] for row in session.report.rows]
+    assert {r["timing"] for r in result["readings"]} == {"firmware", "host"}
+    assert (tmp_path / "d1_detector_decay.png").exists()

@@ -16,7 +16,7 @@ import zlib
 
 from dsp_registry import DspParameterService, checksum
 from heimdall_bank import BankTracker, LOST_MAPS as BANK_LOST_MAPS, PERIOD_S as BANK_PERIOD_S
-from heimdall_protocol import HeimdallState, ProtocolError
+from heimdall_protocol import FIRMWARE_SETTINGS, HeimdallState, ProtocolError
 
 
 ACQUIRE_RATIO = 3.0 / 2.0
@@ -948,10 +948,7 @@ def validate_command(command: str, sectors: int = 65535) -> str:
         return command
     if re.fullmatch(r"O,[0-2],\d{1,3}", command):
         return command
-    if re.fullmatch(
-        r"SET,(?:settle_us|guard_us|window_us|measure|band|channel|map_record|tone),-?\d+",
-        command,
-    ):
+    if re.fullmatch(rf"SET,(?:{'|'.join(FIRMWARE_SETTINGS)}),-?\d+", command):
         return command
     match = re.fullmatch(r"(PW,(\d+)(?:,[0-9A-Fa-f]{8}){1,5})(?:\*([0-9A-Fa-f]{2}))?", command)
     if match and int(match.group(2)) <= 0xFFFF:

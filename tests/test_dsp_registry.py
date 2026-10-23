@@ -184,7 +184,7 @@ def test_bank_detectors_never_count_as_the_scan_detector(tmp_path):
     registry = dsp_registry.load_registry(_export(tmp_path, parameters, address_map))
     by_block = {p["block"]: p for p in registry["parameters"]}
     assert by_block["SingleBandwNumericalDisplay_3"]["group"] == "detector"
-    assert by_block["Bank_Beam_0_0"]["group"] == "other"
+    assert by_block["Bank_Beam_0_0"]["group"] == "bank_detector"
     assert registry["level_readback_address"] == 23
 
     (tmp_path / "beam_table_2d.json").write_text(json.dumps({"level_detector": "Bank_Beam_0_1"}))
@@ -343,3 +343,116 @@ def test_dsp_api_against_the_emulator():
         assert not steering["writable"]
         assert client.post("/dsp/write", json={"writes": [{"address": steering["address"], "word": 0}]}).status_code == 400
         client.post("/hw_disconnect")
+
+
+# ── Bank filters and detectors (Study Filters and Level detector tabs) ──────
+
+def _bank_export(tmp_path, contract=None):
+    path = _export(tmp_path, {
+        "Gain_DSP00": [("Gain", 100, 1, "FixPoint8d24", [_word(1.0)])],
+        "Bank_BandPass_0_0": [("fircoeff", 400, 3, "FixPoint8d24", [_word(0.5)] * 3)],
+        "Bank_Beam_0_0": [("TCONST", 403, 1, "FixPoint8d24", [_word(0.002)])],
+        "Bank_LowPass_DSP07": [("fircoeff", 500, 3, "FixPoint8d24", [_word(0.3)] * 3)],
+        "Bank_Ch1_LowPass": [("fircoeff", 503, 3, "FixPoint8d24", [_word(0.3)] * 3)],
+        "Bank_Stage1_R0_0": [("delay", 600, 1, "Integer32", [3])],
+    })
+    if contract is not None:
+        (tmp_path / "beam_table_2d.json").write_text(json.dumps(contract))
+    return dsp_registry.load_registry(path)
+
+
+def test_bank_filters_and_detectors_are_writable_groups(tmp_path):
+    by_block = {p["block"]: p for p in _bank_export(tmp_path)["parameters"]}
+    assert by_block["Bank_BandPass_0_0"]["group"] == "bank_band"
+    assert by_block["Bank_LowPass_DSP07"]["group"] == "bank_alias" and by_block["Bank_LowPass_DSP07"]["mic"] == 7
+    assert by_block["Bank_Ch1_LowPass"]["group"] == "bank_ch1"
+    assert by_block["Bank_Beam_0_0"]["group"] == "bank_detector"
+    assert all(by_block[name]["writable"] for name in ("Bank_BandPass_0_0", "Bank_LowPass_DSP07",
+                                                         "Bank_Ch1_LowPass", "Bank_Beam_0_0"))
+    assert not by_block["Bank_Stage1_R0_0"]["writable"]
+
+
+def test_flashed_means_what_the_firmware_loads_and_the_allow_list_limits_writes(tmp_path):
+    taps = [0.25, -0.5, 0.25]
+    registry = _bank_export(tmp_path, {
+        "gain_addresses": [100], "gain_fixpt_8_24": [_word(0.75)],
+        "bank": {"band_pass": taps, "level_time_constant_ms": 34.66},
+        "study": {"map_hash": "0123456789abcdef", "writable_ranges": [[100, 1], [400, 4]]}})
+    by_block = {p["block"]: p for p in registry["parameters"]}
+    band = by_block["Bank_BandPass_0_0"]
+    assert band["default_words"] == [_word(v) for v in taps] and band["boot"] == "tables"
+    assert band["compiled_words"] == [_word(0.5)] * 3
+    assert by_block["Gain_DSP00"]["default_words"] == [_word(0.75)] and by_block["Gain_DSP00"]["boot"] == "taper"
+    assert by_block["Bank_Beam_0_0"]["writable"]
+    assert not by_block["Bank_LowPass_DSP07"]["writable"]
+    assert "allow-list" in by_block["Bank_LowPass_DSP07"]["reason"]
+    assert registry["bank"]["level_time_constant_ms"] == 34.66
+
+
+def test_edits_put_back_by_a_boot_check_are_reported(tmp_path):
+    registry = _bank_export(tmp_path, {"bank": {"band_pass": [0.25, -0.5, 0.25]}})
+
+    class Emulator(_Transport):
+        boot_checks = dsp_loads = 0
+
+        def snapshot(self):
+            return {"mode": "IDLE", "boot_checks": self.boot_checks, "dsp_loads": self.dsp_loads}
+
+    service = dsp_registry.DspParameterService(loader=lambda: registry)
+    transport = Emulator()
+    service.write(transport, [{"address": 400, "word": _word(0.1)}, {"address": 500, "word": _word(0.2)}])
+    assert service.status(transport)["modified_words"] == 2
+    transport.boot_checks = 1  # I: the tables come back, the anti-alias low-pass stays
+    status = service.status(transport)
+    assert status["lost"] == [{"address": 400, "word": _word(0.1)}]
+    assert status["modified_words"] == 1 and service.read(transport, 400, 1) == [_word(0.25)]
+    service.write(transport, [{"address": 400, "word": _word(0.1)}])
+    assert service.lost() == []
+    transport.dsp_loads = 1  # a program load puts back every word
+    assert {item["address"] for item in service.status(transport)["lost"]} == {400, 500}
+    service.forget_lost()
+    assert service.lost() == [] and service.status(transport)["modified_words"] == 0
+
+
+def test_band_corners_keep_low_below_high(small_registry):
+    service = dsp_registry.DspParameterService(loader=lambda: small_registry)
+    transport = _Transport()
+    with pytest.raises(ValueError, match="below"):
+        service.set(transport, "band_low_hz", 4000)
+    assert service.set(transport, "band_high_hz", 8000)["band_high_hz"] == 8000
+    assert service.set(transport, "band_low_hz", 4000)["band_low_hz"] == 4000
+    with pytest.raises(ValueError, match="below"):
+        service.set(transport, "band_high_hz", 3000)
+    with pytest.raises(ValueError, match="between"):
+        service.set(transport, "band_low_hz", 50)
+
+
+@pytest.mark.parametrize("current, target", [
+    ((300, 500), (500, 3500)), ((4000, 6000), (500, 3500)), ((500, 3500), (4000, 6000)), ((1000, 3500), (300, 800))])
+def test_setting_order_keeps_every_step_valid(small_registry, current, target):
+    service = dsp_registry.DspParameterService(loader=lambda: small_registry)
+    transport = _Transport()
+    for key, value in dsp_registry.setting_order({"band_high_hz": 3500}, {"band_high_hz": 8000, "band_low_hz": current[0]}):
+        service.set(transport, key, value)
+    service.set(transport, "band_high_hz", current[1])
+    now = service.status(transport)["settings"]
+    changes = {"measure": 0, "band_high_hz": target[1], "band_low_hz": target[0]}
+    for key, value in dsp_registry.setting_order(now, changes):
+        service.set(transport, key, value)
+    settings = service.status(transport)["settings"]
+    assert (settings["band_low_hz"], settings["band_high_hz"], settings["measure"]) == (*target, 0)
+
+
+def test_deployed_bank_registry_matches_the_boot_tables(monkeypatch):
+    monkeypatch.setenv("HEIMDALL_DSP_EXPORT", "SigmaStudioBank7x7")
+    contract = json.loads((dsp_registry.selected_export_dir() / "beam_table_2d.json").read_text(encoding="utf-8"))
+    registry = dsp_registry.load_registry()
+    groups = {}
+    for p in registry["parameters"]:
+        groups.setdefault(p["group"], []).append(p)
+    boot = [dsp_registry._signed_8_24(v) for v in contract["bank"]["band_pass"]]
+    assert len(groups["bank_band"]) == 49 and all(p["default_words"] == boot for p in groups["bank_band"])
+    assert len(groups["bank_alias"]) == 44 and {p["words"] for p in groups["bank_alias"]} == {31}
+    assert len(groups["bank_ch1"]) == 1 and groups["bank_ch1"][0]["words"] == 31
+    assert {p["name"] for p in groups["bank_detector"]} == {"TCONST", "hold", "decay"}
+    assert len(groups["bank_detector"]) == 3 * 49

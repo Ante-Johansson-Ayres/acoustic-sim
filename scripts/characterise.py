@@ -15,6 +15,7 @@
     python scripts/characterise.py l5     detection margin: Live against continuous scanning, sound A in 6 dB steps
     python scripts/characterise.py l6     two sources: drone clip on the speaker, speech or music on a phone
     python scripts/characterise.py t1     tonal detector on silence, a 200 Hz series, the drone clip, crowd (--real-drone)
+    python scripts/characterise.py d1     time constant of the scan level detector (Study check of a detector preset)
 
 The speaker tests say where to put the speaker. a3 and l1 then find it with the steered beam (--truth array,
 the default: rough placement is enough, no tape); with --truth measured they ask for the measured position.
@@ -1745,9 +1746,181 @@ def figure_t1(reports, out):
     fig.savefig(os.path.join(out, "t1_tones.png"), dpi=150)
 
 
+# Detector time constant ---------------------------------------------------------------------------
+
+D1_SETTLES_US = (250, 500, 1000, 1500, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 20000)
+# After a 20 ms settle: host waits before an M read (timed from the replies, so to about one frame).
+D1_TAIL_MS = (50, 100, 200, 400, 800)
+D1_RISE_S = 0.3
+D1_RATE_HZ = 48000
+# The open scale question: the exponent that turns the word into the smoother's mean square.
+D1_SCALES = {"power": 1, "amplitude": 2}
+
+
+def fit_decay(settles_ms, words, loud, floor, exponent):
+    """Fit word**e = floor**e + (loud**e - floor**e) * exp(-(t - delay) / tau) on the points between 3% and
+    90% of the step. {tau_ms, delay_ms, residual (rms of the log fit)}, or None."""
+    t = np.asarray(settles_ms, float)
+    w, lo, hi = (np.asarray(v, float) ** exponent for v in (words, floor, loud))
+    y = (w - lo) / (hi - lo)
+    use = (y > 0.03) & (y < 0.9)
+    if use.sum() < 3:
+        return None
+    slope, intercept = np.polyfit(t[use], np.log(y[use]), 1)
+    if slope >= 0:
+        return None
+    residual = np.log(y[use]) - (slope * t[use] + intercept)
+    return {"tau_ms": float(-1.0 / slope), "delay_ms": float(intercept / -slope),
+            "residual": float(np.sqrt(np.mean(residual ** 2)))}
+
+
+def settle_within(settles_ms, excess_db, within_db):
+    """The first settle time with the reading within `within_db` of the quiet level (linear between steps)."""
+    for i, (t, e) in enumerate(zip(settles_ms, excess_db)):
+        if e <= within_db:
+            if i == 0:
+                return float(t)
+            t0, e0 = settles_ms[i - 1], excess_db[i - 1]
+            return float(t0 + (t - t0) * (e0 - within_db) / (e0 - e))
+    return None
+
+
+def d1(session, args, out, array):
+    """Time constant of the scan level detector (the DSP detector of the steered beam). The beam holds the
+    speaker, then steers to a quiet corner; the firmware reads the detector after settle_us (up to 20 ms, timed
+    by the firmware). Later points are M reads timed by the host (coarse). The readings trace the detector's
+    decay, with its hold and decay words. Fitted as a power word and as an amplitude word (the scale is an open
+    question), and compared with the TCONST word on the device."""
+    place(0.0, 0.0, args.distance)
+    rng = np.random.default_rng(args.seed)
+    rows, columns = session.home[0]["rows"], session.home[0]["columns"]
+    on = session.speaker_sector(0, 0)
+    corners = sorted({0, columns - 1, (rows - 1) * columns, rows * columns - 1})
+    status, registry = http("GET", "/dsp/registry")
+    params = {p.get("name"): p for p in (registry.get("parameters", []) if status == 200 else [])
+              if p.get("group") == "detector"}
+    if "TCONST" not in params:
+        raise RuntimeError("the register map has no scan detector TCONST")
+    words = {name: read_words(int(p["address"]), 1)[0] for name, p in params.items()}
+    alpha = (words["TCONST"] if words["TCONST"] < 2 ** 31 else words["TCONST"] - 2 ** 32) / 2 ** 24
+    expected = float(-1000.0 / (D1_RATE_HZ * np.log(1.0 - alpha))) if 0 < alpha < 1 else float("nan")
+    hold_ms = words["hold"] / (D1_RATE_HZ / 1000) if "hold" in words else None
+    longest = max(D1_SETTLES_US) / 1000
+    readings = []
+
+    def held(sector):
+        """The detector word (linear) after the beam has held `sector` for 1 s."""
+        session.read(f"S,{sector}")
+        session.board.pump(1.0)
+        levels = [m["raw_level"] / 2 ** 24 for m in (session.read("M") for _ in range(5)) if m]
+        return float(np.mean(levels)) if levels else float("nan")
+
+    def keep(t_ms, measurement, timing, nominal):
+        level = measurement["raw_level"] / 2 ** 24
+        readings.append({"t_ms": t_ms, "word": level, "timing": timing, "nominal": nominal})
+        session.writer.writerow({"step": "d1", "label": f"{timing} {nominal}", "sector": off, "value": round(t_ms, 3),
+                                 "n": 1, "mean_db": float(20 * np.log10(max(level, 1e-9))), "levels": [round(level, 9)]})
+
+    session.sound("A")
+    try:
+        with session.settings(measure=0, settle_us=max(D1_SETTLES_US)):
+            steady = {s: held(s) for s in [on, *corners]}
+            off = min(corners, key=lambda s: steady[s])
+            loud, floor = steady[on], steady[off]
+            contrast = float(20 * np.log10(loud / floor)) if loud > 0 and floor > 0 else 0.0
+            if contrast < 20.0:
+                session.report.add("D1 contrast between the speaker and a quiet corner", False,
+                                   f"{contrast:.1f} dB, needs 20 dB: turn the speaker up or move it closer, and repeat")
+                return
+            for settle in rng.permutation([s for s in D1_SETTLES_US for _ in range(args.repeats)]):
+                settle = int(settle)
+                session.set("settle_us", settle)
+                session.read(f"S,{on}")
+                session.board.pump(D1_RISE_S)
+                measurement = session.read(f"S,{off}")
+                if measurement:
+                    keep(settle / 1000, measurement, "firmware", f"settle {settle} us")
+            session.set("settle_us", max(D1_SETTLES_US))
+            for wait in rng.permutation([w for w in D1_TAIL_MS for _ in range(args.repeats)]):
+                wait = int(wait)
+                session.read(f"S,{on}")
+                session.board.pump(D1_RISE_S)
+                if session.read(f"S,{off}") is None:
+                    continue
+                start = time.monotonic()
+                session.board.pump(wait / 1000)
+                measurement = session.read("M")
+                if measurement:
+                    keep(longest + (time.monotonic() - start) * 1000, measurement, "host", f"wait {wait} ms")
+    finally:
+        session.sound(None)
+    groups = sorted({(r["timing"], r["nominal"]) for r in readings},
+                    key=lambda g: np.mean([r["t_ms"] for r in readings if (r["timing"], r["nominal"]) == g]))
+    t = [float(np.mean([r["t_ms"] for r in readings if (r["timing"], r["nominal"]) == g])) for g in groups]
+    mean = [float(np.mean([r["word"] for r in readings if (r["timing"], r["nominal"]) == g])) for g in groups]
+    excess = [float(20 * np.log10(max(w, 1e-12) / floor)) for w in mean]
+    fits = {scale: fit_decay(t, mean, loud, floor, e) for scale, e in D1_SCALES.items()}
+    within = {db: settle_within(t, excess, db) for db in (3.0, 1.0)}
+    session.values["d1"] = {"words": words, "expected_tau_ms": expected, "hold_ms": hold_ms, "fits": fits,
+                            "loud": loud, "floor": floor, "contrast_db": contrast, "sectors": {"on": on, "off": off},
+                            "readings": readings, "t_ms": t, "mean_word": mean, "excess_db": excess,
+                            "settle_within_ms": {str(db): v for db, v in within.items()}}
+    session.report.info("D1 detector words on the device", f"TCONST {expected:.2f} ms" + (
+        f", hold {words['hold']} samples ({hold_ms:.1f} ms)" if hold_ms is not None else "") + (
+        f", decay {words['decay'] / 2 ** 24:.6f} per sample" if "decay" in words else ""))
+    for db, value in within.items():
+        session.report.info(f"D1 time to within {db:g} dB of quiet", f"more than {max(t):.0f} ms" if value is None
+                            else f"{value:.1f} ms ({'firmware' if value <= longest else 'host'} timed; dB as the "
+                                 f"screens show them; the firmware waits 20 ms at most)")
+    if not any(fits.values()):
+        session.report.add("D1 time constant", False, "the readings do not decay between 3% and 90%: no fit")
+        figure_d1(t, excess, readings, loud, floor, fits, expected, out)
+        return
+    detail = ", ".join(f"{scale} {fit['tau_ms']:.2f} ms" for scale, fit in fits.items() if fit)
+    matches = [scale for scale, fit in fits.items()
+               if fit and np.isfinite(expected) and abs(fit["tau_ms"] - expected) <= 0.15 * expected]
+    session.report.add("D1 time constant against the TCONST word", bool(matches),
+                       f"{detail} measured; {expected:.2f} ms from the word (limit +-15%)"
+                       + (f"; matches the word read as {' and '.join(matches)}" if matches else ""))
+    best = min((fit for fit in fits.values() if fit), key=lambda fit: fit["residual"])
+    session.report.info("D1 delay before the decay", f"{best['delay_ms']:.2f} ms" + (
+        f" (the hold word is {hold_ms:.1f} ms)" if hold_ms is not None else ""))
+    figure_d1(t, excess, readings, loud, floor, fits, expected, out)
+
+
+def figure_d1(t, excess, readings, loud, floor, fits, expected, out):
+    import matplotlib.pyplot as plt
+    grid = np.geomspace(min(t), max(t), 300)
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    for timing, colour in (("firmware", "0.55"), ("host", "tab:orange")):
+        points = [r for r in readings if r["timing"] == timing]
+        ax.plot([r["t_ms"] for r in points], [20 * np.log10(max(r["word"], 1e-12) / floor) for r in points], ".",
+                color=colour, label=f"readings ({timing} timed)")
+    ax.plot(t, excess, "ko", label="mean of the repeats")
+    for (scale, fit), style in zip(fits.items(), ("-", "-.")):
+        if not fit:
+            continue
+        e = D1_SCALES[scale]
+        for tau, line, label in ((fit["tau_ms"], style, f"fit as {scale}: tau {fit['tau_ms']:.2f} ms"),
+                                 (expected, ":", f"TCONST word as {scale}: {expected:.2f} ms")):
+            if not np.isfinite(tau):
+                continue
+            mean_square = floor ** e + (loud ** e - floor ** e) * np.exp(-np.maximum(grid - fit["delay_ms"], 0) / tau)
+            ax.plot(grid, 20 * np.log10(mean_square ** (1 / e) / floor), line, label=label)
+    for db in (3.0, 1.0):
+        ax.axhline(db, color="0.8", linewidth=0.8)
+    ax.axvline(max(D1_SETTLES_US) / 1000, color="0.8", linestyle="--", linewidth=0.8)
+    ax.set_xscale("log")
+    ax.set_xlabel("time from the steer to the read (ms); right of the dashed line: host timed")
+    ax.set_ylabel("reading above the quiet level (dB, as the screens show)")
+    ax.set_title("D1: scan detector after a steer from the speaker to a quiet corner")
+    ax.legend(fontsize=8)
+    fig.savefig(os.path.join(out, "d1_detector_decay.png"), dpi=150, bbox_inches="tight")
+
+
 TESTS = {"n1": n1, "n2": n2, "a3": a3, "a4": a4, "a8": a8, "a9": a9, "a10": a10, "l1": l1, "l5": l5, "l6": l6,
-         "l7": l7, "p2": p2, "r1": r1, "s1": s1, "s3": s3, "t1": t1}
-SOUND_TESTS = {"a3", "a4", "a8", "a9", "a10", "l1", "l5", "l6", "l7", "p2", "r1", "s1", "s3", "t1"}
+         "l7": l7, "p2": p2, "r1": r1, "s1": s1, "s3": s3, "t1": t1, "d1": d1}
+SOUND_TESTS = {"a3", "a4", "a8", "a9", "a10", "l1", "l5", "l6", "l7", "p2", "r1", "s1", "s3", "t1", "d1"}
 TEST_DEFAULTS = {"l1": {"trials": 5, "listen": 8.0}, "l5": {"trials": 3, "listen": 6.0},
                  "l6": {"trials": 3, "listen": 8.0}, "l7": {"trials": 5, "listen": 60.0}, "t1": {"listen": 12.0}}
 
@@ -1767,7 +1940,7 @@ def build_parser():
     parser.add_argument("test", choices=sorted(TESTS))
     parser.add_argument("--seconds", type=float, help="capture per point (default per test)")
     parser.add_argument("--cycles", type=int, default=3, help="n1/n2: interleaved repeats, alternating order")
-    parser.add_argument("--repeats", type=int, default=3, help="a3/a4/r1: repeats per set")
+    parser.add_argument("--repeats", type=int, default=3, help="a3/a4/r1/d1: repeats per set")
     parser.add_argument("--distance", type=float, default=2.0, help="nominal speaker distance (m)")
     parser.add_argument("--bands", default="B2k", help="a3: comma list of B1k, B2k, B3k")
     parser.add_argument("--positions", default="-30,0;-15,0;0,0;15,0;30,0",

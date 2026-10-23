@@ -19,6 +19,8 @@ FIRMWARE_SETTINGS = {
     "window_us": (1000, 100000, 5000),
     "measure": (0, 1, 1),
     "band": (0, 1, 1),
+    "band_low_hz": (100, 5000, 500),
+    "band_high_hz": (500, 12000, 3500),
     "channel": (0, 1, 0),
     "map_record": (0, 1, 0),
     "tone": (0, 10000, 0),
@@ -439,6 +441,9 @@ class HeimdallState:
         self.pending_dsp_load: dict[str, Any] | None = None
         self.pending_dsp_reset: dict[str, Any] | None = None
         self.tables: dict[str, Any] | None = None
+        # TABLES records (each I reloads the taper and tables) and program loads, counted.
+        self.boot_checks = 0
+        self.dsp_loads = 0
         self.bank: dict[str, Any] | None = None
         self.bank_levels_raw: list[int] | None = None
         self.bank_maps = 0
@@ -569,6 +574,8 @@ class HeimdallState:
             self.pending_dsp_reset = None
         elif record_type == "dsp":
             # Every program check starts afresh: on a mismatch the firmware writes nothing.
+            if self.pending_dsp_load is not None:
+                self.dsp_loads += 1
             self.dsp = {
                 **{key: record[key] for key in ("program", "style", "steer_words", "read", "matched", "code")},
                 "matches": record["code"] == 0 and 0 < record["read"] == record["matched"],
@@ -584,6 +591,7 @@ class HeimdallState:
             if self.dsp is not None:
                 self.dsp["core"] = {key: record[key] for key in ("status", "panic_code")}
         elif record_type == "tables":
+            self.boot_checks += 1
             self.tables = {
                 **{key: record[key] for key in ("words", "written", "verified", "code")},
                 "loaded": record["code"] == 0 and record["written"] == record["verified"] == record["words"],
@@ -674,6 +682,8 @@ class HeimdallState:
             "taper": deepcopy(self.taper),
             "dsp": deepcopy(self.dsp),
             "tables": deepcopy(self.tables),
+            "boot_checks": self.boot_checks,
+            "dsp_loads": self.dsp_loads,
             "bank": self._bank_snapshot(),
             "outputs": deepcopy(self.outputs),
             "array_mount": self.array_mount,
