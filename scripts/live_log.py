@@ -1,6 +1,8 @@
 """Live (bank) logs: save, load, replay the firmware's detector with other settings, and analyse.
 
-    python scripts/live_log.py <folder>     analyses l7_maps.npz and/or l5_maps.npz in the folder; writes live_log.json
+    python scripts/live_log.py <folder> [old]   analyses l7_maps.npz and/or l5_maps.npz in the folder; writes
+                                                live_log.json. 'old': the log was made with the detector before
+                                                2026-10-23 (integer backgrounds, no level floor).
 
 A run is the maps of one Live start (B). The replay is exact only when the log has every map from the start (the
 first map primes the backgrounds); the analysis checks this against the targets that the board reported.
@@ -16,16 +18,14 @@ import numpy as np
 
 ROWS = COLUMNS = 7
 MAP_S = 0.05  # HEIMDALL_BANK_PERIOD_US
+OLD_FIRMWARE = {"frac_bits": 0, "floor": 0}
 SETTINGS = {
-    "firmware (1.5x, shift 5/9, integer background)": {},
-    "background with 8 fraction bits": {"frac_bits": 8},
+    "firmware (1.5x, 8 fraction bits, floor 4)": {},
+    "old firmware (integer background, floor 0)": OLD_FIRMWARE,
+    "floor 8 words": {"floor": 8},
     "ratio 2x": {"ratio": (2, 1)},
-    "ratio 3x": {"ratio": (3, 1)},
     "2 maps in a row": {"confirm": 2},
-    "3 maps in a row": {"confirm": 3},
     "slow rise (shift 9 up, 5 down)": {"rise_shift": 9},
-    "absolute floor 4 words": {"floor": 4},
-    "8 fraction bits and floor 4 words": {"frac_bits": 8, "floor": 4},
 }
 
 
@@ -55,13 +55,12 @@ def load_log(path):
 
 
 class Detector:
-    """MAX78002/beam_bank.c with its settings as parameters. With the defaults it is the firmware, bit for bit.
-    frac_bits keeps the backgrounds with extra fraction bits; confirm reports a target only when a candidate was
-    found in that many maps in a row, each within one row and column of the one before; rise_shift makes a quiet
-    beam's background rise more slowly than it falls; floor is HEIMDALL_LEVEL_ABSOLUTE_FLOOR (a level must be above
-    it)."""
+    """MAX78002/beam_bank.c with its settings as parameters. With the defaults it is the firmware, bit for bit
+    (OLD_FIRMWARE: before 2026-10-23). frac_bits: fraction bits of the backgrounds; floor: a level must be above it;
+    confirm reports a target only when a candidate was found in that many maps in a row, each within one row and
+    column of the one before; rise_shift makes a quiet beam's background rise more slowly than it falls."""
 
-    def __init__(self, ratio=(3, 2), shift=5, held_shift=9, frac_bits=0, confirm=1, rise_shift=None, floor=0):
+    def __init__(self, ratio=(3, 2), shift=5, held_shift=9, frac_bits=8, confirm=1, rise_shift=None, floor=4):
         self.num, self.den = ratio
         self.shift, self.held_shift, self.frac, self.confirm = shift, held_shift, frac_bits, confirm
         self.rise_shift = shift if rise_shift is None else rise_shift
@@ -88,7 +87,7 @@ class Detector:
             if any(0 <= r + dr < ROWS and 0 <= c + dc < COLUMNS and grid[r + dr, c + dc] > grid[r, c]
                    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))):
                 continue
-            ratio = Fraction(int(levels[beam]), max(1, int(self.background[beam])))
+            ratio = Fraction(int(levels[beam]), max(1, int(self.background[beam]) >> self.frac))
             if best_ratio is None or ratio > best_ratio:
                 best, best_ratio = int(beam), ratio
         difference = (levels << self.frac) - self.background
@@ -133,22 +132,23 @@ def rate(best, keep):
     return float(np.mean(best[keep] >= 0)) if keep.any() else float("nan")
 
 
-def analyse(folder):
+def analyse(folder, firmware=None):
+    """firmware: the detector settings of the board that made the log ({} = now, OLD_FIRMWARE = before 23 Oct)."""
     folder = Path(folder)
     result = {}
     for name in ("l7", "l5"):
         path = folder / f"{name}_maps.npz"
         if path.exists():
-            result[name] = analyse_runs(name, load_log(path))
+            result[name] = analyse_runs(name, load_log(path), firmware or {})
     (folder / "live_log.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
 
 
-def analyse_runs(name, runs):
+def analyse_runs(name, runs, firmware):
     print(f"{name}: {len(runs)} runs")
     out = {"runs": [], "settings": {}}
     for run in runs:
-        best, _ = replay(run)
+        best, _ = replay(run, **firmware)
         share, count = agreement(run, best)
         full = complete(run)
         expected = int(run["maps"][-1] - run["start_maps"]) if len(run["maps"]) else 0
@@ -237,6 +237,6 @@ def directions(runs):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3) or sys.argv[2:] not in ([], ["old"]):
         sys.exit(__doc__)
-    analyse(sys.argv[1])
+    analyse(sys.argv[1], OLD_FIRMWARE if sys.argv[2:] == ["old"] else {})

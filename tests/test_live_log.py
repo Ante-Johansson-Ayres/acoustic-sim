@@ -32,8 +32,8 @@ def test_default_replay_is_the_firmware_tracker():
 
 
 def test_integer_background_stops_short_of_the_level():
-    """The firmware's shift-5 step is zero within 31 words; fraction bits let the background reach the level."""
-    whole, fine = live_log.Detector(), live_log.Detector(frac_bits=8)
+    """The old firmware's shift-5 step is zero within 31 words; fraction bits let the background reach the level."""
+    whole, fine = live_log.Detector(**live_log.OLD_FIRMWARE), live_log.Detector()
     loud, quiet = np.full(49, 4000), np.full(49, 150)
     for detector in (whole, fine):
         detector.update(loud)

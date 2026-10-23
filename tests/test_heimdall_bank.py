@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from heimdall_bank import BankTracker, LOST_MAPS
+from heimdall_bank import FRACTION_BITS, BankTracker, LOST_MAPS
 from heimdall_protocol import HeimdallState, ProtocolError, parse_line
 from heimdall_transport import DeployedProgram, EmulatorHeimdallTransport, validate_command
 
@@ -150,8 +150,8 @@ def test_tracker_background_follows_slowly_while_held():
     levels[12] = 4000
     for _ in range(20):
         assert bank.update(levels).beams == [12]
-    assert bank.background[12] < 1200
-    assert bank.background[0] == 1000
+    assert bank.background[12] >> FRACTION_BITS < 1200
+    assert bank.background[0] >> FRACTION_BITS == 1000
 
 
 def test_emulator_stare_reports_maps_target_and_listening_beam():

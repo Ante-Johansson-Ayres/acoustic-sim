@@ -3,17 +3,21 @@
 Each map, a beam is a candidate when its level stands out by ACQUIRE_RATIO from both
 its own slow background and the map's median, and no 4-neighbour is louder. The best
 candidate's direction is the excess-weighted centroid of its 3 x 3 neighbourhood in
-sine space, and the steered beam goes to the nearest sector.
+sine space, and the steered beam goes to the nearest sector. Backgrounds carry
+FRACTION_BITS fraction bits; levels at or below LEVEL_FLOOR are never candidates.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 import math
 
 ACQUIRE_RATIO_NUM, ACQUIRE_RATIO_DEN = 3, 2
 BACKGROUND_SHIFT = 5
 HELD_SHIFT = 9
+FRACTION_BITS = 8
+LEVEL_FLOOR = 4
 LOST_MAPS = 10
 PERIOD_S = 0.05
 
@@ -27,8 +31,9 @@ class BankResult:
     sector: int = 0
 
 
-def _above(level: int, background: int) -> bool:
-    return level > 0 and level * ACQUIRE_RATIO_DEN >= background * ACQUIRE_RATIO_NUM
+def _above(level: int, reference: int) -> bool:
+    """level >= ACQUIRE_RATIO x reference, with the reference scaled by 2^FRACTION_BITS."""
+    return level > LEVEL_FLOOR and (level << FRACTION_BITS) * ACQUIRE_RATIO_DEN >= reference * ACQUIRE_RATIO_NUM
 
 
 class BankTracker:
@@ -41,19 +46,19 @@ class BankTracker:
 
     def update(self, levels: list[int]) -> BankResult:
         if self.background is None:
-            self.background = list(levels)
+            self.background = [level << FRACTION_BITS for level in levels]
             return BankResult([], [])
-        field = sorted(levels)[len(levels) // 2]
+        field = sorted(levels)[len(levels) // 2] << FRACTION_BITS
         above = [_above(level, bg) and _above(level, field) for level, bg in zip(levels, self.background)]
         candidates = [beam for beam in range(len(levels)) if above[beam] and self._local_peak(levels, beam)]
-        candidates.sort(key=lambda beam: -levels[beam] / max(1, self.background[beam]))
+        candidates.sort(key=lambda beam: -Fraction(levels[beam], max(1, self.background[beam] >> FRACTION_BITS)))
         result = BankResult(candidates[:2], [levels[beam] for beam in candidates[:2]])
         if result.beams:
             result.azimuth_deg, result.elevation_deg = self._interpolate(levels, result.beams[0])
             result.sector = self.nearest_sector(result.azimuth_deg, result.elevation_deg)
         for beam, level in enumerate(levels):
             shift = HELD_SHIFT if above[beam] else BACKGROUND_SHIFT
-            difference = level - self.background[beam]
+            difference = (level << FRACTION_BITS) - self.background[beam]
             step = difference >> shift if difference >= 0 else -((-difference) >> shift)
             self.background[beam] += step
         return result
@@ -73,7 +78,7 @@ class BankTracker:
                 if not (0 <= r < self.rows and 0 <= c < self.columns):
                     continue
                 b = r * self.columns + c
-                excess = levels[b] - self.background[b]
+                excess = (levels[b] << FRACTION_BITS) - self.background[b]
                 if excess <= 0:
                     continue
                 el = math.radians(self.elevation_deg[b])
