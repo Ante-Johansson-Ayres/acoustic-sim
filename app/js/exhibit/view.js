@@ -130,7 +130,7 @@ export function createView(container, {session, navigate}) {
     trackButton.setAttribute('aria-pressed', String(mode === 'track'));
     scanButton.setAttribute('aria-pressed', String(mode === 'continuous'));
     stopButton.setAttribute('aria-pressed', String(mode === 'idle'));
-    for (const button of [liveButton, trackButton, scanButton, stopButton]) button.disabled = !session.ready;
+    for (const button of [liveButton, trackButton, scanButton, stopButton]) button.disabled = !session.ready || Boolean(session.studyRun);
 
     const solution = session.solution(frame);
     const showAnswer = solution && (solution.kind === 'target' || mode === 'continuous' || mode === 'once' || mode === 'fixed');

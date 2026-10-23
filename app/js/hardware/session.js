@@ -105,6 +105,11 @@ export class HardwareSession extends EventTarget {
     return this.init?.array_layout || null;
   }
 
+  /** {entry, title, state} while a Study test runs: the backend then refuses commands from this page. */
+  get studyRun() {
+    return this.latest?.study_run || null;
+  }
+
   /** Human description of what we are connected to. */
   get transportLabel() {
     const name = this.transport;

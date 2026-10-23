@@ -42,7 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from array_theory import (band_directivity_index_db, band_frequencies, diffuse_power,  # noqa: E402
                           first_null_half_width, fit_cut, steered_response, steering_cut_db)
-from board_regression import WS_URL, Board, connect, http, play, record  # noqa: E402
+from board_regression import WS_URL, Board, apply_run_edits, connect, http, play, record  # noqa: E402
+from gui_run import ask_operator, run_edits  # noqa: E402
 from heimdall_acoustic import default_contract_path, load_beam_contract  # noqa: E402
 from live_log import analyse as live_log_analyse, save_log  # noqa: E402
 from study_session import (FIELDS, MCU_BEAM, WINDOWS, Results, Session, make_signals, power,  # noqa: E402
@@ -110,6 +111,7 @@ def reload_dsp(board):
     board.stop()
     board.command("I")
     board.pump(4.0, lambda s: (s.get("tables") or {}).get("verified") == (s.get("tables") or {}).get("words"))
+    apply_run_edits(board)
 
 
 def n1(session, args, out, array):
@@ -285,8 +287,8 @@ def describe(nominal_az, nominal_el, distance_m):
 
 def place(nominal_az, nominal_el, distance_m):
     """Rough placement; the array then measures where the speaker is. Returns the nominal distance."""
-    input(f"\nSpeaker roughly {describe(nominal_az, nominal_el, distance_m)}. Rest it on something rather than "
-          "holding it; close is fine, the array measures where it is. Enter when ready.")
+    ask_operator(f"\nSpeaker roughly {describe(nominal_az, nominal_el, distance_m)}. Rest it on something rather than "
+                 "holding it; close is fine, the array measures where it is. Enter when ready.")
     return distance_m
 
 
@@ -303,7 +305,7 @@ def parse_numbers(text, count):
 def ask_numbers(prompt, count=1, optional=False):
     """Ask until `count` numbers are typed; None for an empty answer when optional."""
     while True:
-        text = input(prompt).strip()
+        text = ask_operator(prompt, numbers=count, optional=optional).strip()
         if optional and not text:
             return None
         try:
@@ -557,8 +559,8 @@ def a8(session, args, out, array):
     levels = {}
     with session.settings(**MCU_BEAM):
         for side in ("front", "behind"):
-            input(f"\nA8: speaker on the array axis {side} the array, {args.distance:g} m from its centre, facing it. "
-                  "Enter when ready.")
+            ask_operator(f"\nA8: speaker on the array axis {side} the array, {args.distance:g} m from its centre, "
+                         "facing it. Enter when ready.")
             session.sound(None)
             silent = session.capture("a8", f"{side} silent", sector, seconds)["mean_db"]
             for signal in ("B1k", "B2k", "A"):
@@ -741,8 +743,8 @@ def s1(session, args, out, array):
     microphones = [int(m) for m in args.microphones.split(",")]
     sector = session.speaker_sector(0, 0)
     seconds = args.seconds or 3.0
-    input("\nS1: speaker on the array axis; SPL meter beside the array, its microphone level with the array face and "
-          "pointing at the speaker, A weighting, slow. Enter to start the noise.")
+    ask_operator("\nS1: speaker on the array axis; SPL meter beside the array, its microphone level with the array "
+                 "face and pointing at the speaker, A weighting, slow. Enter to start the noise.")
     session.sound("B1k")
     spl = ask_numbers("SPL meter reading with the noise, the middle of what it shows over 10 s (dB): ")[0]
     on, off = {}, {}
@@ -976,8 +978,8 @@ def a9(session, args, out, array):
                             f"(microphones {references[:2]}: " + ", ".join(
                                 f"{v:+.1f}" for v in result["path_gain_db"][band] if v is not None) + ")")
 
-    input("\nA9 diffuse field: turn the speaker to face a far wall or corner, as far from the array as the room "
-          "allows, ideally with no direct line to the array. Enter when ready.")
+    ask_operator("\nA9 diffuse field: turn the speaker to face a far wall or corner, as far from the array as the "
+                 "room allows, ideally with no direct line to the array. Enter when ready.")
     directions = [(0.0, 0.0), (34.29, 0.0), (-34.29, 0.0), (0.0, 34.29), (0.0, -34.29)]
     sectors = [session.speaker_sector(az, el) for az, el in directions]
     with session.settings(**MCU_BEAM):
@@ -1537,12 +1539,12 @@ def l6(session, args, out, array):
     """Two sources: the drone clip on the speaker, speech or music on a phone. Which one Live reports, and how often
     it reports the phone with no drone (Live ranks by level; it has no classifier yet)."""
     distance = place(args.drone_az, 0.0, args.distance)
-    input(f"Phone (speech or music, for example a podcast) {describe(args.phone_az, 0.0, distance)}, paused. "
-          "Enter when ready.")
+    ask_operator(f"Phone (speech or music, for example a podcast) {describe(args.phone_az, 0.0, distance)}, "
+                 "paused. Enter when ready.")
     drone, quiet = player(session, args.sound), player(session, None)
 
     def ask(text):
-        return lambda: input(f"  {text} Enter.")
+        return lambda: ask_operator(f"  {text} Enter.")
 
     def trials(start=None, stop=None):
         return [live_maps(session, args.listen, start, stop) for _ in range(args.trials)]
@@ -1562,12 +1564,12 @@ def l6(session, args, out, array):
         drone()
         drone_level = signal_db(session.capture("l6", "drone, its beam", drone_sector, 3.0)["mean_db"], floors[drone_sector])
         quiet()
-    input("\nStart the phone and leave it playing through the next trials. Enter when it plays.")
+    ask_operator("\nStart the phone and leave it playing through the next trials. Enter when it plays.")
     with session.settings(**MCU_BEAM):
         phone_level = signal_db(session.capture("l6", "phone, its beam", phone_sector, 3.0)["mean_db"], floors[phone_sector])
     phases["phone on, drone starts"] = trials(drone, quiet)
     phases["phone on, no drone"] = trials()
-    input("Pause the phone. Enter.")
+    ask_operator("Pause the phone. Enter.")
     result = {}
     for name, runs in phases.items():
         counts = {"drone": 0, "phone": 0, "other": 0, "none": 0}
@@ -1626,10 +1628,10 @@ def t1(session, args, out, array):
             reports[name] = listen()
         session.sound(None)
         if args.real_drone:
-            input("\nT1: hold the drone 1-2 m in front of the array with its motors running (propellers off indoors). "
-                  "Enter to listen.")
+            ask_operator("\nT1: hold the drone 1-2 m in front of the array with its motors running (propellers off "
+                         "indoors). Enter to listen.")
             reports["real drone"] = listen()
-            input("Stop the motors. Enter.")
+            ask_operator("Stop the motors. Enter.")
     stats = {name: tone_stats(values) for name, values in reports.items()}
     for name, item in stats.items():
         session.report.info(f"T1 {name}", "no TONE reports" if not item["reports"] else
@@ -1750,7 +1752,17 @@ TEST_DEFAULTS = {"l1": {"trials": 5, "listen": 8.0}, "l5": {"trials": 3, "listen
                  "l6": {"trials": 3, "listen": 8.0}, "l7": {"trials": 5, "listen": 60.0}, "t1": {"listen": 12.0}}
 
 
-def main():
+def defaults_for(test):
+    """Option values of one test that differ from the parser defaults."""
+    values = dict(TEST_DEFAULTS.get(test, {}))
+    if test == "l1":
+        values["positions"] = L1_POSITIONS
+    if test in ("l6", "t1"):
+        values["sound"] = "drone"
+    return values
+
+
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("test", choices=sorted(TESTS))
     parser.add_argument("--seconds", type=float, help="capture per point (default per test)")
@@ -1785,14 +1797,15 @@ def main():
     parser.add_argument("--record", type=float, default=5.0, help="r1: recording length (s)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", help="output folder (default: temp)")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
-    if args.test == "l1" and args.positions == parser.get_default("positions"):
-        args.positions = L1_POSITIONS
-    for key, value in TEST_DEFAULTS.get(args.test, {}).items():
-        if getattr(args, key) is None:
+    for key, value in defaults_for(args.test).items():
+        if getattr(args, key) == parser.get_default(key):
             setattr(args, key, value)
-    if args.test in ("l6", "t1") and args.sound == parser.get_default("sound"):
-        args.sound = "drone"
     out = args.out or os.path.join(tempfile.gettempdir(), time.strftime(f"heimdall_{args.test}_%Y%m%d_%H%M%S"))
     os.makedirs(out, exist_ok=True)
     signals = make_signals(out, level_steps(args) if args.test == "l5" else ()) if args.test in SOUND_TESTS else {}
@@ -1821,7 +1834,8 @@ def main():
         finally:
             session.restore()
         summary = {"test": args.test, "started": started, "arguments": vars(args),
-                   "map_hash": board.state.get("map_hash"), "values": session.values,
+                   "map_hash": board.state.get("map_hash"), "settings": session.settings_before,
+                   "dsp_edits": {str(a): w for a, w in run_edits().items()}, "values": session.values,
                    "checks": [{"name": name, "result": "info" if passed is None else ("pass" if passed else "fail"),
                                "detail": detail} for name, passed, detail in report.rows]}
     with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as handle:

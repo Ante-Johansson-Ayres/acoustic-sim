@@ -17,6 +17,8 @@
    and the Source / Audio / last-30-s column; drawer tabs and status at the foot. */
 
 .hw-console { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* A Study test runs: its controls are inert. */
+.hw-console [inert] { opacity: 0.55; }
 .hw-console .label { margin: 0; font: 700 11px var(--font-display); letter-spacing: 0.14em; text-transform: uppercase; color: var(--subtle); }
 .tri { font-size: 12px; letter-spacing: 0; color: var(--muted); }
 

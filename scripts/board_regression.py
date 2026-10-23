@@ -32,17 +32,21 @@ import wave
 import numpy as np
 from websockets.sync.client import connect
 
+from gui_run import RUN_TOKEN, run_edits
 
 API = "http://127.0.0.1:8766"
-WS_URL = "ws://127.0.0.1:8766/realtime_hw"
+# While the Study screen runs a script, the backend takes commands only with the run's token.
+WS_URL = "ws://127.0.0.1:8766/realtime_hw" + (f"?run={RUN_TOKEN}" if RUN_TOKEN else "")
 # Read commands of 8, 9, 10 and 11 bytes including the newline.
 READS = [(32, 7), (32, 16), (1030, 7), (1030, 16)]
 
 
 def http(method, path, body=None, timeout=15):
     data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(f"{API}{path}", data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if RUN_TOKEN:
+        headers["X-Heimdall-Run"] = RUN_TOKEN
+    request = urllib.request.Request(f"{API}{path}", data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
@@ -90,6 +94,26 @@ class Board:
         status, _ = http("POST", "/dsp/set", {"key": key, "value": value})
         self.pump(0.2)
         return status == 200
+
+
+def apply_run_edits(board):
+    """A Study run with the current DSP edits writes them again after each I (I puts back the flashed taper
+    and tables)."""
+    edits = run_edits()
+    if not edits:
+        return
+    board.stop()
+    status, body = http("POST", "/dsp/write", {"writes": [{"address": a, "word": w} for a, w in sorted(edits.items())]})
+    if status != 200:
+        raise RuntimeError(f"the run's DSP edits were refused ({status}): {body}")
+
+
+def summary_record(report, test, started, args, board, settings):
+    """The summary.json of a run: arguments, map hash, settings at the start, DSP edits and every check."""
+    return {"test": test, "started": started, "arguments": vars(args), "map_hash": board.state.get("map_hash"),
+            "settings": settings, "dsp_edits": {str(a): w for a, w in run_edits().items()},
+            "checks": [{"name": name, "result": "info" if passed is None else ("pass" if passed else "fail"),
+                        "detail": detail} for name, passed, detail in report.rows]}
 
 
 class Report:
@@ -329,6 +353,7 @@ class Soak:
         self.board.pump(3.0)
         dsp, tables = self.board.state.get("dsp") or {}, self.board.state.get("tables") or {}
         checked = bool(dsp.get("matches")) and tables.get("verified") == tables.get("words")
+        apply_run_edits(self.board)
         applied = self.board.set("guard_us", int((self.board.state.get("settings") or {}).get("guard_us", 500)))
         self.board.command("B")
         restarted = self.board.pump(2.0, lambda s: s.get("firmware_mode") == "B")
@@ -437,7 +462,7 @@ def suite(board, report, label, args):
     recordings(board, report, f"in Stare, {label}", args.downloads, stare=True)
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--reads", type=int, default=30, help="commands per mode")
     parser.add_argument("--downloads", type=int, default=2, help="recordings per configuration")
@@ -447,9 +472,14 @@ def main():
     parser.add_argument("--soak-sound", help="WAV to play for 20 s of every soak minute")
     parser.add_argument("--soak-cycle-min", type=int, default=2, help="minutes between record/I/SET cycles (0 = none)")
     parser.add_argument("--soak-log", help="CSV path (default: the temp folder)")
-    args = parser.parse_args()
+    parser.add_argument("--out", help="folder for summary.json (default: none)")
+    return parser
 
+
+def main():
+    args = build_parser().parse_args()
     report = Report()
+    started = time.strftime("%Y-%m-%d %H:%M:%S")
     with connect(WS_URL, open_timeout=5, max_size=None) as socket:
         board = Board(socket)
         board.pump(1.0)
@@ -465,6 +495,7 @@ def main():
         dsp, tables = board.state.get("dsp") or {}, board.state.get("tables") or {}
         report.add("boot checks (I)", bool(dsp.get("matches")) and tables.get("verified") == tables.get("words"),
                    f"DSP {dsp.get('matched')}/{dsp.get('read')}, tables {tables.get('verified')}/{tables.get('words')}")
+        apply_run_edits(board)
         try:
             if not args.soak_only:
                 channel_order(board, report)
@@ -485,7 +516,12 @@ def main():
                     board.set(key, settings[key])
             board.command(f"O,{ch1.get('source', 0)},{ch1.get('index', 0)}")
             board.pump(0.5)
+        result = summary_record(report, "regression", started, args, board, settings)
 
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+        with open(os.path.join(args.out, "summary.json"), "w", encoding="utf-8") as handle:
+            json.dump(result, handle, indent=2, default=float)
     failed = [name for name, passed, _ in report.rows if not passed]
     print(f"\n{len(report.rows) - len(failed)}/{len(report.rows)} checks passed" +
           (f"; failed: {', '.join(failed)}" if failed else ""))

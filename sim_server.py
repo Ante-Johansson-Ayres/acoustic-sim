@@ -13,20 +13,24 @@ import base64
 import io
 import json
 import pathlib
+import re
 import time
 import wave
 from contextlib import asynccontextmanager
+from typing import Any
 
 import numpy as np
 import pyroomacoustics as pra
 import scipy.io.wavfile as wavfile
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from array_theory import theory_cut
 from heimdall_transport import DeployedProgram, EmulatorHeimdallTransport, SerialHeimdallTransport
 from dsp_registry import DspParameterService, plan_writes
+from study_runner import StudyRunner
 from heimdall_acoustic import (
     AcousticCacheLevelProvider,
     AcousticGridSpec,
@@ -841,6 +845,23 @@ import threading
 _heimdall_transport = None
 _heimdall_transport_lock = threading.Lock()
 
+# The Study screen's test runner. While a test runs, only its own connections may command the board.
+_study_runner = StudyRunner()
+RUN_HEADER = "x-heimdall-run"
+LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
+
+
+def _unlocked(request: Request) -> None:
+    if not _study_runner.allows(request.headers.get(RUN_HEADER)):
+        raise HTTPException(status_code=423, detail=_study_runner.lock_text())
+
+
+def _local_origin(request: Request) -> None:
+    """The runner routes start programs and read result files: answer pages of this computer only."""
+    origin = request.headers.get("origin")
+    if origin is not None and not LOCAL_ORIGIN.match(origin):
+        raise HTTPException(status_code=403, detail="The Study runner answers pages on this computer only.")
+
 
 # ── Hardware WebSocket endpoint ────────────────────────────────────────────────
 
@@ -988,7 +1009,7 @@ def _replace_heimdall_transport(transport):
         transport.start()
 
 
-@app.post("/hw_connect")
+@app.post("/hw_connect", dependencies=[Depends(_unlocked)])
 def hw_connect(request: HardwareConnectRequest):
     """Connect serial hardware or start the protocol-faithful emulator."""
     try:
@@ -1092,7 +1113,7 @@ def hw_acoustic_audition(request: AcousticAuditionRequest):
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
-@app.post("/hw_disconnect")
+@app.post("/hw_disconnect", dependencies=[Depends(_unlocked)])
 def hw_disconnect():
     _replace_heimdall_transport(None)
     return {"status": "disconnected"}
@@ -1259,14 +1280,166 @@ def dsp_read(request: DspReadRequest):
                               "words": _dsp_service.read(_current_transport(), request.address, request.count)})
 
 
-@app.post("/dsp/write")
+@app.post("/dsp/write", dependencies=[Depends(_unlocked)])
 def dsp_write(request: DspWriteRequest):
     return _dsp_call(lambda: _dsp_service.write(_current_transport(), [w.model_dump() for w in request.writes]))
 
 
-@app.post("/dsp/set")
+@app.post("/dsp/set", dependencies=[Depends(_unlocked)])
 def dsp_set(request: DspSetRequest):
     return _dsp_call(lambda: {"settings": _dsp_service.set(_current_transport(), request.key, request.value)})
+
+
+# ── Study: the characterisation tests, run by study_runner.py ────────────────
+
+class StudyRunRequest(BaseModel):
+    entry: str
+    options: dict[str, Any] = {}
+    configuration: str = "flashed"
+
+
+class StudyAnswerRequest(BaseModel):
+    text: str = ""
+
+
+class StudyStopRequest(BaseModel):
+    force: bool = False
+
+
+def _idle(transport, seconds=3.0):
+    if transport.snapshot().get("mode") == "IDLE":
+        return True
+    transport.send_command("X")
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if transport.snapshot().get("mode") == "IDLE":
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _study_edits(transport):
+    """Writable DSP words that the Study changed (the backend's copy of what it wrote), with labels."""
+    registry = _dsp_service.registry()
+    memory = _dsp_service.memory(transport)
+    edits = []
+    for item in registry["parameters"]:
+        if not item["writable"]:
+            continue
+        for offset, default in enumerate(item["default_words"]):
+            address = item["address"] + offset
+            word = memory.get(address, default)
+            if word != default:
+                label = f"{item['block']}.{item['name']}" + (f"[{offset}]" if item["words"] > 1 else "")
+                edits.append({"address": address, "word": word, "default": default, "label": label})
+    return edits
+
+
+def _run_prepare(configuration):
+    """Before a test: list the Study's edits and changed settings; a flashed run sets them to flashed."""
+    transport = _current_transport()
+    if transport is None:
+        raise PermissionError("Connect the board on the Hardware screen first.")
+    messages = []
+    supported, reason = _dsp_service.supports(transport)
+    edits = _study_edits(transport) if supported else []
+    if not supported:
+        messages.append(f"DSP edits not checked: {reason}")
+    settings = dict(_dsp_service.status(transport).get("settings") or {})
+    defaults = DspParameterService._default_settings()
+    changed = {key: value for key, value in settings.items() if key in defaults and value != defaults[key]}
+    if configuration == "flashed" and (edits or changed):
+        if not _idle(transport):
+            raise RuntimeError("The board did not stop. Click Stop on the Hardware screen, then run again.")
+        if edits:
+            _dsp_service.write(transport, [{"address": e["address"], "word": e["default"]} for e in edits])
+            messages.append(f"Flashed run: {len(edits)} edited DSP words are at their flashed values during the test.")
+        for key in changed:
+            _dsp_service.set(transport, key, defaults[key])
+        if changed:
+            messages.append("Flashed run: settings at their defaults during the test (" + ", ".join(
+                f"{key} {value} to {defaults[key]}" for key, value in changed.items()) + ").")
+    elif configuration == "edits":
+        messages.append(f"Run with the current edits: {len(edits)} DSP words differ from the flashed program. "
+                        "The test writes them again after each boot check (I).")
+    return {"edits": edits, "settings": settings, "changed_settings": changed, "messages": messages}
+
+
+def _run_finish(context):
+    """After a test: put the Study's edits back on the board, and the settings after a flashed run."""
+    edits = context.get("edits") or []
+    changed = context.get("changed_settings") if context.get("configuration") == "flashed" else {}
+    if not edits and not changed:
+        return []
+    transport = _current_transport()
+    if transport is None or not _idle(transport):
+        return ["The board is not connected or did not stop: the Study's edits and settings were not put back."]
+    messages = []
+    if edits:
+        _dsp_service.write(transport, [{"address": e["address"], "word": e["word"]} for e in edits])
+        messages.append(f"The Study's {len(edits)} edited DSP words are back on the board.")
+    for key, value in (changed or {}).items():
+        _dsp_service.set(transport, key, value)
+    if changed:
+        messages.append("The settings are back: " + ", ".join(f"{key} {value}" for key, value in changed.items()) + ".")
+    return messages
+
+
+def _runner_call(action):
+    try:
+        return action()
+    except (FileNotFoundError, KeyError) as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except (RuntimeError, PermissionError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/study/tests", dependencies=[Depends(_local_origin)])
+def study_tests():
+    return _runner_call(_study_runner.catalogue)
+
+
+@app.get("/study/run", dependencies=[Depends(_local_origin)])
+def study_run_status(since: int = 0):
+    return _study_runner.status(since)
+
+
+@app.post("/study/run", dependencies=[Depends(_local_origin)])
+def study_run_start(request: StudyRunRequest):
+    return _runner_call(lambda: _study_runner.start(request.entry, request.options, request.configuration,
+                                                    prepare=_run_prepare, finish=_run_finish))
+
+
+@app.post("/study/run/answer", dependencies=[Depends(_local_origin)])
+def study_run_answer(request: StudyAnswerRequest):
+    return _runner_call(lambda: _study_runner.answer(request.text))
+
+
+@app.post("/study/run/stop", dependencies=[Depends(_local_origin)])
+def study_run_stop(request: StudyStopRequest):
+    return _runner_call(lambda: _study_runner.stop(request.force))
+
+
+@app.get("/study/results", dependencies=[Depends(_local_origin)])
+def study_results():
+    return {"results": _study_runner.results()}
+
+
+@app.get("/study/results/item", dependencies=[Depends(_local_origin)])
+def study_result(path: str):
+    return _runner_call(lambda: _study_runner.result(path))
+
+
+@app.get("/study/results/file", dependencies=[Depends(_local_origin)])
+def study_result_file(path: str):
+    return FileResponse(_runner_call(lambda: _study_runner.result_file(path)))
+
+
+@app.post("/study/speaker_check", dependencies=[Depends(_local_origin)])
+def study_speaker_check():
+    return _runner_call(_study_runner.speaker_check)
 
 
 @app.get("/study/theory/cut")
@@ -1367,6 +1540,7 @@ async def realtime_hw_ws(ws: WebSocket):
 
     await ws.accept()
     await ws.send_json(_hardware_payload("init", transport.snapshot()))
+    run_token = ws.query_params.get("run")
     paused = False
     last_state_key = None
 
@@ -1384,7 +1558,7 @@ async def realtime_hw_ws(ws: WebSocket):
                 0 if expected_audio == 0
                 else snapshot["audio_download_received"] * 100 // expected_audio
             )
-            state_key = (snapshot["sequence"], truth_tick, audio_progress_percent)
+            state_key = (snapshot["sequence"], truth_tick, audio_progress_percent, _study_runner.revision)
             if state_key == last_state_key:
                 await asyncio.sleep(0.010)
                 continue
@@ -1410,6 +1584,9 @@ async def realtime_hw_ws(ws: WebSocket):
             elif mtype == "resume":
                 paused = False
             elif mtype == "command":
+                if not _study_runner.allows(run_token):
+                    await ws.send_json({"type": "command_error", "detail": _study_runner.lock_text()})
+                    continue
                 try:
                     transport.send_command(str(msg.get("command", "")))
                 except (OSError, ValueError) as error:
@@ -1418,7 +1595,8 @@ async def realtime_hw_ws(ws: WebSocket):
                 _hw_true_az_deg = float(msg["az_deg"]) if msg.get("az_deg") is not None else None
                 _hw_true_el_deg = float(msg["el_deg"]) if msg.get("el_deg") is not None else None
             elif mtype == "request_init":
-                transport.send_command("I")
+                if _study_runner.allows(run_token):
+                    transport.send_command("I")
                 await ws.send_json(_hardware_payload("init", transport.snapshot()))
     except WebSocketDisconnect:
         pass
@@ -1489,6 +1667,7 @@ def _hardware_payload(payload_type, snapshot):
         "mode": "hardware",
         "beam_method": "hardware_sector_scan",
         "transport": snapshot["transport"],
+        "study_run": _study_runner.brief(),
         "grid_source": grid_source,
         "connected": snapshot["connected"],
         "configuration": configuration,

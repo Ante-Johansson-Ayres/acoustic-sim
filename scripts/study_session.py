@@ -28,7 +28,8 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from board_regression import WS_URL, Board, Report, connect, play, record
+from board_regression import WS_URL, Board, Report, apply_run_edits, connect, play, record
+from gui_run import run_edits
 
 RATE = 48000
 LOOP_S = 20
@@ -288,6 +289,7 @@ class Session:
         if not self.board.pump(8.0, lambda s: same_angles(s.get("azimuth_deg"), azimuths)
                                and same_angles(s.get("elevation_deg"), elevations)):
             raise RuntimeError("the deployment grid did not come back after I")
+        apply_run_edits(self.board)
 
     def speaker_sector(self, azimuth, elevation):
         configuration, azimuths, elevations = self.home
@@ -544,7 +546,7 @@ def run(session, args):
         session.report.add("tonal detector", False, str(error))
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--speaker-az", type=float, required=True, help="degrees from the array centre, + = right")
     parser.add_argument("--speaker-el", type=float, required=True, help="degrees from the array centre, + = up")
@@ -555,7 +557,11 @@ def main():
                         help="capture per steering point; on a free-field theory grid at 2 kHz, 1 s gives a peak "
                              "sigma of 0.8-1.0 deg and 2 s gives 0.55-0.75 (gate: 1 deg)")
     parser.add_argument("--out", help="folder for the signals, captures.csv and summary.json (default: temp)")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
     out = args.out or os.path.join(tempfile.gettempdir(), time.strftime("heimdall_study_%Y%m%d_%H%M%S"))
     os.makedirs(out, exist_ok=True)
     signals = make_signals(out)
@@ -575,6 +581,7 @@ def main():
         booted = bool(dsp.get("matches")) and tables.get("verified") == tables.get("words")
         report.add("boot checks (I)", booted, f"DSP {dsp.get('matched')}/{dsp.get('read')}, "
                                              f"tables {tables.get('verified')}/{tables.get('words')}")
+        apply_run_edits(board)
         writer = csv.DictWriter(handle, FIELDS, extrasaction="ignore")
         writer.writeheader()
         session = Session(board, signals, writer, report)
@@ -584,8 +591,9 @@ def main():
                 run(session, args)
         finally:
             session.restore()
-        summary = {"started": started, "arguments": vars(args), "map_hash": board.state.get("map_hash"),
-                   "dsp": board.state.get("dsp"), "values": session.values,
+        summary = {"test": "health", "started": started, "arguments": vars(args), "map_hash": board.state.get("map_hash"),
+                   "dsp": board.state.get("dsp"), "settings": session.settings_before,
+                   "dsp_edits": {str(a): w for a, w in run_edits().items()}, "values": session.values,
                    "checks": [{"name": name, "result": "info" if passed is None else ("pass" if passed else "fail"),
                                "detail": detail} for name, passed, detail in report.rows]}
     with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as handle:

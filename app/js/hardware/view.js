@@ -164,7 +164,19 @@ export function createView(container, {session}) {
   );
 
   const connectWrap = h('div', {class: 'hw-connect'}, connection.el);
-  container.append(banner, connectWrap, consoleEl);
+  const runText = h('span', {class: 'note note--body'});
+  const runBanner = h('div', {class: 'banner', role: 'status', hidden: true},
+    h('div', {class: 'banner__text'}, h('span', {class: 'banner__title'}, 'A Study test is running'), runText),
+    h('div', {class: 'toolbar toolbar--tight'}, h('a', {class: 'btn', href: '#study/measurements'}, 'Open the test')));
+  container.append(runBanner, banner, connectWrap, consoleEl);
+
+  /** While a test runs, the backend takes board commands from the test only. */
+  function renderRunLock() {
+    const run = session.open ? session.studyRun : null;
+    runBanner.hidden = !run;
+    if (run) setText(runText, `${run.title}. The controls are off until the test ends or you stop it on the Study screen.`);
+    for (const part of [command, side, foot, drawerPanel, connectWrap]) part.inert = Boolean(run);
+  }
 
   function renderBanner() {
     const modified = session.open ? dsp.status?.modified_words || 0 : 0;
@@ -179,7 +191,7 @@ export function createView(container, {session}) {
   /** A bank tile routes that beam to Ch1; a sector tile points the beam there once. */
   function pick(index) {
     const field = state.field;
-    if (!field || !Number.isInteger(index)) return;
+    if (!field || !Number.isInteger(index) || session.studyRun) return;
     if (field.kind === 'bank') {
       if (session.frame?.outputs) session.selectOutput(2, index);
       return;
@@ -371,6 +383,7 @@ export function createView(container, {session}) {
   function draw(force) {
     if (!state.visible) return;
     const open = session.open;
+    renderRunLock();
     connectWrap.hidden = open;
     consoleEl.hidden = !open;
     if (!open) return;

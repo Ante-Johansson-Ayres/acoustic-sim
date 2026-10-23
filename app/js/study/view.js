@@ -1,13 +1,13 @@
 /**
  * view.js — the Study screen: a bar with the device state and the explicit
  * "Enable writes" switch, then Parameters or Measurements (#study/parameters,
- * #study/measurements).
+ * #study/measurements: the characterisation tests, run by the backend).
  */
 
 import { h, setText } from '../shared/dom.js';
 import { dsp } from './dsp.js';
 import { parametersScreen } from './params.js';
-import { measurementsScreen } from './measure.js';
+import { measurementsScreen } from './runner.js';
 
 export function createView(container, {session}) {
   const state = {writes: false, visible: false, sub: 'parameters'};
@@ -60,9 +60,11 @@ export function createView(container, {session}) {
     const program = session.latest?.dsp;
     const mismatch = session.open && program && !program.matches;
     if (mismatch) { text = `The device runs a different DSP program than ${program.program}; this register map does not apply`; tone = 'fault'; }
+    const testRun = session.open ? session.studyRun : null;
+    if (testRun && !mismatch) { text = `Test running: ${testRun.title} · writes wait until it ends`; tone = 'connecting'; }
     devState.dataset.state = tone;
     setText(devText, text);
-    const locked = !status?.supported || mismatch;
+    const locked = !status?.supported || mismatch || Boolean(testRun);
     if (locked) state.writes = false;
     writesSwitch.disabled = locked;
     writesSwitch.setAttribute('aria-checked', String(state.writes));
@@ -71,6 +73,7 @@ export function createView(container, {session}) {
       h('p', {}, `${dsp.error}. The backend reads the SigmaStudio export in the MAX78002 folder selected by HEIMDALL_DSP_EXPORT (project.mk, or the environment).`));
     params.el.hidden = state.sub !== 'parameters' || Boolean(dsp.error);
     measure.el.hidden = state.sub !== 'measurements';
+    measure.setVisible(state.visible && state.sub === 'measurements');
     const modified = status?.modified_words ?? 0;
     setText(footer.querySelector('#st-footer-left'), dsp.registry
       ? `${dsp.registry.parameters.length} parameters · ${dsp.registry.writable_words.toLocaleString()} writable words · ${modified} words differ from the flashed program`
@@ -79,9 +82,15 @@ export function createView(container, {session}) {
   }
 
   let poll = null;
+  let testRun = null;
   dsp.addEventListener('change', () => { if (state.visible) render(); });
   session.addEventListener('link', () => { if (state.visible) { dsp.refresh(); measure.render(); } });
   session.addEventListener('init', () => { if (state.visible) { dsp.refresh(); measure.render(); } });
+  session.addEventListener('frame', () => {
+    const now = session.studyRun?.entry || null;
+    if (state.visible && now !== testRun) render();
+    testRun = now;
+  });
   window.addEventListener('hashchange', () => { if (state.visible) render(); });
 
   return {
@@ -95,6 +104,7 @@ export function createView(container, {session}) {
     hide() {
       state.visible = false;
       clearInterval(poll);
+      measure.setVisible(false);
     },
   };
 }

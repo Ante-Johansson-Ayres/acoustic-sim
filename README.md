@@ -35,7 +35,7 @@ To use the GUI without Node at run time, type `npm.cmd run build` one time. Then
 | Beam pattern | `#beam` | The array factor of a geometry (also the deployed layout), with polar cuts and the -3 dB width |
 | Simulator | `#sim` | One room-acoustics trial: SRP map, estimate and error, audio, impulse response ([docs/SIMULATOR.md](docs/SIMULATOR.md)) |
 | Hardware | `#hardware` | The operator console for the board, the fast emulator or the acoustic emulator. Study and Exhibition use the same hardware connection. |
-| Study | `#study` | DSP parameter editors and guided measurements |
+| Study | `#study` | DSP parameter editors, and the tests of the characterisation plan |
 | Exhibition | `#exhibit` | A full-screen view of the Hardware session, for a booth. `Present` opens it and Esc closes it. |
 
 ## Hardware
@@ -92,10 +92,20 @@ profiles, the scenarios and the limits of both models are in
   board. The backend checks the writes against the map hash of the firmware. It sends them as
   safeloads of five consecutive words or fewer
   ([REFERENCE.md section 4.12](../MAX78002/docs/REFERENCE.md#412-parameter-access-pw-pr-and-its-gates)).
-- **Measurements.** Guided procedures save each run with the settings, map hash and grid, and
-  export CSV and JSON. The procedures are: microphone survey, beam cut, detector time constant,
-  steering accuracy, array gain, SNR, width, dynamic range, detection range and detector scale.
-  They use 5 ms windows and are for quick checks. The scripts below are the reference method.
+- **Measurements.** The tests of the characterisation plan
+  ([CHARACTERISATION_PLAN.md section 3.2](../MAX78002/docs/CHARACTERISATION_PLAN.md#32-where-you-start-the-tests-and-the-notes)),
+  in its order. The backend (`study_runner.py`) runs the scripts below, one at a time, and writes
+  each run to `MAX78002/docs/data/bench_<date>/<test>` with `run.json` and `run_log.txt`. The screen
+  shows the plan's text, the options (from the scripts' own parsers, `scripts/catalogue.py`), the
+  output, the questions of the script, and the checks and figures of each result folder.
+  - `Flashed` sets the Study edits and the settings to their flashed values for the test, and puts
+    them back after it. `Current edits` keeps them: the script writes the edits again after each `I`,
+    because `I` puts back the flashed taper and tables.
+  - `Stop` sends CTRL_BREAK, so the script runs its restore steps. `Force stop` ends it at once.
+  - While a test runs, the backend refuses board commands, `/dsp/write`, `/dsp/set`, `/hw_connect`
+    and `/hw_disconnect` from all other clients (HTTP 423). The Hardware screen shows a banner.
+  - The runner routes (`/study/tests`, `/study/run`, `/study/results`) answer pages of this
+    computer only.
 
 ## Scripts
 
@@ -104,6 +114,8 @@ profiles, the scenarios and the limits of both models are in
 | `scripts/characterise.py` | The tests of the characterisation plan ([CHARACTERISATION_PLAN.md](../MAX78002/docs/CHARACTERISATION_PLAN.md)) |
 | `scripts/study_session.py` | Scripted health check |
 | `scripts/board_regression.py` | Acceptance checks on the board, and the soak test |
+| `scripts/catalogue.py` | The test list of the Study screen, from the plan and the scripts' parsers (JSON) |
+| `scripts/gui_run.py` | The questions, Stop and DSP edits of a run started from the Study screen |
 | `run_comparison.py` | Batch sweep of the acoustic simulator ([docs/SIMULATOR.md](docs/SIMULATOR.md)) |
 
 ## Tests
