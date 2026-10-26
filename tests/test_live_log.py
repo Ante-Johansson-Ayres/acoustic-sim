@@ -62,3 +62,18 @@ def test_log_round_trip_and_checks(tmp_path):
     assert np.array_equal(loaded["levels"], levels) and loaded["targets"] == [(20, 1.0, 2.0, 24, 23)]
     assert live_log.complete(loaded)
     assert not live_log.complete({**loaded, "maps": np.array([11, 12, 14])})
+
+
+def test_fit_summary_scores_the_firmware_target_and_the_pattern_fit():
+    fit, _ = live_log.load_fit()
+    if fit is None:
+        return
+    quiet = np.full(fit.beams, 40.0)
+    source = 2000.0 * fit.fingerprint(-15.0, 3.0) + 40.0
+    levels = np.vstack([np.tile(quiet, (20, 1)), np.tile(source, (40, 1))]).round().astype(np.int64)
+    run = {"label": "start 1", "start_maps": 0, "maps": np.arange(1, 61), "t": np.arange(60) * 0.05,
+           "levels": levels, "targets": [], "events": {}}
+    summary = live_log.fit_summary([run], speaker=(-15.0, 3.0))
+    assert summary["target maps"] > 0
+    assert summary["on the speaker, fit"] == 1.0
+    assert summary["far jumps per min, fit"] == 0.0

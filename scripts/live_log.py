@@ -1,14 +1,16 @@
 """Live (bank) logs: save, load, replay the firmware's detector with other settings, and analyse.
 
-    python scripts/live_log.py <folder> [old]   analyses l7_maps.npz and/or l5_maps.npz in the folder; writes
-                                                live_log.json. 'old': the log was made with the detector before
-                                                2026-10-23 (integer backgrounds, no level floor).
+    python scripts/live_log.py <folder> [old] [--speaker AZ EL]
+        analyses l7_maps.npz and/or l5_maps.npz in the folder; writes live_log.json. 'old': the log was made with
+        the detector before 2026-10-23 (integer backgrounds, no level floor). --speaker: the speaker's direction
+        (deg), to score the firmware target and the pattern fit (bank_fit.py) against it.
 
 A run is the maps of one Live start (B). The replay is exact only when the log has every map from the start (the
 first map primes the backgrounds); the analysis checks this against the targets that the board reported.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from fractions import Fraction
@@ -16,8 +18,15 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from bank_fit import BankFit, BankFitStream  # noqa: E402
+from heimdall_acoustic import default_contract_path  # noqa: E402
+
 ROWS = COLUMNS = 7
 MAP_S = 0.05  # HEIMDALL_BANK_PERIOD_US
+ON_TARGET_DEG = 12.5  # about one bank cell
+FAR_JUMP_DEG = 20.0
 OLD_FIRMWARE = {"frac_bits": 0, "floor": 0}
 SETTINGS = {
     "firmware (1.5x, 8 fraction bits, floor 4)": {},
@@ -132,19 +141,20 @@ def rate(best, keep):
     return float(np.mean(best[keep] >= 0)) if keep.any() else float("nan")
 
 
-def analyse(folder, firmware=None):
-    """firmware: the detector settings of the board that made the log ({} = now, OLD_FIRMWARE = before 23 Oct)."""
+def analyse(folder, firmware=None, speaker=None):
+    """firmware: the detector settings of the board that made the log ({} = now, OLD_FIRMWARE = before 23 Oct).
+    speaker: (azimuth, elevation) in degrees, when known."""
     folder = Path(folder)
     result = {}
     for name in ("l7", "l5"):
         path = folder / f"{name}_maps.npz"
         if path.exists():
-            result[name] = analyse_runs(name, load_log(path), firmware or {})
+            result[name] = analyse_runs(name, load_log(path), firmware or {}, speaker)
     (folder / "live_log.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
 
 
-def analyse_runs(name, runs, firmware):
+def analyse_runs(name, runs, firmware, speaker=None):
     print(f"{name}: {len(runs)} runs")
     out = {"runs": [], "settings": {}}
     for run in runs:
@@ -164,6 +174,59 @@ def analyse_runs(name, runs, firmware):
     print("  most frequent target beams (firmware): " + ", ".join(
         f"beam {d['beam']} ({d['azimuth_deg']:+.0f}, {d['elevation_deg']:+.0f} deg) {d['share']:.0%}"
         for d in out["directions"][:6]))
+    out["fit"] = fit_summary(runs, firmware, speaker)
+    if out["fit"]:
+        print("  pattern fit: " + ", ".join(f"{k} {v:.3g}" for k, v in out["fit"].items()))
+    return out
+
+
+def load_fit(contract_path=None):
+    """The pattern fit and bank beam directions of the deployed contract; (None, None) when unusable."""
+    try:
+        contract = json.loads(Path(contract_path or default_contract_path()).read_text(encoding="utf-8"))
+        fit = BankFit.from_contract(contract)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+    if fit is None:
+        return None, None
+    bank = contract["bank"]
+    return fit, np.column_stack([bank["azimuth_deg"], bank["elevation_deg"]])
+
+
+def fit_summary(runs, firmware=None, speaker=None, contract_path=None):
+    """On the maps where the firmware reports a target: how often the pattern fit's direction (over the recent maps,
+    as the backend shows it) agrees with the firmware's beam, far jumps per minute of each, and with a speaker
+    direction the share of each on it."""
+    fit, beams = load_fit(contract_path)
+    if fit is None or not runs or np.shape(runs[0]["levels"])[1] != fit.beams:
+        return {}
+    firmware_dirs, fit_dirs, jumps, minutes = [], [], {"firmware": 0, "fit": 0}, 0.0
+    for run in runs:
+        best, _ = replay(run, **(firmware or {}))
+        minutes += len(best) * MAP_S / 60.0
+        stream, previous = BankFitStream(fit), None
+        results = [stream.push(count, levels) for count, levels in zip(run["maps"], run["levels"])]
+        for index in np.flatnonzero(best >= 0):
+            result = results[index]
+            if result is None:
+                continue
+            pair = (beams[best[index]], np.array([result.azimuth_deg, result.elevation_deg]))
+            firmware_dirs.append(pair[0])
+            fit_dirs.append(pair[1])
+            if previous is not None:
+                for key, now, before in (("firmware", pair[0], previous[0]), ("fit", pair[1], previous[1])):
+                    jumps[key] += bool(np.hypot(*(now - before)) > FAR_JUMP_DEG)
+            previous = pair
+    if not firmware_dirs:
+        return {}
+    firmware_dirs, fit_dirs = np.array(firmware_dirs), np.array(fit_dirs)
+    near = lambda a, b: np.all(np.abs(a - b) <= ON_TARGET_DEG, axis=1)  # noqa: E731
+    out = {"target maps": float(len(fit_dirs)), "fit agrees with firmware": float(np.mean(near(fit_dirs, firmware_dirs))),
+           "far jumps per min, firmware": jumps["firmware"] / minutes, "far jumps per min, fit": jumps["fit"] / minutes}
+    if speaker is not None:
+        speaker = np.asarray(speaker, float)
+        out["on the speaker, firmware"] = float(np.mean(near(firmware_dirs, speaker)))
+        out["on the speaker, fit"] = float(np.mean(near(fit_dirs, speaker)))
     return out
 
 
@@ -237,6 +300,9 @@ def directions(runs):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2, 3) or sys.argv[2:] not in ([], ["old"]):
-        sys.exit(__doc__)
-    analyse(sys.argv[1], OLD_FIRMWARE if sys.argv[2:] == ["old"] else {})
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("folder")
+    parser.add_argument("old", nargs="?", choices=["old"])
+    parser.add_argument("--speaker", type=float, nargs=2, metavar=("AZ", "EL"))
+    args = parser.parse_args()
+    analyse(args.folder, OLD_FIRMWARE if args.old else {}, args.speaker)

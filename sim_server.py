@@ -34,6 +34,7 @@ from starlette.datastructures import Headers
 from starlette.websockets import WebSocketClose
 
 from array_theory import theory_cut
+from bank_fit import BankFit, BankFitStream
 from heimdall_transport import DeployedProgram, EmulatorHeimdallTransport, SerialHeimdallTransport
 from dsp_registry import DspParameterService, plan_writes, setting_order
 from study_runner import StudyRunner
@@ -1825,15 +1826,39 @@ async def realtime_hw_ws(ws: WebSocket):
             pass
 
 
-def _bank_with_directions(bank):
-    """The firmware reports bank levels only; the beam directions come from the deployed contract."""
+def _bank_with_directions(bank, map_hash=None):
+    """The firmware reports bank levels only; the beam directions and the pattern fit come from the contract."""
     if bank is None:
         return None
     program = _deployed_program()
     if len(program.bank_azimuth_deg) != bank["rows"] * bank["columns"]:
         return bank
     return {**bank, "azimuth_deg": list(program.bank_azimuth_deg),
-            "elevation_deg": list(program.bank_elevation_deg)}
+            "elevation_deg": list(program.bank_elevation_deg), "fit": _bank_fit_result(bank, map_hash)}
+
+
+def _bank_fit():
+    """The pattern fit of the deployed bank over its recent maps, built once; None without per-microphone delays."""
+    if "bank_fit" not in _DEPLOYMENT_CACHE:
+        try:
+            fit = BankFit.from_contract(_deployment())
+        except (KeyError, TypeError, ValueError):
+            fit = None
+        _DEPLOYMENT_CACHE["bank_fit"] = None if fit is None else BankFitStream(fit)
+    return _DEPLOYMENT_CACHE["bank_fit"]
+
+
+def _bank_fit_result(bank, map_hash):
+    """Pattern-fit direction of the latest bank maps; None if the firmware runs another program."""
+    levels = bank.get("levels_raw")
+    expected = ((_deployment() or {}).get("study") or {}).get("map_hash")
+    if not levels or any(value is None for value in levels) or (map_hash and expected and map_hash != expected):
+        return None
+    stream = _bank_fit()
+    if stream is None or stream.fit.beams != len(levels):
+        return None
+    result = stream.push(bank.get("maps"), levels)
+    return None if result is None else result.as_dict()
 
 
 def _hardware_payload(payload_type, snapshot):
@@ -1915,7 +1940,7 @@ def _hardware_payload(payload_type, snapshot):
         "classes": snapshot.get("classes") or {},
         "direction_set": snapshot.get("direction_set"),
         "recording_meta": snapshot.get("recording_meta"),
-        "bank": _bank_with_directions(snapshot.get("bank")),
+        "bank": _bank_with_directions(snapshot.get("bank"), snapshot.get("map_hash")),
         "outputs": snapshot.get("outputs"),
         "array_mount": snapshot.get("array_mount"),
         "ch1": snapshot.get("ch1"),
