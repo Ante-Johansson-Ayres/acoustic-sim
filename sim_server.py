@@ -24,8 +24,10 @@ import pyroomacoustics as pra
 import scipy.io.wavfile as wavfile
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.datastructures import Headers
+from starlette.websockets import WebSocketClose
 
 from array_theory import theory_cut
 from heimdall_transport import DeployedProgram, EmulatorHeimdallTransport, SerialHeimdallTransport
@@ -343,12 +345,36 @@ async def _lifespan(_app):
 
 app = FastAPI(title="Acoustic Beamformer Simulation", lifespan=_lifespan)
 
+LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
+
+
+class LocalOriginMiddleware:
+    """A web page from another computer must not command the board (CORS alone does not stop the request)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            origin = Headers(scope=scope).get("origin")
+            if origin is not None and not LOCAL_ORIGIN.match(origin):
+                if scope["type"] == "http":
+                    response = JSONResponse({"detail": "This server answers pages on this computer only."},
+                                            status_code=403)
+                else:
+                    response = WebSocketClose(code=1008)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=LOCAL_ORIGIN.pattern,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(LocalOriginMiddleware)
 
 
 class SimRequest(BaseModel):
@@ -848,19 +874,11 @@ _heimdall_transport_lock = threading.Lock()
 # The Study screen's test runner. While a test runs, only its own connections may command the board.
 _study_runner = StudyRunner()
 RUN_HEADER = "x-heimdall-run"
-LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
 
 
 def _unlocked(request: Request) -> None:
     if not _study_runner.allows(request.headers.get(RUN_HEADER)):
         raise HTTPException(status_code=423, detail=_study_runner.lock_text())
-
-
-def _local_origin(request: Request) -> None:
-    """The runner routes start programs and read result files: answer pages of this computer only."""
-    origin = request.headers.get("origin")
-    if origin is not None and not LOCAL_ORIGIN.match(origin):
-        raise HTTPException(status_code=403, detail="The Study runner answers pages on this computer only.")
 
 
 # ── Hardware WebSocket endpoint ────────────────────────────────────────────────
@@ -1403,48 +1421,48 @@ def _runner_call(action):
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
-@app.get("/study/tests", dependencies=[Depends(_local_origin)])
+@app.get("/study/tests")
 def study_tests():
     return _runner_call(_study_runner.catalogue)
 
 
-@app.get("/study/run", dependencies=[Depends(_local_origin)])
+@app.get("/study/run")
 def study_run_status(since: int = 0):
     return _study_runner.status(since)
 
 
-@app.post("/study/run", dependencies=[Depends(_local_origin)])
+@app.post("/study/run")
 def study_run_start(request: StudyRunRequest):
     return _runner_call(lambda: _study_runner.start(request.entry, request.options, request.configuration,
                                                     prepare=_run_prepare, finish=_run_finish))
 
 
-@app.post("/study/run/answer", dependencies=[Depends(_local_origin)])
+@app.post("/study/run/answer")
 def study_run_answer(request: StudyAnswerRequest):
     return _runner_call(lambda: _study_runner.answer(request.text))
 
 
-@app.post("/study/run/stop", dependencies=[Depends(_local_origin)])
+@app.post("/study/run/stop")
 def study_run_stop(request: StudyStopRequest):
     return _runner_call(lambda: _study_runner.stop(request.force))
 
 
-@app.get("/study/results", dependencies=[Depends(_local_origin)])
+@app.get("/study/results")
 def study_results():
     return {"results": _study_runner.results()}
 
 
-@app.get("/study/results/item", dependencies=[Depends(_local_origin)])
+@app.get("/study/results/item")
 def study_result(path: str):
     return _runner_call(lambda: _study_runner.result(path))
 
 
-@app.get("/study/results/file", dependencies=[Depends(_local_origin)])
+@app.get("/study/results/file")
 def study_result_file(path: str):
     return FileResponse(_runner_call(lambda: _study_runner.result_file(path)))
 
 
-@app.post("/study/speaker_check", dependencies=[Depends(_local_origin)])
+@app.post("/study/speaker_check")
 def study_speaker_check():
     return _runner_call(_study_runner.speaker_check)
 

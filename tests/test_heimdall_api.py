@@ -7,6 +7,8 @@ import wave
 
 from fastapi.testclient import TestClient
 import numpy as np
+import pytest
+from starlette.websockets import WebSocketDisconnect
 
 import sim_server
 from heimdall_acoustic import ACOUSTIC_MODEL_VERSION, AcousticCache, PreparationCancelled
@@ -155,6 +157,29 @@ def test_emulator_connect_command_stream_and_disconnect():
         response = client.post("/hw_disconnect")
         assert response.status_code == 200
         assert not client.get("/hw_status").json()["available"]
+
+
+def test_only_pages_on_this_computer_reach_the_backend():
+    foreign = {"Origin": "https://example.com"}
+    with TestClient(sim_server.app) as client:
+        assert client.post("/hw_connect", json={"transport": "emulator"}).status_code == 200
+        try:
+            assert client.get("/hw_status", headers=foreign).status_code == 403
+            assert client.post("/hw_disconnect", headers=foreign).status_code == 403
+            assert client.get("/hw_status", headers={"Origin": "http://localhost.example.com"}).status_code == 403
+            local = client.get("/hw_status", headers={"Origin": "http://localhost:5173"})
+            assert local.status_code == 200
+            assert local.headers["access-control-allow-origin"] == "http://localhost:5173"
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with client.websocket_connect("/realtime_hw", headers=foreign) as websocket:
+                    websocket.receive_json()
+            assert refused.value.code == 1008
+            with client.websocket_connect("/realtime_hw", headers={"Origin": "http://127.0.0.1:8080"}) as websocket:
+                assert websocket.receive_json()["type"] == "init"
+            with client.websocket_connect("/realtime_hw") as websocket:
+                assert websocket.receive_json()["type"] == "init"
+        finally:
+            client.post("/hw_disconnect")
 
 
 def test_acoustic_prepare_connect_and_stream(monkeypatch, tmp_path):
