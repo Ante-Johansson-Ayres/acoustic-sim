@@ -14,7 +14,7 @@ import { modeWord, scaleFill } from './lookparts.js';
 import { HistoryCharts } from './history.js';
 import { AudioPanel, DiagnosticsPanel, EventLog, ManualBeamPanel, MeasurementPanel, SourcePanel, TonePanel, operatingMode, sourceAnswer } from './status.js';
 import { AcousticScene, AuditionPanel, ConnectionPanel } from './connection.js';
-import { buildField, fieldKind } from './field.js';
+import { DIRECTIONS, buildField, fieldKind } from './field.js';
 import { STALE_MS } from './session.js';
 import { dsp } from '../study/dsp.js';
 
@@ -50,6 +50,8 @@ export function createView(container, {session}) {
   const prefs = {view: '3d', camera: 'behind', style: 'tiles', floor: -40, values: 'strongest', log: 'open', ...loadPrefs()};
   if (!['3d', 'map'].includes(prefs.view)) prefs.view = '3d';
   if (!STYLES.some(([key]) => key === prefs.style)) prefs.style = 'tiles';
+  if (!DIRECTIONS.some(([key]) => key === prefs.direction)) prefs.direction = 'firmware';
+  session.direction = prefs.direction === 'fit' ? 'fit' : 'firmware';
   // build: the 3D build waiting to play once the 3D view is on screen ('full' the first time, 'quick' after).
   const state = {visible: false, kind: null, field: null, hover: null, tab: null, build: null, built: false};
 
@@ -124,8 +126,19 @@ export function createView(container, {session}) {
     onChange: () => { prefs.style = styleSelect.value; savePrefs(prefs); render(true); }},
   options(STYLES, prefs.style));
   const stylePick = h('label', {class: 'pick'}, 'Show', styleSelect);
+  const directionSeg = segmented(DIRECTIONS, {
+    label: 'Live direction', onPick: (key) => {
+      prefs.direction = key; savePrefs(prefs); directionSeg.set(key);
+      session.direction = key === 'fit' ? 'fit' : 'firmware'; render(true);
+    },
+  });
+  directionSeg.set(prefs.direction);
+  const directionPick = h('span', {class: 'pick', title: 'Live direction: the firmware target beam, the pattern fit '
+    + '(all beams fitted to the expected pattern; the firmware still decides if there is a target), or both (the fit as a ring)'},
+  'Direction', directionSeg.el);
   const fieldHead = h('header', {class: 'panel__head'}, h('h2', {class: 'label'}, 'Field'),
-    h('div', {class: 'tools'}, viewSeg.el, cameraSeg.el, h('label', {class: 'pick'}, 'Floor', floorSelect), stylePick, valuesPick));
+    h('div', {class: 'tools'}, viewSeg.el, cameraSeg.el, h('label', {class: 'pick'}, 'Floor', floorSelect), stylePick, valuesPick,
+      directionPick));
 
   const sceneBox = h('div', {class: 'well__scene'});
   const mapBox = h('div', {class: 'well__map'}, map.el);
@@ -390,7 +403,8 @@ export function createView(container, {session}) {
     const frame = session.frame;
     const mode = operatingMode(session);
     state.kind = fieldKind(frame, {previous: state.kind, monitoring: session.monitoring});
-    const field = buildField(frame, state.kind, {cellAge: (row, column) => session.cellAge(row, column), staleMs: STALE_MS});
+    const field = buildField(frame, state.kind, {cellAge: (row, column) => session.cellAge(row, column), staleMs: STALE_MS,
+      direction: prefs.direction});
     state.field = field;
     const answer = sourceAnswer(session, field, mode);
 

@@ -36,7 +36,8 @@ export class FieldMap {
     this.pointerX = h('span', {class: 'fmap__pointer fmap__pointer--x', hidden: true});
     this.pointerY = h('span', {class: 'fmap__pointer fmap__pointer--y', hidden: true});
     this.truth = h('span', {class: 'fmap__truth', hidden: true});
-    this.overlays = [this.cross, this.pointerX, this.pointerY, this.truth];
+    this.alt = h('span', {class: 'fmap__alt', hidden: true, title: 'Pattern fit'});
+    this.overlays = [this.cross, this.pointerX, this.pointerY, this.truth, this.alt];
     this.ticks = h('ul', {class: 'fmap__ticks'});
     // The hidden looks draw tiles in six dither steps (lookparts.js), so their scale shows the steps.
     const ramp = look
@@ -160,5 +161,6 @@ export class FieldMap {
     if (this.place(this.truth, truth ? gridPosition(field, truth.azimuth_deg, truth.elevation_deg) : null, field)) {
       this.truth.classList.toggle('is-dropout', truth.source_active === false);
     }
+    this.place(this.alt, field.alt ? gridPosition(field, field.alt.azimuth, field.alt.elevation) : null, field);
   }
 }

@@ -429,6 +429,13 @@ export class FieldScene {
       dot.position.copy(point);
       this.marks.add(line, dot);
     }
+    const alt = field.alt;
+    if (alt && Number.isFinite(alt.azimuth) && Number.isFinite(alt.elevation)) {
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.075, 48), flat(COLORS.warn));
+      ring.position.copy(toScene(direction(alt.azimuth, alt.elevation), RADIUS * 0.985));
+      ring.lookAt(0, 0, 0);
+      this.marks.add(ring);
+    }
     this.motion?.apply();
     this.viewport.requestRender();
   }

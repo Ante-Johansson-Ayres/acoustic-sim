@@ -81,6 +81,7 @@ export class HardwareSession extends EventTarget {
     this.downloadStopSent = false;
     this.listenCopy = loadListenCopy(); // {enabled, preset, low, high}: the filtered copy that Save WAV adds
     this.recordLabel = loadLabel(globalThis.localStorage); // text as typed; Save WAV writes it into the record
+    this.direction = 'firmware';      // Live direction for the history: 'firmware' or 'fit' (set by the view)
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
     this.lastMoveLogged = 0;
@@ -582,7 +583,8 @@ export class HardwareSession extends EventTarget {
           const levels = bank.levels_db.flat();
           const target = bank.target;
           const level = target ? levels[target.beam] : Math.max(...levels.filter(Number.isFinite));
-          this.pushHistory(message.timestamp_s, target?.azimuth_deg ?? null, target?.elevation_deg ?? null, level, levels);
+          const where = target && this.direction === 'fit' && bank.fit ? bank.fit : target;
+          this.pushHistory(message.timestamp_s, where?.azimuth_deg ?? null, where?.elevation_deg ?? null, level, levels);
         }
       }
       this.advanceDownload(message);

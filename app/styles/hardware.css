@@ -251,6 +251,7 @@
 .fmap__truth::before { left: 8px; top: 0; width: 2px; height: 18px; }
 .fmap__truth::after { top: 8px; left: 0; width: 18px; height: 2px; }
 .fmap__truth.is-dropout::before, .fmap__truth.is-dropout::after { background: var(--warn); }
+.fmap__alt { position: absolute; z-index: 2; width: 16px; height: 16px; border: 2px solid var(--warn); border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); pointer-events: none; }
 
 /* 3D labels in the console */
 .scene-label--name { font: 700 11px var(--font-display); letter-spacing: 0.16em; color: var(--muted); }

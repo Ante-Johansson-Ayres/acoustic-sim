@@ -13,6 +13,8 @@ import { angularEdges, direction } from './geometry.js';
 const RAD = Math.PI / 180;
 const DEG = 180 / Math.PI;
 const SECTOR_MODES = new Set(['F', 'C', 'G']);
+/** Where the Live direction comes from: the firmware's target beam, the backend's pattern fit, or both. */
+export const DIRECTIONS = [['firmware', 'Firmware'], ['fit', 'Fit'], ['both', 'Both']];
 
 const mean = (values) => values.reduce((sum, value) => sum + value, 0) / values.length;
 
@@ -63,7 +65,7 @@ function strongestCell(cells) {
   return best;
 }
 
-function bankField(frame) {
+function bankField(frame, direction) {
   const bank = frame?.bank;
   const grid = bankGrid(bank);
   if (!grid || !bank.levels_db) return null;
@@ -84,6 +86,14 @@ function bankField(frame) {
     }
   }
   const target = bank.target;
+  const fit = bank.fit;
+  // Detection stays the firmware's: the fit only gives the direction of a target that the firmware reports.
+  const own = target ? {kind: 'target', source: 'firmware', azimuth: target.azimuth_deg, elevation: target.elevation_deg,
+    cell: cells[target.beam] ?? null} : null;
+  const fitted = target && Number.isFinite(fit?.azimuth_deg) && Number.isFinite(fit?.elevation_deg)
+    ? {kind: 'target', source: 'fit', azimuth: fit.azimuth_deg, elevation: fit.elevation_deg,
+      cell: cells[cellIndex(grid, columns, rows, fit.azimuth_deg, fit.elevation_deg)] ?? null}
+    : null;
   return {
     kind: 'bank',
     space: 'sine',
@@ -95,10 +105,19 @@ function bankField(frame) {
     columnLabels: grid.uCentres.map((u) => Math.asin(u) * DEG),
     rowLabels: grid.vCentres.map((v) => Math.asin(v) * DEG),
     strongest: strongestCell(cells),
-    marker: target ? {kind: 'target', azimuth: target.azimuth_deg, elevation: target.elevation_deg, cell: cells[target.beam] ?? null} : null,
+    marker: direction === 'fit' ? (fitted ?? own) : own,
+    alt: direction === 'both' ? fitted : null,
     background: median(cells.map((cell) => cell.level)),
     truth: frame.emulator_truth || null,
   };
+}
+
+/** The bank cell that contains a direction (clamped to the grid). */
+function cellIndex(grid, columns, rows, azimuth, elevation) {
+  const column = fraction(grid.u, Math.cos(elevation * RAD) * Math.sin(azimuth * RAD));
+  const row = fraction(grid.v, Math.sin(elevation * RAD));
+  const clamp = (value, count) => Math.min(count - 1, Math.max(0, Math.floor(value)));
+  return clamp(row, rows) * columns + clamp(column, columns);
 }
 
 function sectorField(frame, cellAge, staleMs) {
@@ -149,8 +168,8 @@ function sectorField(frame, cellAge, staleMs) {
   };
 }
 
-export function buildField(frame, kind, {cellAge = () => null, staleMs = 5000} = {}) {
-  return kind === 'bank' ? bankField(frame) : sectorField(frame, cellAge, staleMs);
+export function buildField(frame, kind, {cellAge = () => null, staleMs = 5000, direction = 'firmware'} = {}) {
+  return kind === 'bank' ? bankField(frame, direction) : sectorField(frame, cellAge, staleMs);
 }
 
 function fraction(edges, value) {
