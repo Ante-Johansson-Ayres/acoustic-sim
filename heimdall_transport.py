@@ -116,6 +116,7 @@ class HeimdallTransport:
         self.audio_download_received = 0
         self.audio_download_error: str | None = None
         self.latest_audio: dict[str, Any] | None = None
+        self.recording_times: dict[str, float] = {}
         self.response_condition = threading.Condition(self.lock)
         self.response_sequence = 0
         self.response_records: deque[tuple[int, dict[str, Any]]] = deque(maxlen=64)
@@ -137,6 +138,10 @@ class HeimdallTransport:
                     self.audio_download_expected = 0
                     self.audio_download_received = 0
                     self.audio_download_error = None
+                    # The MCU has no clock: the host time when the record arrives is the best stamp.
+                    self.recording_times = {"started_unix_s": time.time()}
+                elif record_type == "recording_stopped":
+                    self.recording_times = {**self.recording_times, "stopped_unix_s": time.time()}
                 self.response_sequence += 1
                 self.response_records.append((self.response_sequence, record))
                 self.response_condition.notify_all()
@@ -357,7 +362,8 @@ class SerialHeimdallTransport(HeimdallTransport, threading.Thread):
 
         with self.lock:
             if error is None:
-                self.latest_audio = {**header, "pcm": payload}
+                self.latest_audio = {**header, **self.recording_times, "downloaded_unix_s": time.time(),
+                                     "pcm": payload}
                 self.audio_download_received = len(payload)
             else:
                 self.audio_download_error = error

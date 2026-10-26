@@ -148,6 +148,21 @@ export function listenSuffix(filter) {
   return `band-${khz(filter.low)}-${khz(filter.high)}kHz`;
 }
 
+/** The listening copy as the recording record describes it; the backend adds the file name. */
+export function listenRecord(filter, preset) {
+  const suffix = listenSuffix(filter);
+  if (filter.kind === 'bank') {
+    return {suffix, preset, kind: 'bank',
+      design: `bank anti-alias FIR at the recording rate, then the bank band-pass FIR (designed at 12 kHz) ` +
+        `with ${BANK_FACTOR - 1} zeros between its taps`,
+      anti_alias_taps: Array.from(filter.antiAlias), band_pass_taps: Array.from(filter.bandPass),
+      band_pass_factor: BANK_FACTOR};
+  }
+  return {suffix, preset, kind: 'band', low_hz: filter.low, high_hz: filter.high,
+    design: 'fourth-order Butterworth high-pass and second-order Butterworth low-pass (RBJ biquads), ' +
+      'the MCU window filter; the first high-pass section starts settled'};
+}
+
 /** A copy of a WAV file through a listening filter (ArrayBuffer in, ArrayBuffer out). */
 export function listenWav(buffer, filter) {
   const wav = readWav(buffer);

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import datetime
 import io
 import json
 import time
@@ -93,12 +95,96 @@ def test_hardware_recording_metadata_describes_channels_and_settings():
         response = client.get("/hw_recording_metadata.json")
         assert response.status_code == 200
         metadata = response.json()
-        assert metadata["schema"] == "heimdall-recording-v1"
+        assert metadata["schema"] == "heimdall-recording-v2"
         assert metadata["audio"]["channels"] == 2
         assert metadata["audio"]["duration_s"] == 1.0
         assert metadata["channel_roles"] == ["steered_beam", "bank_beam_12"]
         assert metadata["settings"]["window_us"] == 5000
         assert metadata["map_hash"] == "0123456789abcdef"
+        assert metadata["recording"]["started_at"] is None
+        assert metadata["label"] is None
+        assert not metadata["dsp"]["checked"]
+
+
+class DatasetTransport(RecordingTransport):
+    transport_name = "serial:COM7"
+    started = 1792998612.25
+
+    def get_audio_download(self):
+        return {"sample_rate_hz": 48000, "bits_per_sample": 16, "channels": 2, "pcm": b"\1\0\2\0" * 4800,
+                "started_unix_s": self.started, "stopped_unix_s": self.started + 0.1,
+                "downloaded_unix_s": self.started + 2.0}
+
+    def snapshot(self):
+        return {"transport": self.transport_name, "map_hash": "0123456789abcdef",
+                "settings": {"measure": 1, "window_us": 5000, "band_low_hz": 2000},
+                "recording_meta": {"sector": 24, "ch1_source": 1, "ch1_index": 3},
+                "last_steer": {"sector": 24, "azimuth_deg": 10.0, "elevation_deg": -5.0}}
+
+
+def test_recording_save_writes_the_labelled_record_into_the_dataset(monkeypatch, tmp_path):
+    service = sim_server._dsp_service
+    writable = [item for item in service.registry()["parameters"] if item["writable"]]
+    multi = next(item for item in writable if item["words"] > 1)
+    single = next(item for item in writable if item["words"] == 1)
+    edited = multi["address"] + 1
+    memory = {item["address"] + offset: word for item in writable for offset, word in enumerate(item["default_words"])}
+    memory[edited] = multi["default_words"][1] + 7
+    monkeypatch.setenv("HEIMDALL_DATASET_DIR", str(tmp_path))
+    monkeypatch.setattr(service, "supports", lambda transport: (True, ""))
+    monkeypatch.setattr(service, "memory", lambda transport: dict(memory))
+    monkeypatch.setattr(service, "lost", lambda: [{"address": single["address"], "word": 99}])
+    monkeypatch.setattr(sim_server, "_git_state", lambda path: {"commit": "abc", "dirty": False})
+    sim_server._heimdall_transport = DatasetTransport()
+    label = {"class": "drone", "source": "YouTube clip", "distance_m": 1.5, "azimuth_deg": 10, "room": "living room"}
+    copy = {"suffix": "band-0.5-3.5kHz", "preset": "mcu", "kind": "band", "low_hz": 500, "high_hz": 3500}
+    with TestClient(sim_server.app) as client:
+        response = client.post("/hw_recording/save", json={"label": label, "listen_copy": copy})
+        assert response.status_code == 200, response.text
+        record = response.json()
+        relabelled = client.post("/hw_recording/save", json={"label": {**label, "class": "not_drone"}})
+        assert relabelled.status_code == 200, relabelled.text
+    sim_server._heimdall_transport = None
+
+    started = datetime.datetime.fromisoformat(record["recording"]["started_at"])
+    assert started.tzinfo is not None
+    assert started.timestamp() == DatasetTransport.started
+    assert datetime.datetime.fromisoformat(record["recording"]["downloaded_at"]).timestamp() == DatasetTransport.started + 2
+    assert record["label"]["class"] == "drone"
+    assert record["label"]["distance_m"] == 1.5
+    assert record["settings_changed"] == {"band_low_hz": 2000}
+    assert record["dsp"]["edits"] == [{"block": multi["block"], "parameter": multi["name"], "index": 1,
+                                        "address": edited, "word": multi["default_words"][1] + 7,
+                                        "flashed": multi["default_words"][1]}]
+    assert record["dsp"]["put_back_by_I"] == [{"block": single["block"], "parameter": single["name"], "index": None,
+                                                "address": single["address"], "word": 99,
+                                                "flashed": single["default_words"][0]}]
+    stem = record["files"]["wav"].removesuffix(".wav")
+    assert record["listen_copy"]["file"] == stem.split("/")[1] + "-band-0.5-3.5kHz.wav"
+    assert record["host"]["git"]["project"] == {"commit": "abc", "dirty": False}
+    with wave.open(str(tmp_path / record["files"]["wav"]), "rb") as wav:
+        assert wav.getnchannels() == 2
+        assert wav.getnframes() == 4800
+    saved = json.loads((tmp_path / record["files"]["json"]).read_text(encoding="utf-8"))
+    assert saved["label"]["class"] == "not_drone"
+    assert saved["listen_copy"] is None
+    rows = list(csv.DictReader((tmp_path / "index.csv").open(newline="", encoding="utf-8")))
+    assert len(rows) == 1
+    assert rows[0]["class"] == "not_drone"
+    assert rows[0]["channel_roles"] == "steered_beam;microphone_3"
+    assert rows[0]["dsp_edits"] == "1"
+
+
+def test_recording_save_refuses_unknown_labels_and_unsafe_copy_names(monkeypatch, tmp_path):
+    monkeypatch.setenv("HEIMDALL_DATASET_DIR", str(tmp_path))
+    sim_server._heimdall_transport = DatasetTransport()
+    copy = {"preset": "mcu", "kind": "band"}
+    with TestClient(sim_server.app) as client:
+        assert client.post("/hw_recording/save", json={"label": {"class": "bird"}}).status_code == 422
+        assert client.post("/hw_recording/save", json={"label": {"weather": "rain"}}).status_code == 422
+        assert client.post("/hw_recording/save", json={"listen_copy": {**copy, "suffix": "../x"}}).status_code == 422
+    sim_server._heimdall_transport = None
+    assert not any(tmp_path.iterdir())
 
 
 def test_emulator_connect_command_stream_and_disconnect():

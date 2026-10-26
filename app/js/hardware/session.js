@@ -14,7 +14,8 @@ import { fileStamp } from '../shared/format.js';
 import { activeGrid, directionGridCommand, directionGridFailure, directionGridReady, gridMatches } from './dirgrid.js';
 import { median } from './field.js';
 import { outputReplyCode } from './replies.js';
-import { BAND_HIGH_HZ, BAND_LOW_HZ, listenSuffix, listenWav } from './listenfilter.js';
+import { BAND_HIGH_HZ, BAND_LOW_HZ, listenRecord, listenSuffix, listenWav } from './listenfilter.js';
+import { LABEL_KEY, labelPayload, loadLabel } from './reclabel.js';
 import { dsp } from '../study/dsp.js';
 
 const LISTEN_KEY = 'heimdall.listenCopy';
@@ -79,6 +80,7 @@ export class HardwareSession extends EventTarget {
     this.downloadCommandSent = false;
     this.downloadStopSent = false;
     this.listenCopy = loadListenCopy(); // {enabled, preset, low, high}: the filtered copy that Save WAV adds
+    this.recordLabel = loadLabel(globalThis.localStorage); // text as typed; Save WAV writes it into the record
     this.lastLoggedSequence = -1;
     this.lastTargetSector = null;
     this.lastMoveLogged = 0;
@@ -298,6 +300,13 @@ export class HardwareSession extends EventTarget {
     this.emit('listen');
   }
 
+  /** The labels of the next saved recordings; saved in this browser. */
+  setRecordLabel(patch) {
+    this.recordLabel = {...this.recordLabel, ...patch};
+    try { localStorage.setItem(LABEL_KEY, JSON.stringify(this.recordLabel)); } catch (_) { /* storage unavailable */ }
+    this.emit('label');
+  }
+
   /** The filter of the listening copy: {kind: 'band', low, high} or {kind: 'bank', antiAlias, bandPass}. */
   async listenFilter() {
     const {preset, low, high} = this.listenCopy;
@@ -506,27 +515,32 @@ export class HardwareSession extends EventTarget {
     this.downloadCommandSent = false;
     this.downloadStopSent = false;
     try {
-      const [audioResponse, metadataResponse] = await Promise.all([
-        fetch(API_BASE + '/hw_recording.wav'),
-        fetch(API_BASE + '/hw_recording_metadata.json'),
-      ]);
-      if (!audioResponse.ok) throw new Error(await audioResponse.text());
-      if (!metadataResponse.ok) throw new Error(await metadataResponse.text());
-      const stamp = fileStamp();
-      const audio = await audioResponse.blob();
-      download(audio, `heimdall-${stamp}.wav`);
-      let copy = null;
-      if (this.listenCopy.enabled) {
-        const filter = await this.listenFilter();
-        copy = listenSuffix(filter);
-        download(new Blob([listenWav(await audio.arrayBuffer(), filter)], {type: 'audio/wav'}),
-          `heimdall-${stamp}-${copy}.wav`);
+      const filter = this.listenCopy.enabled ? await this.listenFilter() : null;
+      const {label, problems} = labelPayload(this.recordLabel);
+      problems.forEach((problem) => this.addEvent('AUDIO', `Label left out: ${problem}`, 'warning'));
+      let record;
+      try {
+        record = await apiJson('/hw_recording/save', {method: 'POST', body: {
+          label, listen_copy: filter ? listenRecord(filter, this.listenCopy.preset) : null}});
+      } catch (error) {
+        this.addEvent('ERROR', `Not saved in the dataset folder: ${error.message}`, 'error');
+        record = await apiJson('/hw_recording_metadata.json');
       }
-      download(new Blob([JSON.stringify(await metadataResponse.json(), null, 2) + '\n'],
-        {type: 'application/json'}), `heimdall-${stamp}.json`);
-      this.addEvent('AUDIO', copy
-        ? `WAV, ${copy} copy and metadata saved and checksum-verified`
-        : 'WAV and metadata saved and checksum-verified');
+      const audioResponse = await fetch(API_BASE + '/hw_recording.wav');
+      if (!audioResponse.ok) throw new Error(await audioResponse.text());
+      const audio = await audioResponse.blob();
+      const stem = record.files ? record.files.wav.split('/').pop().replace(/\.wav$/, '') : `heimdall-${fileStamp()}`;
+      download(audio, `${stem}.wav`);
+      if (filter) {
+        download(new Blob([listenWav(await audio.arrayBuffer(), filter)], {type: 'audio/wav'}),
+          record.listen_copy?.file || `${stem}-${listenSuffix(filter)}.wav`);
+      }
+      const {dataset_folder: folder, ...sidecar} = record;
+      download(new Blob([JSON.stringify(sidecar, null, 2) + '\n'], {type: 'application/json'}), `${stem}.json`);
+      const what = filter ? 'WAV, filtered copy and record' : 'WAV and record';
+      this.addEvent('AUDIO', folder
+        ? `${what} downloaded (checksum-verified); WAV and record also saved in ${folder}`
+        : `${what} downloaded (checksum-verified)`);
     } catch (error) {
       this.addEvent('ERROR', `Saving the recording failed: ${error.message}`, 'error');
     }

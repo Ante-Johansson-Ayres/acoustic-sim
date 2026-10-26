@@ -359,6 +359,37 @@ def test_serial_audio_payload_uses_exact_length_not_newline_framing():
     assert transport.serial.writes == [b"\x06", b"\x06"]
 
 
+def test_serial_audio_download_carries_the_host_times_of_the_recording():
+    class FakeSerial:
+        def write(self, data):
+            return len(data)
+
+        def flush(self):
+            pass
+
+    transport = SerialHeimdallTransport.__new__(SerialHeimdallTransport)
+    HeimdallTransport.__init__(transport)
+    transport.rx_buffer = bytearray()
+    transport.audio_header = None
+    transport.audio_payload = bytearray()
+    transport.audio_acknowledged = 0
+    transport.audio_block_started = 0.0
+    transport.write_lock = __import__("threading").Lock()
+    transport.serial = FakeSerial()
+
+    before = time.time()
+    transport._process_received_data(b"REC_STARTED,48000,16,1\nREC_STOPPED,4,8,-123,456,47,0,987654321\n")
+    pcm = b"\x00\x01\xff\x7f\x00\x80\x01\x00"
+    crc = zlib.crc32(pcm) & 0xFFFFFFFF
+    transport._process_received_data(f"AUDIO_BEGIN,2,{len(pcm)},48000,16,1,8,{crc:08X}\n".encode("ascii")
+                                     + pcm + f"\nAUDIO_END,{crc:08X}\n".encode("ascii"))
+
+    captured = transport.get_audio_download()
+    assert captured is not None
+    assert before <= captured["started_unix_s"] <= captured["stopped_unix_s"] <= captured["downloaded_unix_s"]
+    assert captured["downloaded_unix_s"] <= time.time()
+
+
 def test_serial_audio_download_that_stalls_goes_back_to_text_records():
     class FakeSerial:
         def __init__(self):

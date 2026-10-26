@@ -174,6 +174,15 @@
 .line { display: flex; align-items: center; gap: 10px; }
 .line__k { width: 58px; flex: none; font-size: 12px; color: var(--muted); }
 .line .select { flex: 1; min-width: 0; }
+.labels > summary { font-size: 12px; }
+.labels__summary { font-weight: 400; color: var(--subtle); }
+.labels__grid { max-height: 230px; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; padding: 8px 4px 6px 0; }
+.labels__grid .field { gap: 4px; min-width: 0; }
+.labels__grid .field > label { font-size: 12px; }
+.labels__grid .input, .labels__grid .select { width: 100%; min-width: 0; }
+.labels__grid textarea.input { height: auto; padding: 6px 10px; resize: vertical; }
+.labels__grid .field--wide { grid-column: 1 / -1; }
+.labels [aria-invalid="true"] { border-color: var(--danger); }
 .timeline { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .hw-charts { flex: 1; min-height: 0; display: grid; grid-template-rows: 1fr 1fr; gap: 14px; padding-top: 6px; }
 .hw-chart { margin: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 6px; }

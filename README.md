@@ -61,7 +61,7 @@ set, else its default in `../MAX78002/project.mk`. From that folder, it reads th
 | Field | One tile for each beam, in 3D (`Show`: tiles, `Surface` or `Point cloud`) or as a flat `Map`. `Floor` is an absolute colour floor in dBFS. The GUI does not normalise the frames to their own peak, so weak frames stay dark. |
 | Source | Marks its answer `LOCKED` (a tracked or Live target), `HOLDING` (a held beam) or `STRONGEST` (the strongest cell of a scan). Hatched cells are more than 5 s old. `Above background` is the level above the median of the map, not a confidence. The system gives the direction only, not the range. |
 | Diagnostics | `Direction updates` (the rate of `TARGET_UPDATED`) against `Full scans` (from `TIMING`). `Freeze display` stops only the screen updates. To stop the firmware, click `Stop`. With an emulator: the true source direction (a green cross), and `Listen` for the acoustic emulator. |
-| Audio | `Record`, `Stop` and `Save WAV` (48 kHz stereo, with a JSON sidecar file). `Save WAV` first stops a running scan. |
+| Audio | `Record`, `Stop` and `Save WAV` (48 kHz stereo, with a JSON record: times, labels, DSP edits, filter of the copy). `Save WAV` first stops a running scan. `Labels` sets the class, source, distance and direction of the next recordings. The backend also saves the WAV and the record in `../datasets/heimdall_recordings` (or `HEIMDALL_DATASET_DIR`), with a row in `index.csv`. Fields: [REFERENCE.md section 4.16](../MAX78002/docs/REFERENCE.md#416-recording-and-download). |
 
 In serial mode, the grid comes from the firmware. To change it, generate the table again and flash
 the firmware again. Emulator grids can have 1-20 rows and columns.

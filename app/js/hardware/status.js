@@ -9,6 +9,7 @@ import { clockTime, deg, hz, num, signed } from '../shared/format.js';
 import { look } from '../shared/look.js';
 import { ledBoard } from '../shared/led.js';
 import { ledText, sideWord } from './lookparts.js';
+import { LABEL_CLASSES, LABEL_FIELDS, labelSummary, parseNumber } from './reclabel.js';
 import { LISTEN_PRESETS } from './session.js';
 
 export function operatingMode(session) {
@@ -131,6 +132,24 @@ export class AudioPanel {
     h('label', {class: 'check'}, bandBox, 'Also save a copy through'), preset);
     session.addEventListener('listen', () => this.renderListen());
     this.renderListen();
+    this.labelInputs = LABEL_FIELDS.map((field) => {
+      const id = `rec-label-${field.key}`;
+      const input = field.kind === 'class'
+        ? h('select', {id, class: 'select select--sm'}, options(LABEL_CLASSES, session.recordLabel.class))
+        : h(field.kind === 'text' ? 'textarea' : 'input', {id, class: 'input input--sm', rows: field.kind === 'text' ? 2 : undefined,
+          type: field.kind === 'text' ? undefined : 'text', inputmode: field.kind === 'number' ? 'decimal' : undefined,
+          placeholder: field.placeholder, value: session.recordLabel[field.key]});
+      input.addEventListener('change', () => session.setRecordLabel({[field.key]: input.value}));
+      return {field, input, el: h('div', {class: `field${field.wide ? ' field--wide' : ''}`}, h('label', {for: id}, field.label), input)};
+    });
+    this.labelSummary = h('span', {class: 'labels__summary'});
+    this.labels = h('details', {class: 'disclosure labels'},
+      h('summary', {}, 'Labels: ', this.labelSummary),
+      h('div', {class: 'labels__grid'}, this.labelInputs.map(({el}) => el)),
+      h('p', {class: 'note'}, 'Save WAV writes these labels into the record and saves the WAV and the record in the ' +
+        'dataset folder. The labels stay until you change them.'));
+    session.addEventListener('label', () => this.renderLabels());
+    this.renderLabels();
     this.recText = h('p', {class: 'note'});
     this.recProgress = h('progress', {max: 1, value: 0, hidden: true});
     this.el = h('section', {class: 'panel audio', 'aria-labelledby': 'hw-audio-title'},
@@ -139,6 +158,7 @@ export class AudioPanel {
         this.listen,
         h('div', {class: 'line'}, h('span', {class: 'line__k'}, 'Record'), this.recButton, this.saveButton),
         this.bandCopy,
+        this.labels,
         this.recProgress,
         this.recText));
   }
@@ -149,6 +169,17 @@ export class AudioPanel {
     this.preset.value = preset;
     const custom = this.preset.querySelector('option[value="custom"]');
     if (custom) custom.textContent = `Custom band ${low / 1000}-${high / 1000} kHz`;
+  }
+
+  renderLabels() {
+    const label = this.session.recordLabel;
+    setText(this.labelSummary, labelSummary(label));
+    for (const {field, input} of this.labelInputs) {
+      if (document.activeElement !== input) input.value = label[field.key] ?? '';
+      const bad = field.kind === 'number' && Number.isNaN(parseNumber(label[field.key]));
+      input.setAttribute('aria-invalid', String(bad));
+      input.title = bad ? 'Not a number: Save WAV leaves this label out' : '';
+    }
   }
 
   build(frame) {

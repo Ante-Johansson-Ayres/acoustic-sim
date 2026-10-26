@@ -10,14 +10,18 @@ Usage:
 
 import asyncio
 import base64
+import csv
+import datetime
 import io
 import json
+import os
 import pathlib
 import re
+import subprocess
 import time
 import wave
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pyroomacoustics as pra
@@ -25,7 +29,7 @@ import scipy.io.wavfile as wavfile
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
 from starlette.websockets import WebSocketClose
 
@@ -1486,8 +1490,53 @@ def study_theory_cut(axis: str = "azimuth", steer_azimuth_deg: float = 0.0,
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
-@app.get("/hw_recording.wav")
-def hw_recording_wav():
+RECORDING_SCHEMA = "heimdall-recording-v2"
+DATASET_ENV = "HEIMDALL_DATASET_DIR"
+PROJECT_DIR = pathlib.Path(__file__).resolve().parent.parent
+INDEX_FIELDS = [
+    "file", "started_at", "stopped_at", "duration_s", "channels", "channel_roles",
+    "class", "source", "source_url", "licence", "clip_offset_s", "distance_m", "azimuth_deg", "elevation_deg",
+    "level", "room", "session", "notes", "steer_azimuth_deg", "steer_elevation_deg", "map_hash", "dsp_edits",
+    "dsp_put_back_by_I", "settings_changed", "listen_copy",
+]
+_dataset_lock = threading.Lock()
+
+
+class RecordingLabel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    label_class: Literal["drone", "not_drone"] | None = Field(None, alias="class")
+    source: str = ""
+    source_url: str = ""
+    licence: str = ""
+    clip_offset_s: float | None = None
+    distance_m: float | None = None
+    azimuth_deg: float | None = None
+    elevation_deg: float | None = None
+    level: str = ""
+    room: str = ""
+    session: str = ""
+    notes: str = ""
+
+
+class ListenCopyRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    suffix: str = Field(pattern=r"^[A-Za-z0-9._-]{1,64}$")
+    preset: str
+    kind: Literal["band", "bank"]
+    low_hz: float | None = None
+    high_hz: float | None = None
+    design: str = ""
+    anti_alias_taps: list[float] | None = None
+    band_pass_taps: list[float] | None = None
+    band_pass_factor: int | None = None
+
+
+class RecordingSaveRequest(BaseModel):
+    label: RecordingLabel = RecordingLabel()
+    listen_copy: ListenCopyRecord | None = None
+
+
+def _active_capture():
     with _heimdall_transport_lock:
         transport = _heimdall_transport
     if transport is None:
@@ -1495,31 +1544,73 @@ def hw_recording_wav():
     capture = transport.get_audio_download()
     if capture is None:
         raise HTTPException(status_code=404, detail="no completed audio download is available")
+    return transport, capture
+
+
+def _wav_bytes(capture) -> bytes:
     if capture["bits_per_sample"] != 16 or capture["channels"] not in {1, 2}:
         raise HTTPException(status_code=422, detail="unsupported captured PCM format")
-
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
         wav.setnchannels(capture["channels"])
         wav.setsampwidth(capture["bits_per_sample"] // 8)
         wav.setframerate(capture["sample_rate_hz"])
         wav.writeframes(capture["pcm"])
-    return Response(
-        content=output.getvalue(),
-        media_type="audio/wav",
-        headers={"Content-Disposition": "attachment; filename=heimdall-recording.wav"},
-    )
+    return output.getvalue()
 
 
-@app.get("/hw_recording_metadata.json")
-def hw_recording_metadata():
-    with _heimdall_transport_lock:
-        transport = _heimdall_transport
-    if transport is None:
-        raise HTTPException(status_code=404, detail="no hardware transport is active")
-    capture = transport.get_audio_download()
-    if capture is None:
-        raise HTTPException(status_code=404, detail="no completed audio download is available")
+def _iso_time(unix_s):
+    if unix_s is None:
+        return None
+    return datetime.datetime.fromtimestamp(unix_s).astimezone().isoformat(timespec="milliseconds")
+
+
+def _git_state(path):
+    """Commit and uncommitted tracked changes of one repository, or None."""
+    try:
+        commit = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True,
+                                text=True, timeout=5, check=True).stdout.strip()
+        changes = subprocess.run(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no"],
+                                 capture_output=True, text=True, timeout=15, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {"commit": commit, "dirty": bool(changes)}
+
+
+def _dsp_record(transport):
+    """The Study's DSP edits at save time, and the edits that a boot check (I) or a program load put back."""
+    try:
+        supported, reason = _dsp_service.supports(transport)
+        if not supported:
+            return {"checked": False, "reason": reason}
+        registry = _dsp_service.registry()
+        memory = _dsp_service.memory(transport)
+        lost = _dsp_service.lost()
+    except (FileNotFoundError, PermissionError, RuntimeError) as error:
+        return {"checked": False, "reason": str(error)}
+    words = {}
+    for item in registry["parameters"]:
+        if item["writable"]:
+            for offset, flashed in enumerate(item["default_words"]):
+                words[item["address"] + offset] = (item, offset, flashed)
+
+    def entry(address, word):
+        item, offset, flashed = words[address]
+        return {"block": item["block"], "parameter": item["name"],
+                "index": offset if item["words"] > 1 else None,
+                "address": address, "word": word, "flashed": flashed}
+
+    return {
+        "checked": True,
+        "export_sha256": registry["export"]["sha256"],
+        "edits": [entry(address, memory[address]) for address in sorted(words)
+                  if memory.get(address, words[address][2]) != words[address][2]],
+        # Each put-back word ran as flashed; "word" is the edit that the board lost.
+        "put_back_by_I": [entry(item["address"], item["word"]) for item in lost if item["address"] in words],
+    }
+
+
+def _recording_record(transport, capture):
     snapshot = transport.snapshot()
     channels = int(capture["channels"])
     bytes_per_frame = channels * int(capture["bits_per_sample"]) // 8
@@ -1531,17 +1622,18 @@ def hw_recording_metadata():
         index = int(recording_meta.get("ch1_index", 0))
         roles.append({0: "steered_beam", 1: f"microphone_{index}",
                       2: f"bank_beam_{index}"}.get(source, "unknown"))
+    settings = snapshot.get("settings") or {}
+    defaults = DspParameterService._default_settings()
     return {
-        "schema": "heimdall-recording-v1",
-        "generated_at_unix_s": time.time(),
-        "transport": snapshot.get("transport"),
-        "map_hash": snapshot.get("map_hash"),
-        "configuration": snapshot.get("configuration"),
-        "steering": snapshot.get("last_steer"),
-        "recording_meta": recording_meta,
-        "channel_roles": roles,
-        "settings": snapshot.get("settings") or {},
-        "direction_set": snapshot.get("direction_set"),
+        "schema": RECORDING_SCHEMA,
+        "recording": {
+            "started_at": _iso_time(capture.get("started_unix_s")),
+            "stopped_at": _iso_time(capture.get("stopped_unix_s")),
+            "downloaded_at": _iso_time(capture.get("downloaded_unix_s")),
+            "clock": "host clock when the board reported the start and the stop",
+        },
+        "label": None,
+        "files": None,
         "audio": {
             "sample_rate_hz": int(capture["sample_rate_hz"]),
             "bits_per_sample": int(capture["bits_per_sample"]),
@@ -1549,7 +1641,107 @@ def hw_recording_metadata():
             "frames": frames,
             "duration_s": frames / int(capture["sample_rate_hz"]),
         },
+        "channel_roles": roles,
+        "steering": snapshot.get("last_steer"),
+        "settings": settings,
+        "settings_changed": {key: value for key, value in settings.items()
+                             if key in defaults and value != defaults[key]},
+        "dsp": _dsp_record(transport),
+        "listen_copy": None,
+        "transport": snapshot.get("transport"),
+        "map_hash": snapshot.get("map_hash"),
+        "configuration": snapshot.get("configuration"),
+        "recording_meta": recording_meta,
+        "direction_set": snapshot.get("direction_set"),
+        "host": {"git": {"project": _git_state(PROJECT_DIR),
+                         "acoustic_sim": _git_state(pathlib.Path(__file__).resolve().parent)}},
+        "generated_at_unix_s": time.time(),
     }
+
+
+def _dataset_dir() -> pathlib.Path:
+    configured = os.environ.get(DATASET_ENV)
+    return pathlib.Path(configured) if configured else PROJECT_DIR / "datasets" / "heimdall_recordings"
+
+
+def _index_row(record) -> dict[str, Any]:
+    label = record["label"] or {}
+    steering = record["steering"] or {}
+    dsp = record["dsp"]
+    return {
+        **{key: label.get(key) for key in INDEX_FIELDS if key in label},
+        "file": record["files"]["wav"],
+        "started_at": record["recording"]["started_at"],
+        "stopped_at": record["recording"]["stopped_at"],
+        "duration_s": round(record["audio"]["duration_s"], 3),
+        "channels": record["audio"]["channels"],
+        "channel_roles": ";".join(record["channel_roles"]),
+        "steer_azimuth_deg": steering.get("azimuth_deg"),
+        "steer_elevation_deg": steering.get("elevation_deg"),
+        "map_hash": record["map_hash"],
+        "dsp_edits": len(dsp["edits"]) if dsp.get("checked") else "not checked",
+        "dsp_put_back_by_I": len(dsp["put_back_by_I"]) if dsp.get("checked") else "not checked",
+        "settings_changed": json.dumps(record["settings_changed"], sort_keys=True),
+        "listen_copy": (record["listen_copy"] or {}).get("file", ""),
+    }
+
+
+def _save_to_dataset(record, wav: bytes, root: pathlib.Path) -> None:
+    """Write the WAV and the record; one index row per WAV (a second save of the same capture replaces it)."""
+    folder = root / record["files"]["wav"].split("/")[0]
+    folder.mkdir(parents=True, exist_ok=True)
+    (root / record["files"]["wav"]).write_bytes(wav)
+    (root / record["files"]["json"]).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    index = root / "index.csv"
+    rows = []
+    if index.exists():
+        with index.open(newline="", encoding="utf-8") as handle:
+            rows = [row for row in csv.DictReader(handle) if row.get("file") != record["files"]["wav"]]
+    rows.append(_index_row(record))
+    with index.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=INDEX_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+@app.get("/hw_recording.wav")
+def hw_recording_wav():
+    _, capture = _active_capture()
+    return Response(
+        content=_wav_bytes(capture),
+        media_type="audio/wav",
+        headers={"Content-Disposition": "attachment; filename=heimdall-recording.wav"},
+    )
+
+
+@app.get("/hw_recording_metadata.json")
+def hw_recording_metadata():
+    transport, capture = _active_capture()
+    return _recording_record(transport, capture)
+
+
+@app.post("/hw_recording/save")
+def hw_recording_save(request: RecordingSaveRequest):
+    """Label the last download and save it with its record into the dataset folder; returns the record."""
+    transport, capture = _active_capture()
+    wav = _wav_bytes(capture)
+    record = _recording_record(transport, capture)
+    stamp_s = capture.get("started_unix_s") or capture.get("downloaded_unix_s") or time.time()
+    local = datetime.datetime.fromtimestamp(stamp_s).astimezone()
+    stem = f"heimdall-{local.strftime('%Y-%m-%dT%H-%M-%S')}"
+    day = local.strftime("%Y-%m-%d")
+    record["label"] = request.label.model_dump(by_alias=True)
+    record["files"] = {"wav": f"{day}/{stem}.wav", "json": f"{day}/{stem}.json"}
+    if request.listen_copy is not None:
+        copy = request.listen_copy.model_dump(exclude_none=True)
+        record["listen_copy"] = {"file": f"{stem}-{copy.pop('suffix')}.wav", "saved_in_dataset": False, **copy}
+    root = _dataset_dir()
+    try:
+        with _dataset_lock:
+            _save_to_dataset(record, wav, root)
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Could not save into the dataset folder {root}: {error}") from error
+    return {**record, "dataset_folder": str(root)}
 
 
 @app.websocket("/realtime_hw")
